@@ -15,6 +15,7 @@ const ONION_TUNNEL_ERROR: u16 = 565;
 const ONION_TUNNEL_COVER: u16 = 566;
 
 /// Messages received by the onion module.
+#[derive(Debug)]
 pub enum Request {
     /// This message is to be used by the CM/UI module to request the Onion module to build a tunnel
     /// to the given destination in the next period.
@@ -81,6 +82,7 @@ impl Request {
 }
 
 /// Messages sent by the onion module.
+#[derive(Debug)]
 pub enum Response<'a> {
     /// This message is sent by the Onion module when the requested tunnel is built. The recipient
     /// is allowed to send data in this tunnel after receiving this message. It contains the
@@ -95,6 +97,12 @@ pub enum Response<'a> {
     /// for this tunnel ID. An incoming tunnel is to be destroyed only if all the API connections
     /// sent a ONION TUNNEL DESTROY for it.
     Incoming(/* tunnel_id */ u32),
+    /// This message is used to ask Onion to forward data through a tunnel. It is also used by Onion
+    /// to deliver data from an incoming tunnel. The tunnel ID in the message corresponds to the
+    /// tunnel which is used to forwarding the data; for incoming data it is the tunnel on which the
+    /// data is received. For outgoing data, Onion should make a best effort to forward the given
+    /// data. However, no guarantee is given: the data could be lost and/or delivered out of order.
+    Data(/* tunnel_id */ u32, /* tunnel_data */ &'a [u8]),
     /// This message is sent by the Onion module to signal an error condition which stems from
     /// servicing an earlier request. The message contains the tunnel ID to signal the failure of an
     /// established tunnel. The reported error condition is not be mistaken with API violations.
@@ -116,6 +124,12 @@ impl Response<'_> {
                 w.write_u16::<BE>(8)?;
                 w.write_u16::<BE>(ONION_TUNNEL_INCOMING)?;
                 w.write_u32::<BE>(*tunnel_id)?;
+            },
+            Response::Data(tunnel_id, tunnel_data) => {
+                w.write_u16::<BE>(8 + tunnel_data.len() as u16)?;
+                w.write_u16::<BE>(ONION_TUNNEL_DATA)?;
+                w.write_u32::<BE>(*tunnel_id)?;
+                w.write_all(tunnel_data)?;
             },
             Response::Error(request_type, tunnel_id) => {
                 w.write_u16::<BE>(12)?;
