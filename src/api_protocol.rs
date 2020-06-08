@@ -1,8 +1,10 @@
+use std::error::Error;
+use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::io::{Write, Read};
-use byteorder::{WriteBytesExt, ReadBytesExt};
 
-use super::Result;
+use byteorder::{ReadBytesExt, WriteBytesExt};
+
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 type BE = byteorder::BigEndian;
 
@@ -16,7 +18,7 @@ const ONION_TUNNEL_COVER: u16 = 566;
 
 /// Messages received by the onion module.
 #[derive(Debug)]
-pub enum Request {
+pub enum OnionRequest {
     /// This message is to be used by the CM/UI module to request the Onion module to build a tunnel
     /// to the given destination in the next period.
     Build(/* onion_port */ u16, /* dst_addr */ IpAddr, /* dst_hostkey */ Vec<u8>),
@@ -40,50 +42,43 @@ pub enum Request {
     Cover(/* cover_size */ u16),
 }
 
-impl Request {
+impl OnionRequest {
     pub fn read_from<R: Read>(r: &mut R) -> Result<Self> {
-        let size = r.read_u16::<BE>()?;
+        let size = r.read_u16::<BE>()? as usize;
         let message_type = r.read_u16::<BE>()?;
         return match message_type {
             ONION_TUNNEL_BUILD => {
                 let flag = r.read_u16::<BE>()?;
                 let onion_port = r.read_u16::<BE>()?;
-                let ip_addr = if (flag & 1) == 0 {
-                    let addr = r.read_u32::<BE>()?;
-                    r.read_u32::<BE>()?;
-                    IpAddr::V4(Ipv4Addr::from(addr))
-                } else {
-                    let addr = r.read_u128::<BE>()?;
-                    IpAddr::V6(Ipv6Addr::from(addr))
-                };
+                let dst_addr = read_ip_addr_from(r, (flag & 1) == 0)?;
 
-                let mut dst_hostkey = vec![0u8; size as usize - 24];
+                let mut dst_hostkey = vec![0u8; size - 8 - 16];
                 r.read_exact(&mut dst_hostkey)?;
-                Ok(Request::Build(onion_port, ip_addr, dst_hostkey))
-            },
+                Ok(OnionRequest::Build(onion_port, dst_addr, dst_hostkey))
+            }
             ONION_TUNNEL_DESTROY => {
                 let tunnel_id = r.read_u32::<BE>()?;
-                Ok(Request::Destroy(tunnel_id))
-            },
+                Ok(OnionRequest::Destroy(tunnel_id))
+            }
             ONION_TUNNEL_DATA => {
                 let tunnel_id = r.read_u32::<BE>()?;
                 let mut data = vec![0u8; size as usize - 8];
                 r.read_exact(&mut data)?;
-                Ok(Request::Data(tunnel_id, data))
-            },
+                Ok(OnionRequest::Data(tunnel_id, data))
+            }
             ONION_TUNNEL_COVER => {
                 let cover_size = r.read_u16::<BE>()?;
                 r.read_u16::<BE>()?;
-                Ok(Request::Cover(cover_size))
-            },
-            _ => Err("Unknown message type".into())
-        }
+                Ok(OnionRequest::Cover(cover_size))
+            }
+            _ => Err(format!("Unknown onion message type: {}", message_type).into())
+        };
     }
 }
 
 /// Messages sent by the onion module.
 #[derive(Debug)]
-pub enum Response<'a> {
+pub enum OnionResponse<'a> {
     /// This message is sent by the Onion module when the requested tunnel is built. The recipient
     /// is allowed to send data in this tunnel after receiving this message. It contains the
     /// identity of the destination peer and a tunnel ID which is assigned by the Onion moduel to
@@ -111,34 +106,130 @@ pub enum Response<'a> {
     Error(/* request_type */ u16, /* tunnel_id */ u32),
 }
 
-impl Response<'_> {
+impl OnionResponse<'_> {
     pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
         match self {
-            Response::Ready(tunnel_id, dst_hostkey) => {
+            OnionResponse::Ready(tunnel_id, dst_hostkey) => {
                 w.write_u16::<BE>(8 + dst_hostkey.len() as u16)?;
                 w.write_u16::<BE>(ONION_TUNNEL_READY)?;
                 w.write_u32::<BE>(*tunnel_id)?;
                 w.write_all(dst_hostkey)?;
-            },
-            Response::Incoming(tunnel_id) => {
+            }
+            OnionResponse::Incoming(tunnel_id) => {
                 w.write_u16::<BE>(8)?;
                 w.write_u16::<BE>(ONION_TUNNEL_INCOMING)?;
                 w.write_u32::<BE>(*tunnel_id)?;
-            },
-            Response::Data(tunnel_id, tunnel_data) => {
+            }
+            OnionResponse::Data(tunnel_id, tunnel_data) => {
                 w.write_u16::<BE>(8 + tunnel_data.len() as u16)?;
                 w.write_u16::<BE>(ONION_TUNNEL_DATA)?;
                 w.write_u32::<BE>(*tunnel_id)?;
                 w.write_all(tunnel_data)?;
-            },
-            Response::Error(request_type, tunnel_id) => {
+            }
+            OnionResponse::Error(request_type, tunnel_id) => {
                 w.write_u16::<BE>(12)?;
                 w.write_u16::<BE>(ONION_TUNNEL_ERROR)?;
                 w.write_u16::<BE>(*request_type)?;
                 w.write_u16::<BE>(0)?;
                 w.write_u32::<BE>(*tunnel_id)?;
-            },
+            }
         }
         Ok(())
+    }
+}
+
+const RPS_QUERY: u16 = 540;
+const RPS_PEER: u16 = 541;
+
+const MODULE_DHT: u16 = 650;
+const MODULE_GOSSIP: u16 = 500;
+const MODULE_NSE: u16 = 520;
+const MODULE_ONION: u16 = 560;
+
+#[derive(Debug)]
+enum Module {
+    Dht,
+    Gossip,
+    Nse,
+    Onion,
+}
+
+impl Module {
+    pub fn from_id(id: u16) -> Result<Self> {
+        match id {
+            MODULE_DHT => Ok(Module::Dht),
+            MODULE_GOSSIP => Ok(Module::Gossip),
+            MODULE_NSE => Ok(Module::Nse),
+            MODULE_ONION => Ok(Module::Onion),
+            _ => Err(format!("Unknown module id: {}", id).into())
+        }
+    }
+}
+
+/// Messages received by the RPS module.
+#[derive(Debug)]
+enum RpsRequest {
+    /// This message is used to ask RPS to reply with a random peer.
+    Query,
+}
+
+impl RpsRequest {
+    pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
+        match self {
+            RpsRequest::Query => {
+                w.write_u16::<BE>(4)?;
+                w.write_u16::<BE>(RPS_QUERY)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Messages sent by the RPS module.
+#[derive(Debug)]
+enum RpsResponse {
+    /// This message is sent by the RPS module as a response to the RPS QUERY message. It contains
+    /// the peer identity and the network address of a peer which is selected by RPS at random. In
+    /// addition to this it also contains a portmap for the P2P listen ports of the various modules
+    /// on the random peer. RPS should sample random peers from the currently online peers.
+    /// Therefore the peer sent in this message is very likely to be online, but no guarantee can be
+    /// made about its availability.
+    Peer(/* port */ u16, /* portmap */ Vec<(Module, u16)>, /* peer_addr */ IpAddr, /* peer_hostkey */ Vec<u8>),
+}
+
+impl RpsResponse {
+    pub fn read_from<R: Read>(r: &mut R) -> Result<Self> {
+        let size = r.read_u16::<BE>()? as usize;
+        let message_type = r.read_u16::<BE>()?;
+        return match message_type {
+            RPS_PEER => {
+                let port = r.read_u16::<BE>()?;
+                let portmap_len = r.read_u8()? as usize;
+                let flag = r.read_u8()?;
+
+                let mut portmap = Vec::with_capacity(portmap_len);
+                for _ in 0..portmap_len {
+                    let mod_id = r.read_u16::<BE>()?;
+                    let port = r.read_u16::<BE>()?;
+                    portmap.push((Module::from_id(mod_id)?, port))
+                }
+
+                let peer_addr = read_ip_addr_from(r, (flag & 1) == 0)?;
+                let mut peer_hostkey = vec![0u8; size - 8 - portmap_len * 4 - 16];
+                r.read_exact(&mut peer_hostkey)?;
+                Ok(RpsResponse::Peer(port, portmap, peer_addr, peer_hostkey))
+            }
+            _ => Err(format!("Unknown RPS message type: {}", message_type).into())
+        };
+    }
+}
+
+pub fn read_ip_addr_from<R: Read>(r: &mut R, is_ipv4: bool) -> Result<IpAddr> {
+    let mut buf = [0u8; 16];
+    r.read_exact(&mut buf)?;
+    if is_ipv4 {
+        Ok(IpAddr::V4(Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3])))
+    } else {
+        Ok(IpAddr::V6(Ipv6Addr::from(buf)))
     }
 }
