@@ -50,9 +50,9 @@ impl OnionRequest {
             ONION_TUNNEL_BUILD => {
                 let flag = r.read_u16::<BE>()?;
                 let onion_port = r.read_u16::<BE>()?;
-                let dst_addr = read_ip_addr_from(r, (flag & 1) == 0)?;
+                let (dst_addr, addr_len) = read_ip_addr_from(r, (flag & 1) == 0)?;
 
-                let mut dst_hostkey = vec![0u8; size - 8 - 16];
+                let mut dst_hostkey = vec![0u8; size - 8 - addr_len];
                 r.read_exact(&mut dst_hostkey)?;
                 Ok(OnionRequest::Build(onion_port, dst_addr, dst_hostkey))
             }
@@ -214,8 +214,8 @@ impl RpsResponse {
                     portmap.push((Module::from_id(mod_id)?, port))
                 }
 
-                let peer_addr = read_ip_addr_from(r, (flag & 1) == 0)?;
-                let mut peer_hostkey = vec![0u8; size - 8 - portmap_len * 4 - 16];
+                let (peer_addr, addr_len) = read_ip_addr_from(r, (flag & 1) == 0)?;
+                let mut peer_hostkey = vec![0u8; size - 8 - portmap_len * 4 - addr_len];
                 r.read_exact(&mut peer_hostkey)?;
                 Ok(RpsResponse::Peer(port, portmap, peer_addr, peer_hostkey))
             }
@@ -224,12 +224,16 @@ impl RpsResponse {
     }
 }
 
-pub fn read_ip_addr_from<R: Read>(r: &mut R, is_ipv4: bool) -> Result<IpAddr> {
-    let mut buf = [0u8; 16];
-    r.read_exact(&mut buf)?;
+/// Reads an IPv4 or IPv6 address from `r` depending on `is_ipv4`.
+/// Returns the parsed `IpAddr` and the number of bytes read, which is either 4 or 16.
+pub fn read_ip_addr_from<R: Read>(r: &mut R, is_ipv4: bool) -> Result<(IpAddr, usize)> {
     if is_ipv4 {
-        Ok(IpAddr::V4(Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3])))
+        let mut buf = [0u8; 4];
+        r.read_exact(&mut buf)?;
+        Ok((IpAddr::V4(Ipv4Addr::from(buf)), 4))
     } else {
-        Ok(IpAddr::V6(Ipv6Addr::from(buf)))
+        let mut buf = [0u8; 16];
+        r.read_exact(&mut buf)?;
+        Ok((IpAddr::V6(Ipv6Addr::from(buf)), 16))
     }
 }
