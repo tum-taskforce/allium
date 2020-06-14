@@ -107,7 +107,9 @@ impl OnionModule {
                 OnionRequest::Build(onion_port, dst_addr, dst_hostkey) => {
                     let mut peers = self.select_hops(3).await?;
                     peers.push(Peer::new(dst_addr, onion_port, dst_hostkey));
-                    self.onion.build_tunnel(peers).await?;
+                    task::spawn(async move {
+                        self.onion.build_tunnel(3, peers.iter()).await?;
+                    });
                 }
                 OnionRequest::Destroy(tunnel_id) => {
                     self.onion.destroy_tunnel(tunnel_id).await?;
