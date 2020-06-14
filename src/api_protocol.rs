@@ -1,10 +1,10 @@
-use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use anyhow::anyhow;
 use byteorder::{ReadBytesExt, WriteBytesExt};
-
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
+use onion::messages::{ReadMessage, WriteMessage};
+use onion::Result;
 
 type BE = byteorder::BigEndian;
 
@@ -21,7 +21,11 @@ const ONION_TUNNEL_COVER: u16 = 566;
 pub enum OnionRequest {
     /// This message is to be used by the CM/UI module to request the Onion module to build a tunnel
     /// to the given destination in the next period.
-    Build(/* onion_port */ u16, /* dst_addr */ IpAddr, /* dst_hostkey */ Vec<u8>),
+    Build(
+        /* onion_port */ u16,
+        /* dst_addr */ IpAddr,
+        /* dst_hostkey */ Vec<u8>,
+    ),
     /// This message is used to instruct the Onion module that a tunnel it created is no longer in
     /// use and can now be destroyed. The tunnel ID should be valid, i.e., it should have been
     /// solicited by the Onion module in a previous ONION TUNNEL READY or ONION TUNNEL INCOMING
@@ -42,8 +46,8 @@ pub enum OnionRequest {
     Cover(/* cover_size */ u16),
 }
 
-impl OnionRequest {
-    pub fn read_from<R: Read>(r: &mut R) -> Result<Self> {
+impl ReadMessage for OnionRequest {
+    fn read_from<R: Read>(r: &mut R) -> Result<Self> {
         let size = r.read_u16::<BE>()? as usize;
         let message_type = r.read_u16::<BE>()?;
         return match message_type {
@@ -71,7 +75,7 @@ impl OnionRequest {
                 r.read_u16::<BE>()?;
                 Ok(OnionRequest::Cover(cover_size))
             }
-            _ => Err(format!("Unknown onion message type: {}", message_type).into())
+            _ => Err(anyhow!("Unknown onion message type: {}", message_type)),
         };
     }
 }
@@ -106,28 +110,37 @@ pub enum OnionResponse<'a> {
     Error(/* request_type */ u16, /* tunnel_id */ u32),
 }
 
-impl OnionResponse<'_> {
-    pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
+impl WriteMessage for OnionResponse<'_> {
+    fn size(&self) -> usize {
+        match self {
+            OnionResponse::Ready(_, dst_hostkey) => 8 + dst_hostkey.len(),
+            OnionResponse::Incoming(_) => 8,
+            OnionResponse::Data(_, tunnel_data) => 8 + tunnel_data.len(),
+            OnionResponse::Error(_, _) => 12,
+        }
+    }
+
+    fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
         match self {
             OnionResponse::Ready(tunnel_id, dst_hostkey) => {
-                w.write_u16::<BE>(8 + dst_hostkey.len() as u16)?;
+                w.write_u16::<BE>(self.size() as u16)?;
                 w.write_u16::<BE>(ONION_TUNNEL_READY)?;
                 w.write_u32::<BE>(*tunnel_id)?;
                 w.write_all(dst_hostkey)?;
             }
             OnionResponse::Incoming(tunnel_id) => {
-                w.write_u16::<BE>(8)?;
+                w.write_u16::<BE>(self.size() as u16)?;
                 w.write_u16::<BE>(ONION_TUNNEL_INCOMING)?;
                 w.write_u32::<BE>(*tunnel_id)?;
             }
             OnionResponse::Data(tunnel_id, tunnel_data) => {
-                w.write_u16::<BE>(8 + tunnel_data.len() as u16)?;
+                w.write_u16::<BE>(self.size() as u16)?;
                 w.write_u16::<BE>(ONION_TUNNEL_DATA)?;
                 w.write_u32::<BE>(*tunnel_id)?;
                 w.write_all(tunnel_data)?;
             }
             OnionResponse::Error(request_type, tunnel_id) => {
-                w.write_u16::<BE>(12)?;
+                w.write_u16::<BE>(self.size() as u16)?;
                 w.write_u16::<BE>(ONION_TUNNEL_ERROR)?;
                 w.write_u16::<BE>(*request_type)?;
                 w.write_u16::<BE>(0)?;
@@ -146,8 +159,8 @@ const MODULE_GOSSIP: u16 = 500;
 const MODULE_NSE: u16 = 520;
 const MODULE_ONION: u16 = 560;
 
-#[derive(Debug)]
-enum Module {
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum Module {
     Dht,
     Gossip,
     Nse,
@@ -161,23 +174,29 @@ impl Module {
             MODULE_GOSSIP => Ok(Module::Gossip),
             MODULE_NSE => Ok(Module::Nse),
             MODULE_ONION => Ok(Module::Onion),
-            _ => Err(format!("Unknown module id: {}", id).into())
+            _ => Err(anyhow!("Unknown module id: {}", id)),
         }
     }
 }
 
 /// Messages received by the RPS module.
 #[derive(Debug)]
-enum RpsRequest {
+pub enum RpsRequest {
     /// This message is used to ask RPS to reply with a random peer.
     Query,
 }
 
-impl RpsRequest {
-    pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
+impl WriteMessage for RpsRequest {
+    fn size(&self) -> usize {
+        match self {
+            RpsRequest::Query => 4,
+        }
+    }
+
+    fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
         match self {
             RpsRequest::Query => {
-                w.write_u16::<BE>(4)?;
+                w.write_u16::<BE>(self.size() as u16)?;
                 w.write_u16::<BE>(RPS_QUERY)?;
             }
         }
@@ -187,18 +206,23 @@ impl RpsRequest {
 
 /// Messages sent by the RPS module.
 #[derive(Debug)]
-enum RpsResponse {
+pub enum RpsResponse {
     /// This message is sent by the RPS module as a response to the RPS QUERY message. It contains
     /// the peer identity and the network address of a peer which is selected by RPS at random. In
     /// addition to this it also contains a portmap for the P2P listen ports of the various modules
     /// on the random peer. RPS should sample random peers from the currently online peers.
     /// Therefore the peer sent in this message is very likely to be online, but no guarantee can be
     /// made about its availability.
-    Peer(/* port */ u16, /* portmap */ Vec<(Module, u16)>, /* peer_addr */ IpAddr, /* peer_hostkey */ Vec<u8>),
+    Peer(
+        /* port */ u16,
+        /* portmap */ Vec<(Module, u16)>,
+        /* peer_addr */ IpAddr,
+        /* peer_hostkey */ Vec<u8>,
+    ),
 }
 
-impl RpsResponse {
-    pub fn read_from<R: Read>(r: &mut R) -> Result<Self> {
+impl ReadMessage for RpsResponse {
+    fn read_from<R: Read>(r: &mut R) -> Result<Self> {
         let size = r.read_u16::<BE>()? as usize;
         let message_type = r.read_u16::<BE>()?;
         return match message_type {
@@ -219,7 +243,7 @@ impl RpsResponse {
                 r.read_exact(&mut peer_hostkey)?;
                 Ok(RpsResponse::Peer(port, portmap, peer_addr, peer_hostkey))
             }
-            _ => Err(format!("Unknown RPS message type: {}", message_type).into())
+            _ => Err(anyhow!("Unknown RPS message type: {}", message_type)),
         };
     }
 }
