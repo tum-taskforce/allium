@@ -1,16 +1,16 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
-use std::net::IpAddr;
-use ring::rand::SecureRandom;
-use ring::{rand, agreement, pbkdf2};
-use std::collections::HashMap;
-use std::io::Cursor;
-use ring::agreement::PublicKey;
-use std::char::decode_utf16;
 use async_std::net::TcpStream;
 use async_std::stream::Stream;
-use futures::StreamExt;
 use futures::channel::mpsc::Receiver;
+use futures::StreamExt;
+use ring::agreement::PublicKey;
+use ring::rand::SecureRandom;
+use ring::{agreement, pbkdf2, rand};
+use std::char::decode_utf16;
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::net::IpAddr;
 
 pub mod messages;
 mod onion_protocol;
@@ -37,8 +37,7 @@ type TunnelId = u32;
 pub struct Tunnel {
     id: TunnelId,
 
-    notify_channels: Receiver<>,
-
+    notify_channels: Receiver<u8>,
 }
 
 type CircuitId = u16;
@@ -48,7 +47,7 @@ struct Circuit {
     partner: Option<CircuitId>,
 }
 
-pub struct Onion<P: Stream<Item=Peer>> {
+pub struct Onion<P: Stream<Item = Peer>> {
     p2p_hostname: String,
     p2p_port: u16,
     in_circuits: HashMap<CircuitId, Circuit>,
@@ -61,7 +60,7 @@ pub struct Onion<P: Stream<Item=Peer>> {
 
 impl<P> Onion<P>
 where
-    P: Stream<Item=Peer>,
+    P: Stream<Item = Peer>,
 {
     pub fn new(p2p_hostname: String, p2p_port: u16, peer_provider: P) -> Self {
         Onion {
@@ -72,7 +71,7 @@ where
             rng: rand::SystemRandom::new(),
             old_tunnels: HashMap::new(),
             new_tunnels: HashMap::new(),
-            peer_provider: P,
+            peer_provider,
         }
     }
 
@@ -83,27 +82,26 @@ where
     /// period. Since the destination peer of both old and new tunnel remains the same, the seamless
     /// switch over is possible.
     pub async fn next_round(&mut self) {
-
-
-        for tunnel in self.old_tunnels {
+        for (_, tunnel) in self.old_tunnels.iter() {
             // create new tunnel
         }
-
 
         // old_tunnels is now rebuilt new tunnels
         self.new_tunnels.clear();
         // add all old_tunnels to new_tunnels
     }
 
-    pub async fn build_tunnel(&self, n_hops: usize) -> Result<()> {
+    pub async fn build_tunnel(&self, n_hops: usize) -> Result<TunnelId> {
+        // TODO schedule and await future for tunnel creation in the next round
+        let tunnel_id = self.generate_tunnel_id()?;
+        Ok(tunnel_id)
+    }
+
+    pub async fn destroy_tunnel(&self, tunnel_id: TunnelId) -> Result<()> {
         Ok(())
     }
 
-    pub async fn destroy_tunnel(&self, tunnel_id: u32) -> Result<()> {
-        Ok(())
-    }
-
-    pub async fn send_data(&self, tunnel_id: u32, data: &[u8]) -> Result<()> {
+    pub async fn send_data(&self, tunnel_id: TunnelId, data: &[u8]) -> Result<()> {
         Ok(())
     }
 
@@ -113,7 +111,11 @@ where
 
     /// Build a new circuit to `peer`. Sends a CREATE message to `peer` containing a DH secret.
     /// The returned CircuitId shall be a key of out_circuits.
-    async fn create_circuit(&mut self, peer: &Peer, src_circuit: Option<CircuitId>) -> Result<CircuitId> {
+    async fn create_circuit(
+        &mut self,
+        peer: &Peer,
+        src_circuit: Option<CircuitId>,
+    ) -> Result<CircuitId> {
         let circuit_id = self.generate_circuit_id()?;
         let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng)?;
         let public_key = private_key.compute_public_key()?;
@@ -129,7 +131,8 @@ where
                 let mut key = Vec::new();
                 key.extend_from_slice(key_material);
                 Ok(key)
-            })?;
+            },
+        )?;
 
         let circuit = Circuit {
             id: circuit_id,
@@ -147,18 +150,39 @@ where
             let mut buf = [0u8; 2];
             self.rng.fill(&mut buf);
             let id: CircuitId = u16::from_le_bytes(buf);
-            if !self.out_circuits.contains_key(circuit_id) {
-                return Ok(id)
+            if !self.out_circuits.contains_key(&id) {
+                return Ok(id);
             }
-        };
+        }
     }
 
-    async fn exchange_keys(&self, peer: &Peer, circuit_id: CircuitId, public_key: PublicKey) -> Result<agreement::UnparsedPublicKey<Vec<u8>>> {
+    fn generate_tunnel_id(&self) -> Result<TunnelId> {
+        // FIXME an attacker may fill up all ids
+        loop {
+            let mut buf = [0u8; 4];
+            self.rng.fill(&mut buf);
+            let id: TunnelId = u32::from_le_bytes(buf);
+            if !self.new_tunnels.contains_key(&id) {
+                return Ok(id);
+            }
+        }
+    }
+
+    async fn exchange_keys(
+        &self,
+        peer: &Peer,
+        circuit_id: CircuitId,
+        public_key: PublicKey,
+    ) -> Result<agreement::UnparsedPublicKey<Vec<u8>>> {
         let stream = TcpStream::connect((peer.addr, peer.port)).await?;
-        let req = onion_protocol::CreateMessage { secret: public_key.as_ref().to_vec() };
+        let req = onion_protocol::CreateMessage {
+            secret: public_key.as_ref().to_vec(),
+        };
         // magic happens (encode req to bytes, write req to stream, recv response, decode), error handling
         let res: onion_protocol::CreatedMessage = todo!();
-        Ok(agreement::UnparsedPublicKey::new(&agreement::X25519, res.peer_secret))
+        Ok(agreement::UnparsedPublicKey::new(
+            &agreement::X25519,
+            res.peer_secret,
+        ))
     }
 }
-

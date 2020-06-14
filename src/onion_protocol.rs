@@ -8,8 +8,7 @@ pub(crate) struct CreatedMessage {
     pub peer_secret: Vec<u8>,
 }
 
-pub(crate) struct DestroyMessage {
-}
+pub(crate) struct DestroyMessage {}
 
 pub(crate) enum RelayRequest {
     Extend(RelayExtend),

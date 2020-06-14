@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context};
 use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::sync::{Arc, Mutex};
-use async_std::task;
+use async_std::{stream, task};
 use futures::io::{ReadHalf, WriteHalf};
 use futures::AsyncReadExt;
 use serde::Deserialize;
@@ -66,18 +66,25 @@ impl RpsModule {
 }
 
 struct OnionModule {
-    onion: Onion,
+    onion: Onion<stream::Empty<Peer>>,
     config: Config,
     rps: Mutex<RpsModule>,
 }
 
 impl OnionModule {
     async fn init(config: Config) -> Result<Self> {
-        let onion = Onion::new(config.onion.p2p_hostname.clone(), config.onion.p2p_port);
         let rps = RpsModule::connect(&config.rps.api_address)
             .await
             .context("Failed to connect to RPS module")?;
         let rps = Mutex::new(rps);
+        // TODO construct peer provider from rps (use buffering)
+        let peer_provider = stream::empty();
+
+        let onion = Onion::new(
+            config.onion.p2p_hostname.clone(),
+            config.onion.p2p_port,
+            peer_provider,
+        );
         Ok(OnionModule { onion, config, rps })
     }
 
@@ -96,19 +103,23 @@ impl OnionModule {
         Ok(())
     }
 
-    async fn handle_api(&self, stream: TcpStream) -> Result<()> {
+    async fn handle_api(self: Arc<Self>, stream: TcpStream) -> Result<()> {
         println!("Accepted api connection from: {}", stream.peer_addr()?);
         let (reader, writer) = (&stream, &stream);
         let mut reader = MessageReader::new(reader);
         let mut writer = MessageWriter::new(writer);
 
-        while let Some(msg) = reader.read_next().await? {
+        while let Some(msg) = reader.read_next::<OnionRequest>().await? {
+            let msg_id = msg.id();
             match msg {
                 OnionRequest::Build(onion_port, dst_addr, dst_hostkey) => {
-                    let mut peers = self.select_hops(3).await?;
-                    peers.push(Peer::new(dst_addr, onion_port, dst_hostkey));
+                    let handler = self.clone();
                     task::spawn(async move {
-                        self.onion.build_tunnel(3, peers.iter()).await?;
+                        let res = match handler.onion.build_tunnel(3).await {
+                            Ok(tunnel_id) => OnionResponse::Ready(tunnel_id, &dst_hostkey),
+                            Err(_) => OnionResponse::Error(msg_id, todo!()),
+                        };
+                        // FIXME writer.write(res).await.unwrap();
                     });
                 }
                 OnionRequest::Destroy(tunnel_id) => {
@@ -123,15 +134,6 @@ impl OnionModule {
             }
         }
         Ok(())
-    }
-
-    async fn select_hops(&self, n_hops: usize) -> Result<Vec<Peer>> {
-        let mut peers = Vec::with_capacity(n_hops);
-        let mut rps = self.rps.lock().await;
-        for _ in 0..n_hops {
-            peers.push(rps.query().await?);
-        }
-        Ok(peers)
     }
 }
 

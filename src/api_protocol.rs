@@ -78,6 +78,15 @@ impl ReadMessage for OnionRequest {
             _ => Err(anyhow!("Unknown onion message type: {}", message_type)),
         };
     }
+
+    fn id(&self) -> u16 {
+        match self {
+            OnionRequest::Build(_, _, _) => ONION_TUNNEL_BUILD,
+            OnionRequest::Destroy(_) => ONION_TUNNEL_DESTROY,
+            OnionRequest::Data(_, _) => ONION_TUNNEL_DATA,
+            OnionRequest::Cover(_) => ONION_TUNNEL_COVER,
+        }
+    }
 }
 
 /// Messages sent by the onion module.
@@ -245,6 +254,12 @@ impl ReadMessage for RpsResponse {
             }
             _ => Err(anyhow!("Unknown RPS message type: {}", message_type)),
         };
+    }
+
+    fn id(&self) -> u16 {
+        match self {
+            RpsResponse::Peer(_, _, _, _) => RPS_PEER,
+        }
     }
 }
 

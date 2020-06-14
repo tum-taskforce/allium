@@ -7,6 +7,7 @@ pub trait ReadMessage {
     fn read_from<R: std::io::Read>(r: &mut R) -> Result<Self>
     where
         Self: Sized;
+    fn id(&self) -> u16;
 }
 
 pub trait WriteMessage {
