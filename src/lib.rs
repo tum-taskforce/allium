@@ -4,13 +4,13 @@ use async_std::net::TcpStream;
 use async_std::stream::Stream;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
-use ring::agreement::PublicKey;
+use ring::agreement::{PublicKey, UnparsedPublicKey};
 use ring::rand::SecureRandom;
 use ring::{agreement, pbkdf2, rand};
 use std::char::decode_utf16;
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::net::IpAddr;
+use std::net::{IpAddr, TcpStream};
 
 pub mod messages;
 mod onion_protocol;
@@ -33,21 +33,32 @@ impl Peer {
     }
 }
 
-type TunnelId = u32;
-pub struct Tunnel {
-    id: TunnelId,
+struct Hop {
+    // maybe additional information like peer
+    key: Vec<u8>,
+}
 
-    notify_channels: Receiver<u8>,
+type TunnelId = u32;
+struct OutTunnel {
+    id: TunnelId,
+    out_circuit: Option<CircuitId>,
+    hops: Vec<Hop>,
+    // TODO notify_channels: Receiver<u8>,
+}
+
+struct InTunnel {
+    id: TunnelId,
+    // TODO notify_channels: Receiver<u8>,
 }
 
 type CircuitId = u16;
 struct OutCircuit {
     id: CircuitId,
-    key: Vec<u8>,
     partner: Option<CircuitId>,
 }
 struct InCircuit {
     id: CircuitId,
+    key: Vec<u8>,
     partner: Option<CircuitId>
 }
 
@@ -113,48 +124,54 @@ where
         Ok(())
     }
 
-    /// Build a new circuit to `peer`. Sends a CREATE message to `peer` containing a DH secret.
+    /// Build a new circuit to `peer`. Sends a CREATE message to `peer` containing a the given DH secret.
     /// The returned CircuitId shall be a key of out_circuits.
+    // TODO maybe replace key types with more useful types
     async fn create_circuit(
         &mut self,
         peer: &Peer,
+        secret: PublicKey,
         src_circuit: Option<CircuitId>,
-    ) -> Result<CircuitId> {
+    ) -> Result<(CircuitId, UnparsedPublicKey<Vec<u8>>)> {
         let circuit_id = self.generate_circuit_id()?;
-        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng)?;
-        let public_key = private_key.compute_public_key()?;
 
-        // send public_key to peer
-        let peer_public_key = self.exchange_keys(peer, circuit_id, public_key).await?;
-
-        let key = agreement::agree_ephemeral(
-            private_key,
-            &peer_public_key,
-            ring::error::Unspecified,
-            |key_material| {
-                let mut key = Vec::new();
-                key.extend_from_slice(key_material);
-                Ok(key)
-            },
-        )?;
+        // send secret to peer
+        let stream = TcpStream::connect((peer.addr, peer.port)).await?;
+        let req = onion_protocol::CreateMessage {
+            secret: secret.as_ref().to_vec(),
+        };
+        // TODO magic happens (encode req to bytes, write req to stream, recv response, decode), error handling
+        let res: onion_protocol::CreatedMessage = todo!();
+        let peer_public_key = agreement::UnparsedPublicKey::new(
+            &agreement::X25519,
+            res.peer_secret,
+        );
 
         let circuit = OutCircuit {
             id: circuit_id,
-            key,
             partner: src_circuit,
         };
 
         self.out_circuits.insert(circuit_id, circuit);
-        Ok(circuit_id)
+        Ok((circuit_id, peer_public_key))
     }
 
+    /// Generates a fresh circuit id to be used for adding a new circuit either to out_circuits or
+    /// in_circuits. The id is unique among both to ensure that incoming packages with that specific
+    /// circuit id can be identified as an incoming circuit or outgoing circuit. For example any
+    /// RELAY EXTEND packets coming from incoming circuits may be valid and processed, but any RELAY
+    /// EXTEND packets from outgoing circuits should not be accepted as valid.
+    ///
+    /// The call to this function and the use of the circuit id to add a new circuit to either
+    /// in_circuits and out_circuits should be atomic to prevent any race conditions where any used
+    /// circuit id is returned by this function.
     fn generate_circuit_id(&self) -> Result<CircuitId> {
         // FIXME an attacker may fill up all ids
         loop {
             let mut buf = [0u8; 2];
             self.rng.fill(&mut buf);
             let id: CircuitId = u16::from_le_bytes(buf);
-            if !self.out_circuits.contains_key(&id) {
+            if !self.out_circuits.contains_key(&id) && !self.in_circuits.contains_key(&id) {
                 return Ok(id);
             }
         }
@@ -172,21 +189,70 @@ where
         }
     }
 
+    /// Performs a key exchange with the given peer and extends the tunnel with a new circuit
+    ///
+    /// If `tunnel` has no hops, the peer will be contacted directly using CREATE packets.
+    /// If `tunnel` has at least one hop, the key exchange will be perfomed remotely via RELAY
+    /// EXTEND packets.
+    ///
+    /// # Arguments
+    /// * `peer` - the peer that should be exchanged keys with
     async fn exchange_keys(
-        &self,
+        &mut self,
         peer: &Peer,
-        circuit_id: CircuitId,
-        public_key: PublicKey,
-    ) -> Result<agreement::UnparsedPublicKey<Vec<u8>>> {
-        let stream = TcpStream::connect((peer.addr, peer.port)).await?;
-        let req = onion_protocol::CreateMessage {
-            secret: public_key.as_ref().to_vec(),
+        tunnel: &mut OutTunnel,
+    ) -> Result<void> { // FIXME Fix return type
+        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng)?;
+        let public_key = private_key.compute_public_key()?;
+
+        let peer_public_key;
+        if tunnel.hops.is_empty() {
+            if tunnel.out_circuit.is_some() {
+                // FIXME This case may be ignored or should be avoided
+                // There should be either no hops and no circuit, or at least one hop
+                Err("Broken tunnel, no hops defined, but existing out circuit.")
+            }
+            // create first hop
+            // TODO a little bit ugly
+            (c, p) = self.create_circuit(peer, public_key, None)?;
+            peer_public_key = p;
+        } else {
+            if tunnel.out_circuit.is_none() {
+                // FIXME This case may be ignored or should be avoided
+                // There should be either some hops and a circuit, or no hops
+                Err("Broken tunnel, no circuit defined, but existing hops.")
+            }
+            // extend the tunnel with peer
+            peer_public_key = self.extend_tunnel(peer, public_key, tunnel);
+        }
+
+        let key = agreement::agree_ephemeral(
+            private_key,
+            &peer_public_key,
+            ring::error::Unspecified,
+            |key_material| {
+                let mut key = Vec::new();
+                key.extend_from_slice(key_material);
+                Ok(key)
+            },
+        )?;
+
+        let hop = Hop {
+            key: key
         };
-        // magic happens (encode req to bytes, write req to stream, recv response, decode), error handling
-        let res: onion_protocol::CreatedMessage = todo!();
-        Ok(agreement::UnparsedPublicKey::new(
-            &agreement::X25519,
-            res.peer_secret,
-        ))
+
+        tunnel.hops.push(hop);
+        Ok(void) // FIXME This is not ideal?
+    }
+
+    /// Extends the given `OutTunnel` `tunnel` with `peer` by sending a RELAY EXTEND packet through
+    /// `tunnel`.
+    async fn extend_tunnel(
+        &mut self,
+        peer: &Peer,
+        secret: PublicKey,
+        tunnel: &mut OutTunnel,
+    ) -> Result<Peer> {
+        todo!()
     }
 }
