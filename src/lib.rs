@@ -10,7 +10,7 @@ use ring::{agreement, pbkdf2, rand};
 use std::char::decode_utf16;
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::net::{IpAddr, TcpStream};
+use std::net::{IpAddr};
 
 pub mod messages;
 mod onion_protocol;
@@ -68,8 +68,8 @@ pub struct Onion<P: Stream<Item = Peer>> {
     in_circuits: HashMap<CircuitId, InCircuit>,
     out_circuits: HashMap<CircuitId, OutCircuit>,
     rng: rand::SystemRandom,
-    old_tunnels: HashMap<TunnelId, Tunnel>,
-    new_tunnels: HashMap<TunnelId, Tunnel>,
+    old_tunnels: HashMap<TunnelId, OutTunnel>, // FIXME Rework types
+    new_tunnels: HashMap<TunnelId, OutTunnel>,
     peer_provider: P,
 }
 
@@ -136,7 +136,7 @@ where
         let circuit_id = self.generate_circuit_id()?;
 
         // send secret to peer
-        let stream = TcpStream::connect((peer.addr, peer.port)).await?;
+        let stream = async_std::net::TcpStream::connect((peer.addr, peer.port)).await?;
         let req = onion_protocol::CreateMessage {
             secret: secret.as_ref().to_vec(),
         };
@@ -197,35 +197,51 @@ where
     ///
     /// # Arguments
     /// * `peer` - the peer that should be exchanged keys with
-    async fn exchange_keys(
+    /// * `tunnel` - the tunnel that should be extended
+    async fn extend_tunnel(
         &mut self,
         peer: &Peer,
         tunnel: &mut OutTunnel,
-    ) -> Result<void> { // FIXME Fix return type
+    ) -> Result<&mut OutTunnel> { // FIXME Fix return type
         let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng)?;
         let public_key = private_key.compute_public_key()?;
 
+        let out_circuit;
         let peer_public_key;
         if tunnel.hops.is_empty() {
             if tunnel.out_circuit.is_some() {
                 // FIXME This case may be ignored or should be avoided
                 // There should be either no hops and no circuit, or at least one hop
-                Err("Broken tunnel, no hops defined, but existing out circuit.")
+                return Err("Broken tunnel, no hops defined, but existing out circuit.");
             }
             // create first hop
-            // TODO a little bit ugly
-            (c, p) = self.create_circuit(peer, public_key, None)?;
+            // TODO a little bit ugly tuple deconstruction
+            let (c, p) = self.create_circuit(peer, public_key, None)?;
+            out_circuit = c;
             peer_public_key = p;
         } else {
             if tunnel.out_circuit.is_none() {
                 // FIXME This case may be ignored or should be avoided
                 // There should be either some hops and a circuit, or no hops
-                Err("Broken tunnel, no circuit defined, but existing hops.")
+                return Err("Broken tunnel, no circuit defined, but existing hops.");
             }
             // extend the tunnel with peer
-            peer_public_key = self.extend_tunnel(peer, public_key, tunnel);
+            let req = onion_protocol::RelayExtend {
+                dest_addr: peer.addr,
+                dest_port: peer.port,
+                secret: public_key.as_ref().to_vec(),
+            };
+            // any errors that happen in this stage (i.e. timeout or errors from tunnel) cause a fail here and should be managed by the parent function
+            // TODO Manage answer selection more elegantly
+            if let onion_protocol::RelayResponse::Extended(res) = self.relay_out(tunnel, onion_protocol::RelayRequest::Extend(req)).await? {
+                peer_public_key = res;
+            } else {
+                Err("")
+            }
+            out_circuit = tunnel.out_circuit;
         }
 
+        // Any fail because of any incorrect secret answer should not cause our tunnel to become corrupted
         let key = agreement::agree_ephemeral(
             private_key,
             &peer_public_key,
@@ -241,18 +257,29 @@ where
             key: key
         };
 
+        tunnel.out_circuit = out_circuit; // FIXME maybe there is a better way
         tunnel.hops.push(hop);
-        Ok(void) // FIXME This is not ideal?
+        Ok(tunnel)
     }
 
-    /// Extends the given `OutTunnel` `tunnel` with `peer` by sending a RELAY EXTEND packet through
-    /// `tunnel`.
-    async fn extend_tunnel(
-        &mut self,
-        peer: &Peer,
-        secret: PublicKey,
-        tunnel: &mut OutTunnel,
-    ) -> Result<Peer> {
+    /// Sends the given relay message to the final hop in the tunnel
+    async fn relay_out(
+        &self,
+        tunnel: &OutTunnel,
+        req: onion_protocol::RelayRequest,
+    ) -> Result<onion_protocol::RelayResponse> {
+        self.relay_out_n(tunnel, tunnel.hops.len() - 1, req)
+    }
+
+    /// Sends the given relay message to the hop at index `n` in the tunnel
+    async fn relay_out_n(
+        &self,
+        tunnel: &OutTunnel,
+        n: usize,
+        req: onion_protocol::RelayRequest,
+    ) -> Result<onion_protocol::RelayResponse> {
+        // TODO magic happens (encode req to bytes, write req to stream, recv response, decode), error handling
         todo!()
     }
+
 }
