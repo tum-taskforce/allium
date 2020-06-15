@@ -41,17 +41,21 @@ pub struct Tunnel {
 }
 
 type CircuitId = u16;
-struct Circuit {
+struct OutCircuit {
     id: CircuitId,
     key: Vec<u8>,
     partner: Option<CircuitId>,
+}
+struct InCircuit {
+    id: CircuitId,
+    partner: Option<CircuitId>
 }
 
 pub struct Onion<P: Stream<Item = Peer>> {
     p2p_hostname: String,
     p2p_port: u16,
-    in_circuits: HashMap<CircuitId, Circuit>,
-    out_circuits: HashMap<CircuitId, Circuit>,
+    in_circuits: HashMap<CircuitId, InCircuit>,
+    out_circuits: HashMap<CircuitId, OutCircuit>,
     rng: rand::SystemRandom,
     old_tunnels: HashMap<TunnelId, Tunnel>,
     new_tunnels: HashMap<TunnelId, Tunnel>,
@@ -134,7 +138,7 @@ where
             },
         )?;
 
-        let circuit = Circuit {
+        let circuit = OutCircuit {
             id: circuit_id,
             key,
             partner: src_circuit,
