@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::net::IpAddr;
 
 use anyhow::anyhow;
@@ -8,6 +8,7 @@ use crate::Result;
 use crate::{CircuitId, TunnelId};
 use ring::{aead, digest};
 use std::collections::VecDeque;
+use std::convert::TryFrom;
 
 type BE = byteorder::BigEndian;
 
@@ -40,7 +41,7 @@ pub(crate) enum OnionMessage {
     /// ephemeral public key, which the initiator can use to generate a shared secret.
     CreateResponse(CircuitId, /* peer_key */ Vec<u8>),
     /// Wraps an encrypted relay message.
-    /// Can be decrypted using `OpaqueRelayMessage::decrypt_from_onion_message`.
+    /// Can be decrypted using `OpaqueRelayMessage::decrypt`.
     Relay(CircuitId, /* relay_payload */ Vec<u8>),
     // DestroyRequest,
 }
@@ -56,8 +57,8 @@ pub(crate) enum OnionMessage {
 /// Convert `OnionMessage` to `RelayMessage`:
 /// ```text
 /// let onion_msg = OnionMessage::Relay(...);
-/// let opaque = OpaqueRelayMessage::decrypt_from_onion_message(key)?;
-/// let relay_msg = opaque.try_to_relay_message()?;
+/// let opaque = OpaqueRelayMessage::decrypt(key)?;
+/// let relay_msg = opaque.try_into()?;
 /// ```
 /// The method `try_to_relay_message` may fail in case the computed digest does not match the digest
 /// in the message. This means that the message is not to be consumed by the current peer but to be
@@ -66,8 +67,8 @@ pub(crate) enum OnionMessage {
 /// Convert `RelayMessage` to `OnionMessage`:
 /// ```text
 /// let relay_message = RelayMessage::Extend(...);
-/// let opaque = OpaqueRelayMessage::from_relay_message(relay_message);
-/// let onion_message = opaque.encrypt_to_onion_message(circuit_id, key)?;
+/// let opaque = OpaqueRelayMessage::from(relay_message);
+/// let onion_message = opaque.encrypt(circuit_id, key)?;
 /// ```
 pub(crate) struct OpaqueRelayMessage {
     relay_payload: Vec<u8>,
@@ -81,7 +82,7 @@ pub(crate) struct OpaqueRelayMessage {
 /// type: u8
 /// ```
 ///
-/// Can be encrypted using `OpaqueRelayMessage::encrypt_to_onion_message`.
+/// Can be encrypted using `OpaqueRelayMessage::encrypt`.
 pub(crate) enum RelayMessage {
     // = Requests =
     Extend(
@@ -97,32 +98,32 @@ pub(crate) enum RelayMessage {
     // Truncated(TunnelId, RelayTruncated),
 }
 
-impl OnionMessgae {
+impl OnionMessage {
     fn read_from<R: Read>(r: &mut R) -> Result<Self> {
-        Ok(todo!())
+        todo!()
     }
 
     fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
         match self {
-            OnionMessage::CreateRequest(circuit_id, secret) => {
+            OnionMessage::CreateRequest(circuit_id, key) => {
                 w.write_u8(ONION_CREATE_REQUEST);
-                w.write_u8();
+                w.write_u8(0);
                 w.write_u16::<BE>(*circuit_id)?;
                 // if secret has constant size, this is not needed
-                w.write_u16::<BE>(secret.len() as u16)?;
-                w.write_all(secret)?;
+                w.write_u16::<BE>(key.len() as u16)?;
+                w.write_all(key)?;
             }
-            OnionMessage::CreateResponse(circuit_id, peer_secret) => {
+            OnionMessage::CreateResponse(circuit_id, peer_key) => {
                 w.write_u8(ONION_CREATE_RESPONSE);
-                w.write_u8();
+                w.write_u8(0);
                 w.write_u16::<BE>(*circuit_id)?;
                 // if secret has constant size, this is not needed
-                w.write_u16::<BE>(secret.len() as u16)?;
-                w.write_all(secret)?;
+                w.write_u16::<BE>(peer_key.len() as u16)?;
+                w.write_all(peer_key)?;
             }
             OnionMessage::Relay(circuit_id, relay_msg) => {
                 w.write_u8(ONION_RELAY);
-                w.write_u8();
+                w.write_u8(0);
                 w.write_u16::<BE>(*circuit_id)?;
                 w.write_all(relay_msg)?;
             }
@@ -133,7 +134,7 @@ impl OnionMessgae {
 
 impl RelayMessage {
     fn read_from<R: Read>(r: &mut R) -> Result<Self> {
-        Ok(todo!())
+        todo!()
     }
 
     fn size(&self) -> usize {
@@ -178,10 +179,7 @@ impl RelayMessage {
 }
 
 impl OpaqueRelayMessage {
-    fn decrypt_from_onion_message(
-        msg: OnionMessage,
-        decrypt_key: aead::LessSafeKey,
-    ) -> Result<Self> {
+    fn decrypt(msg: OnionMessage, decrypt_key: aead::LessSafeKey) -> Result<Self> {
         let mut data = if let OnionMessage::Relay(_, data) = msg {
             data
         } else {
@@ -195,7 +193,7 @@ impl OpaqueRelayMessage {
         })
     }
 
-    fn encrypt_to_onion_message(
+    fn encrypt(
         mut self,
         circuit_id: CircuitId,
         encrypt_key: aead::LessSafeKey,
@@ -204,27 +202,35 @@ impl OpaqueRelayMessage {
         encrypt_key.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut self.relay_payload)?;
         Ok(OnionMessage::Relay(circuit_id, self.relay_payload))
     }
+}
 
-    fn try_to_relay_message(&self) -> Result<RelayMessage> {
-        let digest = digest::digest(&digest::SHA256, &self.relay_payload[RELAY_DIGEST_LEN..]);
-        if digest != &self.relay_payload[..RELAY_DIGEST_LEN] {
-            Err(anyhow!("Invalid Relay message"))
+impl From<RelayMessage> for OpaqueRelayMessage {
+    fn from(msg: RelayMessage) -> Self {
+        let mut buf = Vec::with_capacity(RELAY_DIGEST_LEN + msg.size());
+        let mut cursor = Cursor::new(buf);
+        cursor.set_position(RELAY_DIGEST_LEN as u64);
+        msg.write_to(&mut cursor).unwrap();
+        let mut buf = cursor.into_inner();
+
+        let digest = digest::digest(&digest::SHA256, &buf[RELAY_DIGEST_LEN..]);
+        buf[..RELAY_DIGEST_LEN].copy_from_slice(&digest.as_ref()[..RELAY_DIGEST_LEN]);
+        OpaqueRelayMessage { relay_payload: buf }
+    }
+}
+
+impl TryFrom<OpaqueRelayMessage> for RelayMessage {
+    type Error = (OpaqueRelayMessage, anyhow::Error);
+
+    /// The returned result is of type `Result<RelayMessage, (OpaqueRelayMessage, anyhow::Error)>`
+    /// to allow further use of the opaque relay message in case the conversion fails.
+    fn try_from(msg: OpaqueRelayMessage) -> std::result::Result<Self, Self::Error> {
+        let digest = digest::digest(&digest::SHA256, &msg.relay_payload[RELAY_DIGEST_LEN..]);
+        if &digest.as_ref()[..RELAY_DIGEST_LEN] != &msg.relay_payload[..RELAY_DIGEST_LEN] {
+            return Err((msg, anyhow!("Computed hash did not match the message hash")));
         }
 
-        Ok(RelayMessage::read_from(
-            &self.relay_payload[RELAY_DIGEST_LEN..],
-        )?)
-    }
-
-    fn from_relay_message(msg: RelayMessage) -> Self {
-        let mut buf = VecDeque::with_capacity(msg.size());
-        msg.write_to(&buf)?;
-
-        let digest = digest::digest(&digest::SHA256, &buf);
-        buf.extend(digest.as_ref().iter());
-        buf.rotate_right(RELAY_DIGEST_LEN);
-        return OpaqueRelayMessage {
-            relay_payload: buf.into(),
-        };
+        let parsed = RelayMessage::read_from(&mut &msg.relay_payload[RELAY_DIGEST_LEN..])
+            .map_err(|e| (msg, e))?;
+        Ok(parsed)
     }
 }
