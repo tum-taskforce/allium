@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context};
 
 pub mod messages;
 mod onion_protocol;
+mod utils;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 

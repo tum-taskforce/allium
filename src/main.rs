@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 #[allow(dead_code)]
 mod api_protocol;
+mod utils;
 
 use api_protocol::*;
 use onion::messages::*;
