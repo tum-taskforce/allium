@@ -6,9 +6,8 @@ use async_std::net::TcpStream;
 use async_std::stream::Stream;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
-use ring::agreement::PublicKey;
 use ring::rand::SecureRandom;
-use ring::{agreement, pbkdf2, rand};
+use ring::{agreement, pbkdf2, rand, signature};
 use std::char::decode_utf16;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -23,11 +22,13 @@ pub type Result<T> = std::result::Result<T, anyhow::Error>;
 pub struct Peer {
     addr: IpAddr,
     port: u16,
-    hostkey: Vec<u8>,
+    hostkey: signature::UnparsedPublicKey<Vec<u8>>,
 }
 
 impl Peer {
     pub fn new(addr: IpAddr, port: u16, hostkey: Vec<u8>) -> Self {
+        let hostkey =
+            signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, hostkey);
         Peer {
             addr,
             port,
@@ -66,8 +67,7 @@ struct InCircuit {
 }
 
 pub struct Onion<P: Stream<Item = Peer>> {
-    p2p_hostname: String,
-    p2p_port: u16,
+    hostkey: signature::RsaKeyPair,
     in_circuits: HashMap<CircuitId, InCircuit>,
     out_circuits: HashMap<CircuitId, OutCircuit>,
     rng: rand::SystemRandom,
@@ -80,17 +80,20 @@ impl<P> Onion<P>
 where
     P: Stream<Item = Peer>,
 {
-    pub fn new(p2p_hostname: String, p2p_port: u16, peer_provider: P) -> Self {
-        Onion {
-            p2p_hostname,
-            p2p_port,
+    /// Construct a new onion instance.
+    /// Returns Err if the supplied hostkey is invalid.
+    pub fn new(hostkey: &[u8], peer_provider: P) -> Result<Self> {
+        let hostkey = signature::RsaKeyPair::from_pkcs8(hostkey)?;
+
+        Ok(Onion {
+            hostkey,
             in_circuits: HashMap::new(),
             out_circuits: HashMap::new(),
             rng: rand::SystemRandom::new(),
             old_tunnels: HashMap::new(),
             new_tunnels: HashMap::new(),
             peer_provider,
-        }
+        })
     }
 
     /// Tunnels created in one period should be torn down and rebuilt for the next period.

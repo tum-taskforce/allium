@@ -17,6 +17,12 @@ use onion::*;
 
 #[derive(Debug, Deserialize)]
 struct Config {
+    /// Path to file containing PEM-encoded RSA hostkey in PKCS#8 format.
+    ///
+    /// Generated with:
+    /// ```text
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out testkey.pem
+    /// ```
     hostkey: String,
     onion: OnionConfig,
     rps: RpsConfig,
@@ -25,7 +31,13 @@ struct Config {
 #[derive(Debug, Deserialize)]
 struct OnionConfig {
     api_address: String,
+    /// This is the port for Onion’s P2P protocol i.e., the port number on which Onion accepts
+    /// tunnel connections from Onion modules of other peers. This is different from the port where
+    /// it listens for API connections. This value is used by the RPS module to advertise the socket
+    /// the onion module is listening on, so that other peers onion modules can connect to it.
     p2p_port: u16,
+    /// Similar to p2p port this parameter determines the interface on which Onion listens for
+    /// incoming P2P connections.
     p2p_hostname: String,
 }
 
@@ -81,11 +93,8 @@ impl OnionModule {
         // TODO construct peer provider from rps (use buffering)
         let peer_provider = stream::empty();
 
-        let onion = Onion::new(
-            config.onion.p2p_hostname.clone(),
-            config.onion.p2p_port,
-            peer_provider,
-        );
+        let hostkey = utils::read_hostkey(&config.hostkey).context("Could not read hostkey")?;
+        let onion = Onion::new(&hostkey, peer_provider)?;
         Ok(OnionModule { onion, config, rps })
     }
 
@@ -142,7 +151,7 @@ impl OnionModule {
 async fn main() -> Result<()> {
     #[rustfmt::skip]
     let config: Config = toml::from_str(r#"
-        hostkey = ""
+        hostkey = "testkey.pem"
 
         [onion]
         api_address = "127.0.0.1:4201"
