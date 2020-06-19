@@ -8,7 +8,7 @@ use crate::utils::read_ip_addr_from;
 use crate::Result;
 use crate::{CircuitId, TunnelId};
 use async_std::net::SocketAddr;
-use ring::{aead, digest};
+use ring::{aead, agreement, digest, rand, signature};
 use std::convert::TryFrom;
 
 type BE = byteorder::BigEndian;
@@ -30,6 +30,14 @@ const ONION_MESSAGE_SIZE: usize = 1024;
 const RELAY_MESSAGE_MAX_SIZE: usize = ONION_MESSAGE_SIZE - 4 - RELAY_DIGEST_LEN;
 const RELAY_DATA_MAX_SIZE: usize = RELAY_MESSAGE_MAX_SIZE - 8;
 
+// TODO use generic B: AsRef<[u8]> parameter instead of Vec<u8>
+pub(crate) type Key = agreement::UnparsedPublicKey<Vec<u8>>;
+pub(crate) type Signature = Vec<u8>;
+pub(crate) struct SignedKey {
+    key: Key,
+    signature: Signature,
+}
+
 /// A message exchanged between onion peers.
 ///
 /// Header Format:
@@ -41,10 +49,10 @@ const RELAY_DATA_MAX_SIZE: usize = RELAY_MESSAGE_MAX_SIZE - 8;
 pub(crate) enum OnionMessage {
     /// Initiates the creation of a new circuit to the recipient by performing a Diffie-Hellman key
     /// exchange. This message contains the sender's ephemeral public key.
-    CreateRequest(CircuitId, /* key */ Vec<u8>),
+    CreateRequest(CircuitId, /* key */ Key),
     /// Confirms the creation of a new circuit, initiated by a `CreateRequest`. Contains the peer's
     /// ephemeral public key, which the initiator can use to generate a shared secret.
-    CreateResponse(CircuitId, /* peer_key */ Vec<u8>),
+    CreateResponse(CircuitId, /* peer_key */ SignedKey),
     /// Wraps an encrypted relay message.
     /// Can be decrypted using `OpaqueRelayMessage::decrypt`.
     Relay(CircuitId, /* relay_payload */ Vec<u8>),
@@ -98,7 +106,7 @@ pub(crate) enum RelayMessage {
     /// dest.port(): u16
     /// key
     /// ```
-    Extend(TunnelId, /* dest */ SocketAddr, /* key */ Vec<u8>),
+    Extend(TunnelId, /* dest */ SocketAddr, /* key */ Key),
     /// Format:
     /// ```text
     /// _padding: u8
@@ -108,8 +116,57 @@ pub(crate) enum RelayMessage {
     Data(TunnelId, /* data */ Vec<u8>),
     // Truncate,
     // = Responses =
-    // Extended(TunnelId, /* dest_addr */ IpAddr, /* dest_port */ u16),
+    Extended(TunnelId, /* peer_key */ SignedKey),
     // Truncated(TunnelId, RelayTruncated),
+}
+
+impl SignedKey {
+    pub(crate) fn sign(
+        key: Key,
+        key_pair: signature::RsaKeyPair,
+        rng: &rand::SystemRandom,
+    ) -> Result<Self> {
+        let mut signature = vec![0; key_pair.public_modulus_len()];
+        key_pair.sign(
+            &signature::RSA_PKCS1_SHA256,
+            rng,
+            &key.bytes(),
+            &mut signature,
+        )?;
+        Ok(SignedKey { key, signature })
+    }
+
+    pub(crate) fn verify(self, public_key: signature::UnparsedPublicKey<Vec<u8>>) -> Result<Key> {
+        public_key.verify(&self.key.bytes(), &self.signature)?;
+        Ok(self.key)
+    }
+
+    fn size(&self) -> usize {
+        return self.signature.len() + self.key.bytes().len();
+    }
+
+    fn read_from<R: Read>(r: &mut R) -> Result<Self> {
+        let sig_len = r.read_u16::<BE>()? as usize;
+        let mut sig = vec![0u8; sig_len];
+        r.read_exact(&mut sig)?;
+        let key_len = r.read_u16::<BE>()? as usize;
+        let mut key = vec![0u8; key_len];
+        r.read_exact(&mut key)?;
+        let key = Key::new(&agreement::X25519, key);
+        Ok(SignedKey {
+            key,
+            signature: sig,
+        })
+    }
+
+    fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
+        // TODO maybe use fixed sizes (sig.len() = 256?)
+        w.write_u16::<BE>(self.signature.len() as u16)?;
+        w.write_all(&self.signature)?;
+        w.write_u16::<BE>(self.key.bytes().len() as u16)?;
+        w.write_all(&self.key.bytes())?;
+        Ok(())
+    }
 }
 
 impl OnionMessage {
@@ -122,15 +179,14 @@ impl OnionMessage {
                 let key_len = r.read_u16::<BE>()? as usize;
                 let mut key = vec![0u8; key_len];
                 r.read_exact(&mut key)?;
+                let key = Key::new(&agreement::X25519, key);
                 Ok(OnionMessage::CreateRequest(circuit_id, key))
             }
             ONION_CREATE_RESPONSE => {
                 r.read_u8()?;
                 let circuit_id = r.read_u16::<BE>()?;
-                let peer_key_len = r.read_u16::<BE>()? as usize;
-                let mut peer_key = vec![0u8; peer_key_len];
-                r.read_exact(&mut peer_key)?;
-                Ok(OnionMessage::CreateResponse(circuit_id, peer_key))
+                let key = SignedKey::read_from(r)?;
+                Ok(OnionMessage::CreateResponse(circuit_id, key))
             }
             ONION_RELAY => {
                 r.read_u8()?;
@@ -154,16 +210,14 @@ impl OnionMessage {
                 w.write_u8(0)?;
                 w.write_u16::<BE>(*circuit_id)?;
                 // if secret has constant size, this is not needed
-                w.write_u16::<BE>(key.len() as u16)?;
-                w.write_all(key)?;
+                w.write_u16::<BE>(key.bytes().len() as u16)?;
+                w.write_all(&key.bytes())?;
             }
             OnionMessage::CreateResponse(circuit_id, peer_key) => {
                 w.write_u8(ONION_CREATE_RESPONSE)?;
                 w.write_u8(0)?;
                 w.write_u16::<BE>(*circuit_id)?;
-                // if secret has constant size, this is not needed
-                w.write_u16::<BE>(peer_key.len() as u16)?;
-                w.write_all(peer_key)?;
+                peer_key.write_to(w)?;
             }
             OnionMessage::Relay(circuit_id, relay_msg) => {
                 w.write_u8(ONION_RELAY)?;
@@ -188,11 +242,18 @@ impl RelayMessage {
                 let dest_port = r.read_u16::<BE>()?;
                 let mut key = vec![0u8; size - 8 - dest_ip_len - 2];
                 r.read_exact(&mut key)?;
+                let key = Key::new(&agreement::X25519, key);
                 Ok(RelayMessage::Extend(
                     tunnel_id,
                     SocketAddr::new(dest_ip, dest_port),
                     key,
                 ))
+            }
+            ONION_RELAY_EXTENDED => {
+                r.read_u8()?;
+                let tunnel_id = r.read_u32::<BE>()?;
+                let peer_key = SignedKey::read_from(r)?;
+                Ok(RelayMessage::Extended(tunnel_id, peer_key))
             }
             ONION_RELAY_DATA => {
                 r.read_u8()?;
@@ -210,10 +271,14 @@ impl RelayMessage {
             RelayMessage::Extend(_, dest, key) => {
                 let addr_size = if dest.is_ipv4() { 4 } else { 16 };
                 // size (2), type (1), ip flag (1), tunnel id (4), ip addr, dest port (2), secret
-                2 + 1 + 1 + 4 + addr_size + 2 + key.len()
+                2 + 1 + 1 + 4 + addr_size + 2 + key.bytes().len()
+            }
+            RelayMessage::Extended(_, peer_key) => {
+                // size (2), type (1), padding (1), tunnel_id (4), peer_key
+                2 + 1 + 1 + 4 + peer_key.size()
             }
             RelayMessage::Data(_, data) => {
-                // size (2), type (1), padding (1), tunnel_id (4) data
+                // size (2), type (1), padding (1), tunnel_id (4), data
                 2 + 1 + 1 + 4 + data.len()
             }
         }
@@ -232,7 +297,14 @@ impl RelayMessage {
                     IpAddr::V6(addr) => w.write_all(&addr.octets())?,
                 }
                 w.write_u16::<BE>(dest.port())?;
-                w.write_all(key)?;
+                w.write_all(&key.bytes())?;
+            }
+            RelayMessage::Extended(tunnel_id, peer_key) => {
+                w.write_u16::<BE>(self.size() as u16)?;
+                w.write_u8(ONION_RELAY_DATA)?;
+                w.write_u8(0)?;
+                w.write_u32::<BE>(*tunnel_id)?;
+                peer_key.write_to(w)?;
             }
             RelayMessage::Data(tunnel_id, data) => {
                 w.write_u16::<BE>(self.size() as u16)?;
@@ -247,27 +319,33 @@ impl RelayMessage {
 }
 
 impl OpaqueRelayMessage {
-    fn decrypt(msg: OnionMessage, decrypt_key: aead::LessSafeKey) -> Result<Self> {
+    pub(crate) fn decrypt(msg: OnionMessage, decrypt_keys: &[aead::LessSafeKey]) -> Result<Self> {
         let mut data = if let OnionMessage::Relay(_, data) = msg {
             data
         } else {
             return Err(anyhow!("Message is not a Relay message"));
         };
 
-        let nonce = aead::Nonce::assume_unique_for_key(todo!());
-        decrypt_key.open_in_place(nonce, aead::Aad::empty(), &mut data)?;
+        for key in decrypt_keys.iter() {
+            let nonce = aead::Nonce::assume_unique_for_key(todo!());
+            key.open_in_place(nonce, aead::Aad::empty(), &mut data)?;
+        }
+
         Ok(OpaqueRelayMessage {
             relay_payload: data,
         })
     }
 
-    fn encrypt(
+    pub(crate) fn encrypt(
         mut self,
         circuit_id: CircuitId,
-        encrypt_key: aead::LessSafeKey,
+        encrypt_keys: &[aead::LessSafeKey],
     ) -> Result<OnionMessage> {
-        let nonce = aead::Nonce::assume_unique_for_key(todo!());
-        encrypt_key.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut self.relay_payload)?;
+        for key in encrypt_keys.iter() {
+            let nonce = aead::Nonce::assume_unique_for_key(todo!());
+            key.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut self.relay_payload)?;
+        }
+
         Ok(OnionMessage::Relay(circuit_id, self.relay_payload))
     }
 }

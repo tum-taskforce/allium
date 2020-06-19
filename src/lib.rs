@@ -1,17 +1,18 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
+use crate::onion_protocol::*;
+use anyhow::anyhow;
 use async_std::net::TcpStream;
 use async_std::stream::Stream;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
-use ring::agreement::{PublicKey, UnparsedPublicKey};
+use ring::agreement::PublicKey;
 use ring::rand::SecureRandom;
 use ring::{agreement, pbkdf2, rand};
 use std::char::decode_utf16;
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::net::{IpAddr};
-use anyhow::{anyhow, Context};
+use std::net::IpAddr;
 
 pub mod messages;
 mod onion_protocol;
@@ -277,5 +278,4 @@ where
         // TODO magic happens (encode req to bytes, write req to stream, recv response, decode), error handling
         todo!()
     }
-
 }
