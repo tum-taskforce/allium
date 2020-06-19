@@ -380,3 +380,30 @@ impl TryFrom<OpaqueRelayMessage> for RelayMessage {
         Ok(parsed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_onion_create() -> Result<()> {
+        let rng = rand::SystemRandom::new();
+        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng)?;
+        let public_key = private_key.compute_public_key()?;
+        let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec());
+
+        let tunnel_id = 0;
+        let msg = OnionMessage::CreateRequest(tunnel_id, key);
+        let mut buf = Vec::with_capacity(msg.size());
+        msg.write_to(&mut buf)?;
+        let read_msg = OnionMessage::read_from(&mut Cursor::new(buf))?;
+        if let OnionMessage::CreateRequest(tunnel_id2, key2) = read_msg {
+            assert_eq!(tunnel_id, tunnel_id2);
+            let key2_bytes: &[u8] = &key2.bytes().as_ref();
+            assert_eq!(&public_key.as_ref(), &key2_bytes);
+            Ok(())
+        } else {
+            panic!("Wrong message type");
+        }
+    }
+}
