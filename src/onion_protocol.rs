@@ -123,7 +123,7 @@ pub(crate) enum RelayMessage {
 impl SignedKey {
     pub(crate) fn sign(
         key: Key,
-        key_pair: signature::RsaKeyPair,
+        key_pair: &signature::RsaKeyPair,
         rng: &rand::SystemRandom,
     ) -> Result<Self> {
         let mut signature = vec![0; key_pair.public_modulus_len()];
@@ -384,6 +384,8 @@ impl TryFrom<OpaqueRelayMessage> for RelayMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::read_hostkey;
+    use ring::signature::KeyPair;
 
     #[test]
     fn test_onion_create() -> Result<()> {
@@ -392,13 +394,42 @@ mod tests {
         let public_key = private_key.compute_public_key()?;
         let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec());
 
-        let tunnel_id = 0;
-        let msg = OnionMessage::CreateRequest(tunnel_id, key);
+        let circuit_id = 0;
+        let msg = OnionMessage::CreateRequest(circuit_id, key);
         let mut buf = Vec::with_capacity(msg.size());
         msg.write_to(&mut buf)?;
         let read_msg = OnionMessage::read_from(&mut Cursor::new(buf))?;
-        if let OnionMessage::CreateRequest(tunnel_id2, key2) = read_msg {
-            assert_eq!(tunnel_id, tunnel_id2);
+        if let OnionMessage::CreateRequest(circuit_id2, key2) = read_msg {
+            assert_eq!(circuit_id, circuit_id2);
+            let key2_bytes: &[u8] = &key2.bytes().as_ref();
+            assert_eq!(&public_key.as_ref(), &key2_bytes);
+            Ok(())
+        } else {
+            panic!("Wrong message type");
+        }
+    }
+
+    #[test]
+    fn test_onion_created() -> Result<()> {
+        let rng = rand::SystemRandom::new();
+        let key_pair = signature::RsaKeyPair::from_pkcs8(&read_hostkey("testkey.pem")?)?;
+        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng)?;
+        let public_key = private_key.compute_public_key()?;
+        let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec());
+        let signed_key = SignedKey::sign(key, &key_pair, &rng)?;
+
+        let circuit_id = 0;
+        let msg = OnionMessage::CreateResponse(circuit_id, signed_key);
+        let mut buf = Vec::with_capacity(msg.size());
+        msg.write_to(&mut buf)?;
+        let read_msg = OnionMessage::read_from(&mut Cursor::new(buf))?;
+        if let OnionMessage::CreateResponse(circuit_id2, signed_key2) = read_msg {
+            assert_eq!(circuit_id, circuit_id2);
+            let rsa_public_key = signature::UnparsedPublicKey::new(
+                &signature::RSA_PKCS1_2048_8192_SHA256,
+                key_pair.public_key().as_ref().to_vec(),
+            );
+            let key2 = signed_key2.verify(rsa_public_key)?;
             let key2_bytes: &[u8] = &key2.bytes().as_ref();
             assert_eq!(&public_key.as_ref(), &key2_bytes);
             Ok(())
