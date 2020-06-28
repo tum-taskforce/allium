@@ -23,11 +23,11 @@ const ONION_RELAY_EXTENDED: u8 = 0x20;
 
 /// Length in bytes of the digest included in relay messages.
 /// Must not be greater than `digest::SHA256_OUTPUT_LEN` (= 32)
-const RELAY_DIGEST_LEN: usize = 12;
+pub(crate) const RELAY_DIGEST_LEN: usize = 12;
 const SIGNATURE_LEN: usize = 512;
 const KEY_LEN: usize = 32;
 
-const ONION_MESSAGE_SIZE: usize = 1024;
+pub(crate) const ONION_MESSAGE_SIZE: usize = 1024;
 const RELAY_MESSAGE_MAX_SIZE: usize = ONION_MESSAGE_SIZE - 4 - RELAY_DIGEST_LEN;
 const RELAY_DATA_MAX_SIZE: usize = RELAY_MESSAGE_MAX_SIZE - 8;
 
@@ -56,8 +56,8 @@ pub(crate) struct VerifyKey {
 /// key
 /// ```
 pub(crate) struct CircuitCreate {
-    circuit_id: CircuitId,
-    key: Key,
+    pub(crate) circuit_id: CircuitId,
+    pub(crate) key: Key,
 }
 
 /// A message exchanged between onion peers.
@@ -72,8 +72,8 @@ pub(crate) struct CircuitCreate {
 /// signed_key
 /// ```
 pub(crate) struct CircuitCreated<K> {
-    circuit_id: CircuitId,
-    key: K,
+    pub(crate) circuit_id: CircuitId,
+    pub(crate) key: K,
 }
 
 /// A message exchanged between onion peers.
@@ -88,8 +88,8 @@ pub(crate) struct CircuitCreated<K> {
 /// payload
 /// ```
 pub(crate) struct CircuitOpaque {
-    circuit_id: CircuitId,
-    payload: BytesMut,
+    pub(crate) circuit_id: CircuitId,
+    pub(crate) payload: BytesMut,
 }
 
 /// A fully decrypted relay message.
@@ -129,13 +129,13 @@ pub(crate) trait FromBytes {
     where
         Self: Sized;
 
-    fn read_with_digest_from(buf: &mut BytesMut, digest_len: usize) -> Result<Self>
+    fn read_with_digest_from(buf: &mut BytesMut) -> Result<Self>
     where
         Self: Sized,
     {
-        let digest = digest::digest(&digest::SHA256, &buf[digest_len..]);
-        if &digest.as_ref()[..digest_len] == &buf[..digest_len] {
-            buf.split_to(digest_len);
+        let digest = digest::digest(&digest::SHA256, &buf[RELAY_DIGEST_LEN..]);
+        if &digest.as_ref()[..RELAY_DIGEST_LEN] == &buf[..RELAY_DIGEST_LEN] {
+            buf.split_to(RELAY_DIGEST_LEN);
             Self::read_from(buf)
         } else {
             Err(anyhow!("Computed hash did not match the message hash"))
@@ -147,13 +147,20 @@ pub(crate) trait ToBytes {
     fn size(&self) -> usize;
     fn write_to(&self, buf: &mut BytesMut);
 
-    fn write_with_digest_to(&self, buf: &mut BytesMut, digest_len: usize) {
+    fn write_with_digest_to(&self, buf: &mut BytesMut, rng: &rand::SystemRandom) {
         let digest_start = buf.len();
-        let digest_end = digest_start + digest_len;
+        let digest_end = digest_start + RELAY_DIGEST_LEN;
         buf.resize(digest_end, 0);
-        self.write_to(buf);
+        self.write_padded_to(buf, rng, RELAY_MESSAGE_MAX_SIZE);
         let digest = digest::digest(&digest::SHA256, &buf[digest_end..]);
-        buf[digest_start..digest_end].copy_from_slice(&digest.as_ref()[..digest_len]);
+        buf[digest_start..digest_end].copy_from_slice(&digest.as_ref()[..RELAY_DIGEST_LEN]);
+    }
+
+    fn write_padded_to(&self, buf: &mut BytesMut, rng: &rand::SystemRandom, pad_size: usize) {
+        self.write_to(buf);
+        let msg_len = buf.len();
+        buf.resize(pad_size, 0);
+        rng.fill(&mut buf.as_mut()[msg_len..]).unwrap();
     }
 }
 
@@ -258,9 +265,9 @@ impl CircuitOpaque {
     pub(crate) fn decrypt(
         &mut self,
         rng: &rand::SystemRandom,
-        decrypt_keys: &[&aead::LessSafeKey],
+        decrypt_keys: impl Iterator<Item=aead::LessSafeKey>,
     ) -> Result<()> {
-        for key in decrypt_keys.iter() {
+        for key in decrypt_keys {
             let mut nonce_buf = [0u8; 12];
             rng.fill(&mut nonce_buf);
             let nonce = aead::Nonce::assume_unique_for_key(nonce_buf);
@@ -274,9 +281,9 @@ impl CircuitOpaque {
     pub(crate) fn encrypt(
         &mut self,
         rng: &rand::SystemRandom,
-        encrypt_keys: &[&aead::LessSafeKey],
+        encrypt_keys: impl Iterator<Item=aead::LessSafeKey>,
     ) -> Result<()> {
-        for key in encrypt_keys.iter() {
+        for key in encrypt_keys {
             let mut nonce_buf = [0u8; 12];
             rng.fill(&mut nonce_buf);
             let nonce = aead::Nonce::assume_unique_for_key(nonce_buf);
@@ -496,7 +503,7 @@ mod tests {
         let circuit_id = 0;
         let msg = CircuitCreate { circuit_id, key };
         let mut buf = BytesMut::with_capacity(msg.size());
-        msg.write_to(&mut buf);
+        msg.write_padded_to(&mut buf, &rng, ONION_MESSAGE_SIZE);
         let read_msg = CircuitCreate::read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
@@ -517,7 +524,7 @@ mod tests {
         let circuit_id = 0;
         let msg = CircuitCreated { circuit_id, key };
         let mut buf = BytesMut::with_capacity(msg.size());
-        msg.write_to(&mut buf);
+        msg.write_padded_to(&mut buf, &rng, ONION_MESSAGE_SIZE);
         let read_msg = CircuitCreated::read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
@@ -547,7 +554,7 @@ mod tests {
         let dest = "127.0.0.1:4201".parse().unwrap();
         let tunnel_msg = TunnelRequest::Extend(tunnel_id, dest, key);
         let mut buf = BytesMut::with_capacity(tunnel_msg.size());
-        tunnel_msg.write_with_digest_to(&mut buf, RELAY_DIGEST_LEN);
+        tunnel_msg.write_with_digest_to(&mut buf, &rng);
 
         let circuit_id = 0;
         let mut msg = CircuitOpaque {
@@ -556,7 +563,7 @@ mod tests {
         };
         msg.encrypt(&rng, &[&aes_key])?;
         let mut buf = BytesMut::with_capacity(msg.size());
-        msg.write_to(&mut buf);
+        msg.write_padded_to(&mut buf, &rng, ONION_MESSAGE_SIZE);
         let mut read_msg = CircuitOpaque::read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
