@@ -2,20 +2,20 @@
 #![allow(unused_variables)]
 use crate::onion_protocol::*;
 use anyhow::{anyhow, Context};
-use async_std::net::{SocketAddr, TcpStream, TcpListener};
+use async_std::net::{SocketAddr, TcpListener, TcpStream};
 use async_std::stream::Stream;
+use async_std::sync::{Arc, Mutex, RwLock};
 use async_std::{stream, task};
+use bytes::{Bytes, BytesMut};
 use futures::channel::mpsc::Receiver;
-use futures::{StreamExt, AsyncWriteExt, AsyncReadExt};
+use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use ring::rand::SecureRandom;
-use ring::{agreement, pbkdf2, rand, signature, aead};
+use ring::{aead, agreement, pbkdf2, rand, signature};
 use std::char::decode_utf16;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::io::{Cursor, Write};
 use std::net::IpAddr;
-use bytes::{BytesMut, Bytes};
-use async_std::sync::{Arc, RwLock, Mutex};
-use std::collections::hash_map::Entry;
 
 pub mod messages;
 mod onion_protocol;
@@ -30,12 +30,11 @@ pub struct Peer {
 
 impl Peer {
     pub fn new(addr: SocketAddr, hostkey: Vec<u8>) -> Self {
-        let hostkey =
-            signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, hostkey.into());
-        Peer {
-            addr,
-            hostkey,
-        }
+        let hostkey = signature::UnparsedPublicKey::new(
+            &signature::RSA_PKCS1_2048_8192_SHA256,
+            hostkey.into(),
+        );
+        Peer { addr, hostkey }
     }
 }
 
@@ -114,7 +113,12 @@ where
         })
     }
 
-    async fn insert_new_in_circuit(&self, circuit_id: CircuitId, stream: TcpStream, secret: aead::LessSafeKey) -> Result<&InCircuit> {
+    async fn insert_new_in_circuit(
+        &self,
+        circuit_id: CircuitId,
+        stream: TcpStream,
+        secret: aead::LessSafeKey,
+    ) -> Result<&InCircuit> {
         let in_circuit = InCircuit {
             base: Circuit {
                 id: circuit_id,
@@ -129,12 +133,18 @@ where
             map.insert(circuit_id, in_circuit);
             Ok(map.get(&circuit_id).unwrap())
         } else {
-            Err(anyhow!("Could not insert new InCircuit: CircuitId already in use"))
+            Err(anyhow!(
+                "Could not insert new InCircuit: CircuitId already in use"
+            ))
         }
     }
 
     // TODO deduplicate
-    async fn insert_new_out_circuit(&self, circuit_id: CircuitId, stream: TcpStream) -> Result<&OutCircuit> {
+    async fn insert_new_out_circuit(
+        &self,
+        circuit_id: CircuitId,
+        stream: TcpStream,
+    ) -> Result<&OutCircuit> {
         let out_circuit = OutCircuit {
             base: Circuit {
                 id: circuit_id,
@@ -148,7 +158,9 @@ where
             map.insert(circuit_id, out_circuit);
             Ok(map.get(&circuit_id).unwrap())
         } else {
-            Err(anyhow!("Could not insert new OutCircuit: CircuitId already in use"))
+            Err(anyhow!(
+                "Could not insert new OutCircuit: CircuitId already in use"
+            ))
         }
     }
 
@@ -210,7 +222,9 @@ where
         let secret = self.derive_secret(private_key, &msg.key).unwrap();
 
         // TODO errrr
-        let circuit = self.insert_new_in_circuit(circuit_id, stream, secret).await?;
+        let circuit = self
+            .insert_new_in_circuit(circuit_id, stream, secret)
+            .await?;
 
         let res = CircuitCreated { circuit_id, key };
         res.write_padded_to(&mut buf, &self.rng, ONION_MESSAGE_SIZE);
@@ -283,16 +297,20 @@ where
         // send secret to peer
         let mut stream = async_std::net::TcpStream::connect((peer.addr, peer.port)).await?;
         let mut buf = BytesMut::with_capacity(ONION_MESSAGE_SIZE);
-        let req = CircuitCreate { circuit_id, key: handshake_key };
+        let req = CircuitCreate {
+            circuit_id,
+            key: handshake_key,
+        };
         req.write_padded_to(&mut buf, &self.rng, ONION_MESSAGE_SIZE);
         stream.write_all(buf.as_ref()).await?;
 
         stream.read_exact(&mut buf).await?; // TODO handle timeout
-        let res = CircuitCreated::read_from(&mut buf)
-            .context("Could not read circuit created")?;
+        let res = CircuitCreated::read_from(&mut buf).context("Could not read circuit created")?;
 
         if res.circuit_id != circuit_id {
-            return Err(anyhow!("CircuitId in handshake response did not match sent CircuitId"))
+            return Err(anyhow!(
+                "CircuitId in handshake response did not match sent CircuitId"
+            ));
         }
 
         self.insert_new_out_circuit(circuit_id, stream);
@@ -357,9 +375,12 @@ where
         } else {
             // FIXME This case may be ignored or should be avoided
             // There should be either some hops and a circuit, or no hops
-            let out_circuit = tunnel.out_circuit
+            let out_circuit = tunnel
+                .out_circuit
                 .and_then(|id| self.out_circuits.read().await.get(&id))
-                .ok_or(anyhow!("Broken tunnel, no circuit defined, but existing hops."))?;
+                .ok_or(anyhow!(
+                    "Broken tunnel, no circuit defined, but existing hops."
+                ))?;
 
             // extend the tunnel with peer
             let tunnel_msg = TunnelRequest::Extend(tunnel.id, peer.addr, key);
@@ -384,7 +405,9 @@ where
             match tunnel_msg {
                 TunnelResponse::Extended(tunnel_id, read_key) => {
                     if tunnel_id != tunnel.id {
-                        return Err(anyhow!("TunnelId in Extended does not match the expected value"))
+                        return Err(anyhow!(
+                            "TunnelId in Extended does not match the expected value"
+                        ));
                     }
 
                     (out_circuit.base.id, read_key)
@@ -426,14 +449,19 @@ where
     }
 
     fn generate_ephemeral_key_pair(&self) -> Result<(agreement::EphemeralPrivateKey, Key)> {
-        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
+        let private_key =
+            agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
         let public_key = private_key.compute_public_key().unwrap();
         // TODO maybe avoid allocating here
         let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec().into());
         Ok((private_key, key))
     }
 
-    fn derive_secret(&self, private_key: agreement::EphemeralPrivateKey, peer_key: &Key) -> Result<aead::LessSafeKey> {
+    fn derive_secret(
+        &self,
+        private_key: agreement::EphemeralPrivateKey,
+        peer_key: &Key,
+    ) -> Result<aead::LessSafeKey> {
         // TODO use proper key derivation function
         agreement::agree_ephemeral(
             private_key,

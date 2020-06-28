@@ -265,7 +265,7 @@ impl CircuitOpaque {
     pub(crate) fn decrypt(
         &mut self,
         rng: &rand::SystemRandom,
-        decrypt_keys: impl Iterator<Item=aead::LessSafeKey>,
+        decrypt_keys: impl Iterator<Item = aead::LessSafeKey>,
     ) -> Result<()> {
         for key in decrypt_keys {
             let mut nonce_buf = [0u8; 12];
@@ -281,7 +281,7 @@ impl CircuitOpaque {
     pub(crate) fn encrypt(
         &mut self,
         rng: &rand::SystemRandom,
-        encrypt_keys: impl Iterator<Item=aead::LessSafeKey>,
+        encrypt_keys: impl Iterator<Item = aead::LessSafeKey>,
     ) -> Result<()> {
         for key in encrypt_keys {
             let mut nonce_buf = [0u8; 12];
