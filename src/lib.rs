@@ -63,7 +63,7 @@ struct OutCircuit {
 struct InCircuit {
     id: CircuitId,
     key: Vec<u8>,
-    partner: Option<CircuitId>
+    partner: Option<CircuitId>,
 }
 
 pub struct Onion<P: Stream<Item = Peer>> {
@@ -201,10 +201,8 @@ where
         };
         // TODO magic happens (encode req to bytes, write req to stream, recv response, decode), error handling
         let res: onion_protocol::CreatedMessage = todo!();
-        let peer_public_key = agreement::UnparsedPublicKey::new(
-            &agreement::X25519,
-            res.peer_secret,
-        );
+        let peer_public_key =
+            agreement::UnparsedPublicKey::new(&agreement::X25519, res.peer_secret);
 
         let circuit = OutCircuit {
             id: circuit_id,
@@ -257,11 +255,7 @@ where
     /// # Arguments
     /// * `peer` - the peer that should be exchanged keys with
     /// * `tunnel` - the tunnel that should be extended
-    async fn extend_tunnel(
-        &mut self,
-        peer: &Peer,
-        tunnel: &mut OutTunnel,
-    ) -> Result<()> {
+    async fn extend_tunnel(&mut self, peer: &Peer, tunnel: &mut OutTunnel) -> Result<()> {
         let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng)?;
         let public_key = private_key.compute_public_key()?;
 
@@ -269,7 +263,9 @@ where
             if tunnel.out_circuit.is_some() {
                 // FIXME This case may be ignored or should be avoided
                 // There should be either no hops and no circuit, or at least one hop
-                return Err(anyhow!("Broken tunnel, no hops defined, but existing out circuit."));
+                return Err(anyhow!(
+                    "Broken tunnel, no hops defined, but existing out circuit."
+                ));
             }
             // create first hop
             self.create_circuit(peer, public_key, None).await?
@@ -277,7 +273,9 @@ where
             if tunnel.out_circuit.is_none() {
                 // FIXME This case may be ignored or should be avoided
                 // There should be either some hops and a circuit, or no hops
-                return Err(anyhow!("Broken tunnel, no circuit defined, but existing hops."));
+                return Err(anyhow!(
+                    "Broken tunnel, no circuit defined, but existing hops."
+                ));
             }
             // extend the tunnel with peer
             let req = onion_protocol::RelayExtend {
@@ -287,7 +285,10 @@ where
             };
             // any errors that happen in this stage (i.e. timeout or errors from tunnel) cause a fail here and should be managed by the parent function
             // TODO Manage answer selection more elegantly
-            if let onion_protocol::RelayResponse::Extended(res) = self.relay_out(tunnel, onion_protocol::RelayRequest::Extend(req)).await? {
+            if let onion_protocol::RelayResponse::Extended(res) = self
+                .relay_out(tunnel, onion_protocol::RelayRequest::Extend(req))
+                .await?
+            {
                 (tunnel.out_circuit, res.key)
             } else {
                 return Err(anyhow!("No extended"));
@@ -306,9 +307,7 @@ where
             },
         )?;
 
-        let hop = Hop {
-            key: key
-        };
+        let hop = Hop { key: key };
 
         tunnel.out_circuit = out_circuit; // FIXME maybe there is a better way
         tunnel.hops.push(hop);

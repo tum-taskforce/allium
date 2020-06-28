@@ -7,8 +7,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::Result;
 use crate::{CircuitId, TunnelId};
 use async_std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use ring::{aead, agreement, digest, rand, signature};
 use ring::rand::SecureRandom;
+use ring::{aead, agreement, digest, rand, signature};
 
 type BE = byteorder::BigEndian;
 
@@ -255,7 +255,11 @@ impl ToBytes for CircuitOpaque {
 }
 
 impl CircuitOpaque {
-    pub(crate) fn decrypt(&mut self, rng: &rand::SystemRandom, decrypt_keys: &[&aead::LessSafeKey]) -> Result<()> {
+    pub(crate) fn decrypt(
+        &mut self,
+        rng: &rand::SystemRandom,
+        decrypt_keys: &[&aead::LessSafeKey],
+    ) -> Result<()> {
         for key in decrypt_keys.iter() {
             let mut nonce_buf = [0u8; 12];
             rng.fill(&mut nonce_buf);
@@ -267,14 +271,18 @@ impl CircuitOpaque {
         Ok(())
     }
 
-    pub(crate) fn encrypt(&mut self, rng: &rand::SystemRandom, encrypt_keys: &[&aead::LessSafeKey]) -> Result<()> {
+    pub(crate) fn encrypt(
+        &mut self,
+        rng: &rand::SystemRandom,
+        encrypt_keys: &[&aead::LessSafeKey],
+    ) -> Result<()> {
         for key in encrypt_keys.iter() {
             let mut nonce_buf = [0u8; 12];
             rng.fill(&mut nonce_buf);
             let nonce = aead::Nonce::assume_unique_for_key(nonce_buf);
-            let tag =
-                key.seal_in_place_separate_tag(nonce, aead::Aad::empty(), self.payload.as_mut())
-                    .context("Failed to encrypt message")?;
+            let tag = key
+                .seal_in_place_separate_tag(nonce, aead::Aad::empty(), self.payload.as_mut())
+                .context("Failed to encrypt message")?;
             self.payload.extend_from_slice(tag.as_ref())
         }
         Ok(())
@@ -475,8 +483,8 @@ impl ToBytes for IpAddr {
 mod tests {
     use super::*;
     use crate::utils::read_hostkey;
-    use ring::signature::KeyPair;
     use ring::rand::SecureRandom;
+    use ring::signature::KeyPair;
 
     #[test]
     fn test_circuit_create() -> Result<()> {
@@ -542,7 +550,10 @@ mod tests {
         tunnel_msg.write_with_digest_to(&mut buf, RELAY_DIGEST_LEN);
 
         let circuit_id = 0;
-        let mut msg = CircuitOpaque { circuit_id, payload: buf };
+        let mut msg = CircuitOpaque {
+            circuit_id,
+            payload: buf,
+        };
         msg.encrypt(&rng, &[&aes_key])?;
         let mut buf = BytesMut::with_capacity(msg.size());
         msg.write_to(&mut buf);
@@ -550,7 +561,8 @@ mod tests {
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(&rng, &[&aes_key])?;
-        let read_tunnel_msg = TunnelRequest::read_with_digest_from(&mut read_msg.payload, RELAY_DIGEST_LEN)?;
+        let read_tunnel_msg =
+            TunnelRequest::read_with_digest_from(&mut read_msg.payload, RELAY_DIGEST_LEN)?;
         if let TunnelRequest::Extend(tunnel_id2, dest2, key2) = read_tunnel_msg {
             assert_eq!(tunnel_id, tunnel_id2);
             assert_eq!(dest, dest2);
