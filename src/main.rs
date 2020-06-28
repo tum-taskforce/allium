@@ -95,6 +95,10 @@ impl OnionModule {
 
         let hostkey = utils::read_hostkey(&config.hostkey).context("Could not read hostkey")?;
         let onion = Onion::new(&hostkey, peer_provider)?;
+        /*task::spawn(async {
+            let addr = SocketAddr::new(config.onion.p2p_hostname.parse().unwrap(), config.onion.p2p_port);
+            onion.listen(addr).await.unwrap();
+        });*/
         Ok(OnionModule { onion, config, rps })
     }
 

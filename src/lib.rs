@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 use crate::onion_protocol::*;
 use anyhow::anyhow;
-use async_std::net::TcpStream;
+use async_std::net::{SocketAddr, TcpStream};
 use async_std::stream::Stream;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
@@ -126,9 +126,62 @@ where
         Ok(())
     }
 
-    pub async fn listen_p2p(&self) -> Result<()> {
+    pub async fn listen(&self, addr: SocketAddr) -> Result<()> {
         Ok(())
     }
+
+    /*
+    async fn handle_message(&self, msg: OnionMessage) {
+        match msg {
+            OnionMessage::CreateRequest(circuit_id, peer_key) => {
+                // - generate ephemeral key pair
+                let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng)?;
+                // - reply to sender with ephemeral public key
+                let public_key = self.sign_key(private_key.compute_public_key()?)?;
+                let res = OnionMessage::CreateResponse(circuit_id, public_key);
+                // TODO send response
+                // - obtain shared secret (aaed::LessSafeKey) from ephemeral private key and peer
+                //   key using agree_ephemeral and hkdf
+                let secret =
+            }
+            OnionMessage::CreateResponse(circuit_id, peer_key) => {
+                // _ if extension: send extended to in circuit peer
+                // - else: verify peer_key with peer hostkey
+                //   - obtain shared secret (aaed::LessSafeKey) from ephemeral private key and peer
+                //     key using agree_ephemeral and hkdf
+            }
+            OnionMessage::Relay(circuit_id, relay_msg) => {
+                // - decrypt with secret associated to circuit and try to parse
+                //    - if parsing works: handle relay message
+                //    - else: get relay circuit
+                //      - out circuit: forward decrypted message to peer
+                //      - in circuit: encrypt message and forward
+            }
+        }
+    }
+
+    fn sign_key(&self, public_key: agreement::PublicKey) -> Result<SignedKey> {
+        SignedKey::sign(
+            Key::new(&agreement::X25519, public_key.as_ref().to_vec()),
+            &self.hostkey,
+            &self.rng,
+        )
+    }
+
+    async fn handle_relay_message(&self, circuit_id: CircuitId, msg: RelayMessage) {
+        match msg {
+            RelayMessage::Extend(tunnel_id, dest, key) => {
+                // - send create message to dest containing key
+                // - associate circuit_id (in) with new circuit (out)
+            }
+            RelayMessage::Extended(tunnel_id, peer_key) => {
+                // - verify peer_key signature
+                // - save shared secret
+            }
+            RelayMessage::Data(tunnel_id, data) => {}
+        }
+    }
+    */
 
     /// Build a new circuit to `peer`. Sends a CREATE message to `peer` containing a the given DH secret.
     /// The returned CircuitId shall be a key of out_circuits.
