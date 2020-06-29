@@ -2,12 +2,11 @@ use crate::onion_protocol::{
     CircuitCreate, CircuitCreated, FromBytes, Key, SignKey, ToBytes, VerifyKey, ONION_MESSAGE_SIZE,
 };
 use crate::{CircuitId, Result};
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use async_std::io::{Read, Write};
-use async_std::net::TcpStream;
 use bytes::BytesMut;
 use futures::{AsyncReadExt, AsyncWriteExt};
-use ring::{aead, agreement, rand, signature};
+use ring::rand;
 
 pub(crate) struct OnionSocket<S> {
     stream: S,
@@ -33,7 +32,7 @@ impl<S: Write + Read> OnionSocket<S> {
 
         req.write_padded_to(&mut self.buf, rng, ONION_MESSAGE_SIZE);
         self.stream
-            .write_all(buf.as_ref())
+            .write_all(self.buf.as_ref())
             .await
             .context("Error while writing CircuitCreate")?;
 
@@ -59,14 +58,15 @@ impl<S: Write + Read> OnionSocket<S> {
             .read_exact(&mut self.buf)
             .await
             .context("Error while reading CircuitCreate")?; // TODO handle timeout
-        let msg = CircuitCreate::read_from(&mut buf).context("Invalid CircuitCreate message")?;
+        let msg =
+            CircuitCreate::read_from(&mut self.buf).context("Invalid CircuitCreate message")?;
         Ok((msg.circuit_id, msg.key))
     }
 
-    pub(crate) async fn finalize_handshake(
+    pub(crate) async fn finalize_handshake<'k>(
         &mut self,
         circuit_id: CircuitId,
-        key: SignKey,
+        key: SignKey<'k>,
         rng: &rand::SystemRandom,
     ) -> Result<()> {
         self.buf.clear();
@@ -75,7 +75,7 @@ impl<S: Write + Read> OnionSocket<S> {
         self.stream
             .write_all(&mut self.buf)
             .await
-            .context("Error while writing CircuitCreated"); // TODO handle timeout
+            .context("Error while writing CircuitCreated")?; // TODO handle timeout
         Ok(())
     }
 }
