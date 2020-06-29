@@ -19,6 +19,7 @@ use std::net::IpAddr;
 
 pub mod messages;
 mod onion_protocol;
+mod socket;
 mod utils;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
