@@ -75,11 +75,13 @@ struct InCircuit {
 
 impl Circuit {
     async fn write_all(&self, buf: &[u8]) -> Result<()> {
-        self.stream.lock().await.write_all(buf).await
+        self.stream.lock().await.write_all(buf).await?;
+        Ok(())
     }
 
     async fn read_exact(&self, buf: &mut [u8]) -> Result<()> {
-        self.stream.lock().await.read_exact(buf).await
+        self.stream.lock().await.read_exact(buf).await?;
+        Ok(())
     }
 }
 
@@ -229,8 +231,8 @@ where
         let res = CircuitCreated { circuit_id, key };
         res.write_padded_to(&mut buf, &self.rng, ONION_MESSAGE_SIZE);
         // TODO timeouts
-        if let Err(_) = circuit.write_all(buf.as_ref()).await {
-            self.in_circuits.write().await.remove(&circuit_id).unwrap()
+        if let Err(_) = circuit.base.write_all(buf.as_ref()).await {
+            self.in_circuits.write().await.remove(&circuit_id).unwrap();
         }
 
         // TODO recv loop
@@ -295,7 +297,7 @@ where
 
         // TODO refactor all this to separate function/module
         // send secret to peer
-        let mut stream = async_std::net::TcpStream::connect((peer.addr, peer.port)).await?;
+        let mut stream = async_std::net::TcpStream::connect(peer.addr).await?;
         let mut buf = BytesMut::with_capacity(ONION_MESSAGE_SIZE);
         let req = CircuitCreate {
             circuit_id,
@@ -375,12 +377,15 @@ where
         } else {
             // FIXME This case may be ignored or should be avoided
             // There should be either some hops and a circuit, or no hops
-            let out_circuit = tunnel
-                .out_circuit
-                .and_then(|id| self.out_circuits.read().await.get(&id))
-                .ok_or(anyhow!(
-                    "Broken tunnel, no circuit defined, but existing hops."
-                ))?;
+            let out_circuit_id = tunnel.out_circuit.ok_or(anyhow!(
+                "Broken tunnel, no circuit defined, but existing hops."
+            ))?;
+            let out_circuit = self
+                .out_circuits
+                .read()
+                .await
+                .get(&out_circuit_id)
+                .ok_or(anyhow!("Invalid out circuit id: {}", out_circuit_id))?;
 
             // extend the tunnel with peer
             let tunnel_msg = TunnelRequest::Extend(tunnel.id, peer.addr, key);
@@ -388,17 +393,17 @@ where
             tunnel_msg.write_with_digest_to(&mut buf, &self.rng);
 
             let mut msg = CircuitOpaque {
-                circuit_id: out_circuit.id,
+                circuit_id: out_circuit.base.id,
                 payload: buf,
             };
-            msg.encrypt(&self.rng, tunnel.hops.iter().rev().map(|hop| hop.secret))?;
+            msg.encrypt(&self.rng, tunnel.hops.iter().rev().map(|hop| &hop.secret))?;
             let mut buf = BytesMut::with_capacity(ONION_MESSAGE_SIZE);
             msg.write_padded_to(&mut buf, &self.rng, ONION_MESSAGE_SIZE);
             out_circuit.base.write_all(buf.as_ref());
 
             out_circuit.base.read_exact(buf.as_mut());
             let mut msg = CircuitOpaque::read_from(&mut buf)?;
-            msg.decrypt(&self.rng, tunnel.hops.iter().map(|hop| hop.secret))?;
+            msg.decrypt(&self.rng, tunnel.hops.iter().map(|hop| &hop.secret))?;
             let tunnel_msg = TunnelResponse::read_with_digest_from(&mut msg.payload)
                 .context("Could not read TunnelResponse")?;
 
