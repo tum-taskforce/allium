@@ -135,7 +135,7 @@ pub(crate) trait FromBytes {
     {
         let digest = digest::digest(&digest::SHA256, &buf[RELAY_DIGEST_LEN..]);
         if &digest.as_ref()[..RELAY_DIGEST_LEN] == &buf[..RELAY_DIGEST_LEN] {
-            buf.split_to(RELAY_DIGEST_LEN);
+            buf.advance(RELAY_DIGEST_LEN);
             Self::read_from(buf)
         } else {
             Err(anyhow!("Computed hash did not match the message hash"))
@@ -262,14 +262,14 @@ impl ToBytes for CircuitOpaque {
 }
 
 impl CircuitOpaque {
-    pub(crate) fn decrypt(
+    pub(crate) fn decrypt<'k>(
         &mut self,
         rng: &rand::SystemRandom,
-        decrypt_keys: impl Iterator<Item = aead::LessSafeKey>,
+        decrypt_keys: impl Iterator<Item = &'k aead::LessSafeKey>,
     ) -> Result<()> {
         for key in decrypt_keys {
             let mut nonce_buf = [0u8; 12];
-            rng.fill(&mut nonce_buf);
+            rng.fill(&mut nonce_buf)?;
             let nonce = aead::Nonce::assume_unique_for_key(nonce_buf);
             let plaintext = key.open_in_place(nonce, aead::Aad::empty(), self.payload.as_mut())?;
             let plaintext_len = plaintext.len();
@@ -278,14 +278,14 @@ impl CircuitOpaque {
         Ok(())
     }
 
-    pub(crate) fn encrypt(
+    pub(crate) fn encrypt<'k>(
         &mut self,
         rng: &rand::SystemRandom,
-        encrypt_keys: impl Iterator<Item = aead::LessSafeKey>,
+        encrypt_keys: impl Iterator<Item = &'k aead::LessSafeKey>,
     ) -> Result<()> {
         for key in encrypt_keys {
             let mut nonce_buf = [0u8; 12];
-            rng.fill(&mut nonce_buf);
+            rng.fill(&mut nonce_buf)?;
             let nonce = aead::Nonce::assume_unique_for_key(nonce_buf);
             let tag = key
                 .seal_in_place_separate_tag(nonce, aead::Aad::empty(), self.payload.as_mut())
@@ -546,9 +546,10 @@ mod tests {
         let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec().into());
 
         let mut aes_key_bytes = [0u8; 16];
-        rng.fill(&mut aes_key_bytes); // TODO not sure about this
-        let aes_key = aead::UnboundKey::new(&aead::AES_128_GCM, &aes_key_bytes)?;
-        let aes_key = aead::LessSafeKey::new(aes_key);
+        rng.fill(&mut aes_key_bytes)?; // TODO not sure about this
+        let aes_key =
+            aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &aes_key_bytes)?);
+        let aes_keys = [aes_key];
 
         let tunnel_id = 123;
         let dest = "127.0.0.1:4201".parse().unwrap();
@@ -561,15 +562,14 @@ mod tests {
             circuit_id,
             payload: buf,
         };
-        msg.encrypt(&rng, &[&aes_key])?;
+        msg.encrypt(&rng, aes_keys.iter())?;
         let mut buf = BytesMut::with_capacity(msg.size());
         msg.write_padded_to(&mut buf, &rng, ONION_MESSAGE_SIZE);
         let mut read_msg = CircuitOpaque::read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
-        read_msg.decrypt(&rng, &[&aes_key])?;
-        let read_tunnel_msg =
-            TunnelRequest::read_with_digest_from(&mut read_msg.payload, RELAY_DIGEST_LEN)?;
+        read_msg.decrypt(&rng, aes_keys.iter())?;
+        let read_tunnel_msg = TunnelRequest::read_with_digest_from(&mut read_msg.payload)?;
         if let TunnelRequest::Extend(tunnel_id2, dest2, key2) = read_tunnel_msg {
             assert_eq!(tunnel_id, tunnel_id2);
             assert_eq!(dest, dest2);

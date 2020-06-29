@@ -64,12 +64,13 @@ impl RpsModule {
         self.writer.write(RpsRequest::Query).await?;
         if let Some(msg) = self.reader.read_next().await? {
             match msg {
-                RpsResponse::Peer(port, portmap, peer_addr, peer_hostkey) => {
+                RpsResponse::Peer(_port, portmap, peer_addr, peer_hostkey) => {
                     let (_, peer_port) = portmap
                         .iter()
                         .find(|(m, _)| *m == Module::Onion)
                         .ok_or(anyhow!("Peer does not expose onion port"))?;
-                    Ok(Peer::new(peer_addr, *peer_port, peer_hostkey))
+                    let peer_addr = SocketAddr::new(peer_addr, *peer_port);
+                    Ok(Peer::new(peer_addr, peer_hostkey))
                 }
             }
         } else {

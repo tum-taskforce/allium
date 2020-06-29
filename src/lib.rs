@@ -134,7 +134,8 @@ where
         let mut map = self.in_circuits.write().await;
         if !map.contains_key(&circuit_id) {
             map.insert(circuit_id, in_circuit);
-            Ok(map.get(&circuit_id).unwrap())
+            todo!()
+        //Ok(map.get(&circuit_id).unwrap())
         } else {
             Err(anyhow!(
                 "Could not insert new InCircuit: CircuitId already in use"
@@ -159,7 +160,8 @@ where
         let mut map = self.out_circuits.write().await;
         if !map.contains_key(&circuit_id) {
             map.insert(circuit_id, out_circuit);
-            Ok(map.get(&circuit_id).unwrap())
+            //Ok(map.get(&circuit_id).unwrap())
+            todo!();
         } else {
             Err(anyhow!(
                 "Could not insert new OutCircuit: CircuitId already in use"
@@ -204,9 +206,9 @@ where
         while let Some(stream) = incoming.next().await {
             let stream = stream?;
             let handler = self.clone();
-            task::spawn(async move {
+            /*task::spawn(async move {
                 handler.handle(stream).await.unwrap();
-            });
+            });*/
         }
         Ok(())
     }
@@ -335,9 +337,10 @@ where
             let mut buf = [0u8; 2];
             self.rng.fill(&mut buf);
             let id: CircuitId = u16::from_le_bytes(buf);
-            if !self.out_circuits.contains_key(&id) && !self.in_circuits.contains_key(&id) {
-                return Ok(id);
-            }
+            return todo!();
+            // if !self.out_circuits.contains_key(&id) && !self.in_circuits.contains_key(&id) {
+            //     return Ok(id);
+            // }
         }
     }
 
@@ -347,9 +350,10 @@ where
             let mut buf = [0u8; 4];
             self.rng.fill(&mut buf);
             let id: TunnelId = u32::from_le_bytes(buf);
-            if !self.new_tunnels.contains_key(&id) {
-                return Ok(id);
-            }
+            return todo!();
+            // if !self.new_tunnels.contains_key(&id) {
+            //     return Ok(id);
+            // }
         }
     }
 
@@ -381,12 +385,13 @@ where
             let out_circuit_id = tunnel.out_circuit.ok_or(anyhow!(
                 "Broken tunnel, no circuit defined, but existing hops."
             ))?;
-            let out_circuit = self
-                .out_circuits
-                .read()
-                .await
-                .get(&out_circuit_id)
-                .ok_or(anyhow!("Invalid out circuit id: {}", out_circuit_id))?;
+            let out_circuit: &OutCircuit = todo!();
+            // let out_circuit = self
+            //     .out_circuits
+            //     .read()
+            //     .await
+            //     .get(&out_circuit_id)
+            //     .ok_or(anyhow!("Invalid out circuit id: {}", out_circuit_id))?;
 
             // extend the tunnel with peer
             let tunnel_msg = TunnelRequest::Extend(tunnel.id, peer.addr, key);
@@ -440,7 +445,7 @@ where
         tunnel: &OutTunnel,
         req: TunnelRequest,
     ) -> Result<TunnelResponse<VerifyKey>> {
-        self.relay_out_n(tunnel, tunnel.hops.len() - 1, req)
+        self.relay_out_n(tunnel, tunnel.hops.len() - 1, req).await
     }
 
     /// Sends the given relay message to the hop at index `n` in the tunnel
@@ -472,7 +477,7 @@ where
         agreement::agree_ephemeral(
             private_key,
             peer_key,
-            ring::error::Unspecified,
+            anyhow!("Key exchange failed"),
             |key_material| {
                 let unbound = aead::UnboundKey::new(&aead::AES_128_GCM, &key_material[..16])
                     .context("Could not construct unbound key from keying material")?;

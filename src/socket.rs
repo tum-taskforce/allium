@@ -13,7 +13,7 @@ pub(crate) struct OnionSocket<S> {
     buf: BytesMut,
 }
 
-impl<S: Write + Read> OnionSocket<S> {
+impl<S: Write + Read + Unpin> OnionSocket<S> {
     pub(crate) fn new(stream: S) -> Self {
         OnionSocket {
             stream,
