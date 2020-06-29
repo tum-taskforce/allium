@@ -161,7 +161,7 @@ where
         if !map.contains_key(&circuit_id) {
             map.insert(circuit_id, out_circuit);
             //Ok(map.get(&circuit_id).unwrap())
-            todo!();
+            todo!()
         } else {
             Err(anyhow!(
                 "Could not insert new OutCircuit: CircuitId already in use"
