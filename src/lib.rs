@@ -214,7 +214,7 @@ where
     }
 
     async fn handle(self: Arc<Self>, mut stream: TcpStream) -> Result<()> {
-        let mut buf = BytesMut::with_capacity(ONION_MESSAGE_SIZE);
+        let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
         stream.read_exact(&mut buf).await?; // TODO timeouts
         let msg = CircuitCreate::read_from(&mut buf)
             .context("Handshake with new connection failed: Invalid create message")?;
@@ -232,7 +232,7 @@ where
             .await?;
 
         let res = CircuitCreated { circuit_id, key };
-        res.write_padded_to(&mut buf, &self.rng, ONION_MESSAGE_SIZE);
+        res.write_padded_to(&mut buf, &self.rng, MESSAGE_SIZE);
         // TODO timeouts
         if let Err(_) = circuit.base.write_all(buf.as_ref()).await {
             self.in_circuits.write().await.remove(&circuit_id).unwrap();
@@ -301,12 +301,12 @@ where
         // TODO refactor all this to separate function/module
         // send secret to peer
         let mut stream = async_std::net::TcpStream::connect(peer.addr).await?;
-        let mut buf = BytesMut::with_capacity(ONION_MESSAGE_SIZE);
+        let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
         let req = CircuitCreate {
             circuit_id,
             key: handshake_key,
         };
-        req.write_padded_to(&mut buf, &self.rng, ONION_MESSAGE_SIZE);
+        req.write_padded_to(&mut buf, &self.rng, MESSAGE_SIZE);
         stream.write_all(buf.as_ref()).await?;
 
         stream.read_exact(&mut buf).await?; // TODO handle timeout
@@ -395,16 +395,16 @@ where
 
             // extend the tunnel with peer
             let tunnel_msg = TunnelRequest::Extend(tunnel.id, peer.addr, key);
-            let mut buf = BytesMut::with_capacity(tunnel_msg.size());
-            tunnel_msg.write_with_digest_to(&mut buf, &self.rng);
+            //let mut buf = BytesMut::with_capacity(tunnel_msg.size());
+            //tunnel_msg.write_with_digest_to(&mut buf, &self.rng);
 
-            let mut msg = CircuitOpaque {
-                circuit_id: out_circuit.base.id,
-                payload: buf,
-            };
-            msg.encrypt(&self.rng, tunnel.hops.iter().rev().map(|hop| &hop.secret))?;
-            let mut buf = BytesMut::with_capacity(ONION_MESSAGE_SIZE);
-            msg.write_padded_to(&mut buf, &self.rng, ONION_MESSAGE_SIZE);
+            //let mut msg = CircuitOpaque {
+            //    circuit_id: out_circuit.base.id,
+            //    payload: buf,
+            //};
+            //msg.encrypt(&self.rng, tunnel.hops.iter().rev().map(|hop| &hop.secret))?;
+            let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
+            //msg.write_padded_to(&mut buf, &self.rng, MESSAGE_SIZE);
             out_circuit.base.write_all(buf.as_ref());
 
             out_circuit.base.read_exact(buf.as_mut());

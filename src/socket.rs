@@ -1,5 +1,5 @@
 use crate::onion_protocol::{
-    CircuitCreate, CircuitCreated, FromBytes, Key, SignKey, ToBytes, VerifyKey, ONION_MESSAGE_SIZE,
+    CircuitCreate, CircuitCreated, FromBytes, Key, SignKey, ToBytes, VerifyKey, MESSAGE_SIZE,
 };
 use crate::{CircuitId, Result};
 use anyhow::{anyhow, Context};
@@ -17,7 +17,7 @@ impl<S: Write + Read + Unpin> OnionSocket<S> {
     pub(crate) fn new(stream: S) -> Self {
         OnionSocket {
             stream,
-            buf: BytesMut::with_capacity(ONION_MESSAGE_SIZE),
+            buf: BytesMut::with_capacity(MESSAGE_SIZE),
         }
     }
 
@@ -30,7 +30,7 @@ impl<S: Write + Read + Unpin> OnionSocket<S> {
         self.buf.clear();
         let req = CircuitCreate { circuit_id, key };
 
-        req.write_padded_to(&mut self.buf, rng, ONION_MESSAGE_SIZE);
+        req.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
         self.stream
             .write_all(self.buf.as_ref())
             .await
@@ -71,7 +71,7 @@ impl<S: Write + Read + Unpin> OnionSocket<S> {
     ) -> Result<()> {
         self.buf.clear();
         let res = CircuitCreated { circuit_id, key };
-        res.write_padded_to(&mut self.buf, rng, ONION_MESSAGE_SIZE);
+        res.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
         self.stream
             .write_all(&mut self.buf)
             .await
