@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::net::IpAddr;
 
 use anyhow::{anyhow, Context};
@@ -91,9 +90,9 @@ pub(crate) struct CircuitOpaque<P> {
 }
 
 pub(crate) struct CircuitOpaquePayload<'a, M> {
-    msg: &'a M,
-    rng: &'a rand::SystemRandom,
-    encrypt_keys: &'a [aead::LessSafeKey],
+    pub(crate) msg: &'a M,
+    pub(crate) rng: &'a rand::SystemRandom,
+    pub(crate) encrypt_keys: &'a [aead::LessSafeKey],
 }
 
 /// A fully decrypted relay message.
