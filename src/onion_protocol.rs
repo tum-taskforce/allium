@@ -28,8 +28,6 @@ const SIGNATURE_LEN: usize = 512;
 const KEY_LEN: usize = 32;
 
 pub(crate) const MESSAGE_SIZE: usize = 1024;
-const TUNNEL_MESSAGE_SIZE: usize = MESSAGE_SIZE - 4 - DIGEST_LEN;
-const TUNNEL_DATA_MAX_SIZE: usize = TUNNEL_MESSAGE_SIZE - 8;
 
 pub(crate) type Key = agreement::UnparsedPublicKey<Bytes>;
 
@@ -260,7 +258,9 @@ impl CircuitOpaque<BytesMut> {
                 .split_off(self.payload.len() - aead::NONCE_LEN)
                 .copy_to_slice(&mut nonce_buf);
             let nonce = aead::Nonce::assume_unique_for_key(nonce_buf);
-            let plaintext = key.open_in_place(nonce, aead::Aad::empty(), self.payload.as_mut())?;
+            let plaintext = key
+                .open_in_place(nonce, aead::Aad::empty(), self.payload.as_mut())
+                .context("Failed to decrypt message")?;
             let plaintext_len = plaintext.len();
             self.payload.truncate(plaintext_len);
         }
@@ -555,9 +555,8 @@ mod tests {
     #[test]
     fn test_circuit_create() -> Result<()> {
         let rng = rand::SystemRandom::new();
-        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng)?;
-        let public_key = private_key.compute_public_key()?;
-        let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec().into());
+        let key = generate_ephemeral_key(&rng)?;
+        let key_bytes = key.bytes().clone();
 
         let circuit_id = 0;
         let msg = CircuitCreate { circuit_id, key };
@@ -567,18 +566,18 @@ mod tests {
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         let key2_bytes: &[u8] = &read_msg.key.bytes().as_ref();
-        assert_eq!(&public_key.as_ref(), &key2_bytes);
+        assert_eq!(&key_bytes.as_ref(), &key2_bytes);
         Ok(())
     }
 
     #[test]
     fn test_circuit_created() -> Result<()> {
         let rng = rand::SystemRandom::new();
-        let key_pair = signature::RsaKeyPair::from_pkcs8(&read_hostkey("testkey.pem")?)?;
-        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng)?;
-        let public_key = private_key.compute_public_key()?;
-        let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec().into());
-        let key = SignKey::sign(&key, &key_pair, &rng);
+        let key = generate_ephemeral_key(&rng)?;
+        let key_bytes = key.bytes().clone();
+
+        let (rsa_private, rsa_public) = read_rsa_testkey()?;
+        let key = SignKey::sign(&key, &rsa_private, &rng);
 
         let circuit_id = 0;
         let msg = CircuitCreated { circuit_id, key };
@@ -587,28 +586,19 @@ mod tests {
         let read_msg = CircuitCreated::read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
-        let rsa_public_key = signature::UnparsedPublicKey::new(
-            &signature::RSA_PKCS1_2048_8192_SHA256,
-            key_pair.public_key().as_ref().to_vec().into(),
-        );
-        let key2 = read_msg.key.verify(&rsa_public_key)?;
+        let key2 = read_msg.key.verify(&rsa_public)?;
         let key2_bytes: &[u8] = &key2.bytes().as_ref();
-        assert_eq!(&public_key.as_ref(), &key2_bytes);
+        assert_eq!(&key_bytes.as_ref(), &key2_bytes);
         Ok(())
     }
 
     #[test]
     fn test_tunnel_extend() -> Result<()> {
         let rng = rand::SystemRandom::new();
-        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng)?;
-        let public_key = private_key.compute_public_key()?;
-        let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec().into());
+        let key = generate_ephemeral_key(&rng)?;
+        let key_bytes = key.bytes().clone();
 
-        let mut aes_key_bytes = [0u8; 16];
-        rng.fill(&mut aes_key_bytes)?; // TODO not sure about this
-        let aes_key =
-            aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &aes_key_bytes)?);
-        let aes_keys = [aes_key];
+        let aes_keys = generate_aes_keys(&rng)?;
 
         let tunnel_id = 123;
         let dest = "127.0.0.1:4201".parse().unwrap();
@@ -630,26 +620,84 @@ mod tests {
         let mut read_msg = CircuitOpaque::read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
-        read_msg
-            .decrypt(&rng, aes_keys.iter())
-            .expect("Failed to decrypt");
+        read_msg.decrypt(&rng, aes_keys.iter());
         let read_tunnel_msg = TunnelRequest::read_with_digest_from(&mut read_msg.payload)?;
         if let TunnelRequest::Extend(tunnel_id2, dest2, key2) = read_tunnel_msg {
             assert_eq!(tunnel_id, tunnel_id2);
             assert_eq!(dest, dest2);
             let key2_bytes: &[u8] = &key2.bytes().as_ref();
-            assert_eq!(&public_key.as_ref(), &key2_bytes);
+            assert_eq!(&key_bytes.as_ref(), &key2_bytes);
         }
         Ok(())
     }
 
     #[test]
     fn test_tunnel_extended() -> Result<()> {
+        let rng = rand::SystemRandom::new();
+        let key = generate_ephemeral_key(&rng)?;
+        let key_bytes = key.bytes().clone();
+
+        let (rsa_private, rsa_public) = read_rsa_testkey()?;
+        let key = SignKey::sign(&key, &rsa_private, &rng);
+
+        let aes_keys = generate_aes_keys(&rng)?;
+
+        let tunnel_id = 123;
+        let tunnel_msg = TunnelResponse::Extended(tunnel_id, key);
+        let circuit_id = 0;
+        let mut msg = CircuitOpaque {
+            circuit_id,
+            payload: CircuitOpaquePayload {
+                msg: &tunnel_msg,
+                rng: &rng,
+                encrypt_keys: &aes_keys,
+            },
+        };
+
+        let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
+        //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        msg.write_to(&mut buf);
+        assert_eq!(buf.len(), MESSAGE_SIZE);
+        let mut read_msg = CircuitOpaque::read_from(&mut buf)?;
+
+        assert_eq!(circuit_id, read_msg.circuit_id);
+        read_msg.decrypt(&rng, aes_keys.iter())?;
+        let read_tunnel_msg = TunnelResponse::read_with_digest_from(&mut read_msg.payload)?;
+        if let TunnelResponse::Extended(tunnel_id2, key2) = read_tunnel_msg {
+            assert_eq!(tunnel_id, tunnel_id2);
+            let key2 = key2.verify(&rsa_public)?;
+            let key2_bytes: &[u8] = &key2.bytes().as_ref();
+            assert_eq!(&key_bytes.as_ref(), &key2_bytes);
+        }
         Ok(())
     }
 
     #[test]
     fn test_tunnel_data() -> Result<()> {
         Ok(())
+    }
+
+    fn generate_ephemeral_key(rng: &rand::SystemRandom) -> Result<Key> {
+        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, rng)?;
+        let public_key = private_key.compute_public_key()?;
+        let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec().into());
+        Ok(key)
+    }
+
+    fn read_rsa_testkey() -> Result<(signature::RsaKeyPair, signature::UnparsedPublicKey<Bytes>)> {
+        let key_pair = signature::RsaKeyPair::from_pkcs8(&read_hostkey("testkey.pem")?)?;
+        let rsa_public_key = signature::UnparsedPublicKey::new(
+            &signature::RSA_PKCS1_2048_8192_SHA256,
+            key_pair.public_key().as_ref().to_vec().into(),
+        );
+        Ok((key_pair, rsa_public_key))
+    }
+
+    fn generate_aes_keys(rng: &rand::SystemRandom) -> Result<[aead::LessSafeKey; 1]> {
+        let mut aes_key_bytes = [0u8; 16];
+        rng.fill(&mut aes_key_bytes)?; // TODO not sure about this
+        let aes_key =
+            aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &aes_key_bytes)?);
+        Ok([aes_key])
     }
 }
