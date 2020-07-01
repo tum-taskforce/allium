@@ -8,8 +8,6 @@ use ring::rand::SecureRandom;
 use ring::{aead, agreement, digest, rand, signature};
 use std::net::SocketAddr;
 
-type BE = byteorder::BigEndian;
-
 const CIRCUIT_CREATE: u8 = 0x0;
 const CIRCUIT_CREATED: u8 = 0x1;
 const CIRCUIT_OPAQUE: u8 = 0x3;
