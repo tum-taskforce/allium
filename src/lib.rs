@@ -82,7 +82,7 @@ pub struct Onion<P: Stream<Item = Peer>> {
 
 impl<P> Onion<P>
 where
-    P: Stream<Item = Peer> + Send + Sync,
+    P: Stream<Item = Peer> + Send + Sync + 'static,
 {
     /// Construct a new onion instance.
     /// Returns Err if the supplied hostkey is invalid.
@@ -191,7 +191,9 @@ where
             let socket = OnionSocket::new(stream?);
             let handler = self.clone();
             tokio::spawn(async move {
-                handler.handle(socket).await.unwrap();
+                if let Err(e) = handler.handle(socket).await {
+                    eprintln!("{}", e);
+                }
             });
         }
         Ok(())
@@ -208,22 +210,25 @@ where
         let key = SignKey::sign(&key, &self.hostkey, &self.rng);
 
         let secret = self.derive_secret(private_key, &peer_key).unwrap();
-
-        // TODO errrr
-        let circuit = self
-            .insert_new_in_circuit(circuit_id, socket, secret)
+        socket
+            .finalize_handshake(circuit_id, key, &self.rng)
             .await?;
 
-        let res = circuit
-            .base
-            .socket
-            .lock()
-            .await
-            .finalize_handshake(circuit_id, key, &self.rng)
-            .await;
-        if let Err(_) = res {
-            self.in_circuits.write().await.remove(&circuit_id).unwrap();
-        }
+        // TODO errrr
+        // let circuit = self
+        //     .insert_new_in_circuit(circuit_id, socket, secret)
+        //     .await?;
+
+        // let res = circuit
+        //     .base
+        //     .socket
+        //     .lock()
+        //     .await
+        //     .finalize_handshake(circuit_id, key, &self.rng)
+        //     .await;
+        // if let Err(_) = res {
+        //     self.in_circuits.write().await.remove(&circuit_id).unwrap();
+        // }
 
         // TODO recv loop
         Ok(())
@@ -329,6 +334,21 @@ where
             //     return Ok(id);
             // }
         }
+    }
+
+    async fn connect_peer(&self, peer: &Peer) -> Result<()> {
+        let (private_key, key) = self.generate_ephemeral_key_pair().unwrap();
+
+        let circuit_id = 0;
+        let stream = TcpStream::connect(peer.addr).await?;
+        let mut socket = OnionSocket::new(stream);
+        let peer_key = socket
+            .initiate_handshake(circuit_id, key, &self.rng)
+            .await?;
+
+        let peer_key = peer_key.verify(&peer.hostkey)?;
+        let _secret = self.derive_secret(private_key, &peer_key)?;
+        Ok(())
     }
 
     /// Performs a key exchange with the given peer and extends the tunnel with a new circuit
@@ -444,6 +464,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ring::signature::KeyPair;
     use tokio::stream;
 
     #[tokio::test]
@@ -452,6 +473,20 @@ mod tests {
         let peer_provider = stream::empty();
         let onion = Arc::new(Onion::new(&host_key, peer_provider)?);
         onion.listen("127.0.0.1:4201".parse().unwrap()).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handshake() -> Result<()> {
+        let host_key = utils::read_hostkey("testkey.pem")?;
+        let peer_key = signature::RsaKeyPair::from_pkcs8(&host_key)?
+            .public_key()
+            .as_ref()
+            .to_vec();
+        let peer_provider = stream::empty();
+        let onion = Arc::new(Onion::new(&host_key, peer_provider)?);
+        let peer = Peer::new("127.0.0.1:4201".parse().unwrap(), peer_key);
+        onion.connect_peer(&peer).await?;
         Ok(())
     }
 }

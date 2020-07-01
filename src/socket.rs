@@ -55,7 +55,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     }
 
     pub(crate) async fn accept_handshake(&mut self) -> Result<(CircuitId, Key)> {
-        self.buf.clear();
+        self.buf.resize(MESSAGE_SIZE, 0);
         self.stream
             .read_exact(&mut self.buf)
             .await
