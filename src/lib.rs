@@ -12,7 +12,6 @@ use ring::rand::SecureRandom;
 use ring::{aead, agreement, rand, signature};
 use std::collections::HashMap;
 
-pub mod messages;
 mod onion_protocol;
 mod socket;
 mod utils;

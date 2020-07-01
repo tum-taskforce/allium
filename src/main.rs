@@ -3,16 +3,16 @@ use async_std::net::{SocketAddr, TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::sync::{Arc, Mutex};
 use async_std::{stream, task};
-use futures::io::{ReadHalf, WriteHalf};
-use futures::AsyncReadExt;
 use serde::Deserialize;
 
 #[allow(dead_code)]
 mod api_protocol;
 mod utils;
 
+use crate::utils::{FromBytes, ToBytes};
 use api_protocol::*;
-use onion::messages::*;
+use async_std::io::{Read, Write};
+use bytes::BytesMut;
 use onion::*;
 
 #[derive(Debug, Deserialize)]
@@ -46,23 +46,54 @@ struct RpsConfig {
     api_address: String,
 }
 
+struct ApiSocket<S> {
+    stream: S,
+    buf: BytesMut,
+}
+
+impl<S: Read + Write + Unpin> ApiSocket<S> {
+    pub(crate) fn new(stream: S) -> Self {
+        ApiSocket {
+            stream,
+            buf: BytesMut::new(),
+        }
+    }
+
+    pub async fn read_next<M: FromBytes>(&mut self) -> Result<Option<M>> {
+        let mut size_buf = [0u8; 2];
+        self.stream.read_exact(&mut size_buf).await?;
+        let size = u16::from_be_bytes(size_buf) as usize;
+
+        self.buf.clear();
+        self.buf.reserve(size);
+        self.buf.extend_from_slice(&size_buf);
+        self.stream.read_exact(&mut self.buf[2..]).await?;
+        Ok(Some(M::read_from(&mut self.buf)?))
+    }
+
+    pub async fn write<M: ToBytes>(&mut self, message: M) -> Result<()> {
+        self.buf.clear();
+        self.buf.reserve(message.size());
+        message.write_to(&mut self.buf);
+        self.stream.write_all(&self.buf).await?;
+        Ok(())
+    }
+}
+
 struct RpsModule {
-    reader: MessageReader<ReadHalf<TcpStream>>,
-    writer: MessageWriter<WriteHalf<TcpStream>>,
+    socket: ApiSocket<TcpStream>,
 }
 
 impl RpsModule {
     async fn connect(api_address: &str) -> Result<Self> {
         let stream = TcpStream::connect(api_address).await?;
-        let (reader, writer) = stream.split();
-        let reader = MessageReader::new(reader);
-        let writer = MessageWriter::new(writer);
-        Ok(RpsModule { reader, writer })
+        let socket = ApiSocket::new(stream);
+        Ok(RpsModule { socket })
     }
 
     async fn query(&mut self) -> Result<Peer> {
-        self.writer.write(RpsRequest::Query).await?;
-        if let Some(msg) = self.reader.read_next().await? {
+        self.socket.write(RpsRequest::Query).await?;
+        if let Some(msg) = self.socket.read_next().await? {
             match msg {
                 RpsResponse::Peer(_port, portmap, peer_addr, peer_hostkey) => {
                     let (_, peer_port) = portmap
@@ -70,7 +101,7 @@ impl RpsModule {
                         .find(|(m, _)| *m == Module::Onion)
                         .ok_or(anyhow!("Peer does not expose onion port"))?;
                     let peer_addr = SocketAddr::new(peer_addr, *peer_port);
-                    Ok(Peer::new(peer_addr, peer_hostkey))
+                    Ok(Peer::new(peer_addr, peer_hostkey.to_vec()))
                 }
             }
         } else {
@@ -120,17 +151,15 @@ impl OnionModule {
 
     async fn handle_api(self: Arc<Self>, stream: TcpStream) -> Result<()> {
         println!("Accepted api connection from: {}", stream.peer_addr()?);
-        let (reader, writer) = (&stream, &stream);
-        let mut reader = MessageReader::new(reader);
-        let mut writer = MessageWriter::new(writer);
+        let mut socket = ApiSocket::new(stream);
 
-        while let Some(msg) = reader.read_next::<OnionRequest>().await? {
+        while let Some(msg) = socket.read_next::<OnionRequest>().await? {
             let msg_id = msg.id();
             match msg {
-                OnionRequest::Build(onion_port, dst_addr, dst_hostkey) => {
+                OnionRequest::Build(_dst_addr, dst_hostkey) => {
                     let handler = self.clone();
                     task::spawn(async move {
-                        let res = match handler.onion.build_tunnel(3).await {
+                        let _res = match handler.onion.build_tunnel(3).await {
                             Ok(tunnel_id) => OnionResponse::Ready(tunnel_id, &dst_hostkey),
                             Err(_) => OnionResponse::Error(msg_id, todo!()),
                         };
@@ -143,7 +172,7 @@ impl OnionModule {
                 OnionRequest::Data(tunnel_id, tunnel_data) => {
                     self.onion.send_data(tunnel_id, &tunnel_data).await?;
                 }
-                OnionRequest::Cover(cover_size) => {
+                OnionRequest::Cover(_cover_size) => {
                     unimplemented!();
                 }
             }

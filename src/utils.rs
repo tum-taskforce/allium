@@ -1,25 +1,63 @@
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::Result;
+use bytes::{Buf, BufMut, BytesMut};
 use std::fs::File;
 
-/// Reads an IPv4 or IPv6 address from `r` depending on `is_ipv4`.
-/// Returns the parsed `IpAddr` and the number of bytes read, which is either 4 or 16.
-pub fn read_ip_addr_from<R: Read>(r: &mut R, is_ipv4: bool) -> Result<(IpAddr, usize)> {
-    if is_ipv4 {
-        let mut buf = [0u8; 4];
-        r.read_exact(&mut buf)?;
-        Ok((IpAddr::V4(Ipv4Addr::from(buf)), 4))
+pub(crate) trait FromBytes {
+    fn read_from(buf: &mut BytesMut) -> Result<Self>
+    where
+        Self: Sized;
+}
+
+pub(crate) trait ToBytes {
+    fn size(&self) -> usize;
+    fn write_to(&self, buf: &mut BytesMut);
+}
+
+impl FromBytes for Ipv4Addr {
+    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+        let mut octets = [0u8; 4];
+        buf.copy_to_slice(&mut octets);
+        Ok(Ipv4Addr::from(octets))
+    }
+}
+
+impl FromBytes for Ipv6Addr {
+    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+        let mut octets = [0u8; 16];
+        buf.copy_to_slice(&mut octets);
+        Ok(Ipv6Addr::from(octets))
+    }
+}
+
+pub fn get_ip_addr(buf: &mut BytesMut, is_ipv6: bool) -> IpAddr {
+    if !is_ipv6 {
+        IpAddr::V4(Ipv4Addr::read_from(buf).unwrap())
     } else {
-        let mut buf = [0u8; 16];
-        r.read_exact(&mut buf)?;
-        Ok((IpAddr::V6(Ipv6Addr::from(buf)), 16))
+        IpAddr::V6(Ipv6Addr::read_from(buf).unwrap())
+    }
+}
+
+impl ToBytes for IpAddr {
+    fn size(&self) -> usize {
+        match self {
+            IpAddr::V4(_) => 4,
+            IpAddr::V6(_) => 16,
+        }
+    }
+
+    fn write_to(&self, buf: &mut BytesMut) {
+        match self {
+            IpAddr::V4(ip) => buf.put(ip.octets().as_ref()),
+            IpAddr::V6(ip) => buf.put(ip.octets().as_ref()),
+        }
     }
 }
 
 pub(crate) fn read_hostkey(path: &str) -> Result<Vec<u8>> {
-    let mut file = BufReader::new(File::open(path)?);
+    let file = BufReader::new(File::open(path)?);
     let key = file
         .lines()
         .map(|line| line.unwrap())

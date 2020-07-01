@@ -1,7 +1,8 @@
 use crate::onion_protocol::{
-    CircuitCreate, CircuitCreated, CircuitOpaque, CircuitOpaquePayload, FromBytes, Key, SignKey,
-    ToBytes, TunnelRequest, TunnelResponse, VerifyKey, MESSAGE_SIZE,
+    CircuitCreate, CircuitCreated, CircuitOpaque, CircuitOpaquePayload, FromBytesExt, Key, SignKey,
+    ToBytesExt, TunnelRequest, TunnelResponse, VerifyKey, MESSAGE_SIZE,
 };
+use crate::utils::{FromBytes, ToBytes};
 use crate::{CircuitId, Result, TunnelId};
 use anyhow::{anyhow, Context};
 use async_std::io::{Read, Write};

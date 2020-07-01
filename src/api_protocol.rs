@@ -1,13 +1,10 @@
-use std::io::{Read, Write};
 use std::net::IpAddr;
 
-use crate::utils::read_ip_addr_from;
+use crate::utils::{get_ip_addr, FromBytes, ToBytes};
 use anyhow::anyhow;
-use byteorder::{ReadBytesExt, WriteBytesExt};
-use onion::messages::{ReadMessage, WriteMessage};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use onion::Result;
-
-type BE = byteorder::BigEndian;
+use std::net::SocketAddr;
 
 const ONION_TUNNEL_BUILD: u16 = 560;
 const ONION_TUNNEL_READY: u16 = 561;
@@ -22,11 +19,7 @@ const ONION_TUNNEL_COVER: u16 = 566;
 pub enum OnionRequest {
     /// This message is to be used by the CM/UI module to request the Onion module to build a tunnel
     /// to the given destination in the next period.
-    Build(
-        /* onion_port */ u16,
-        /* dst_addr */ IpAddr,
-        /* dst_hostkey */ Vec<u8>,
-    ),
+    Build(/* dst_addr */ SocketAddr, /* dst_hostkey */ Bytes),
     /// This message is used to instruct the Onion module that a tunnel it created is no longer in
     /// use and can now be destroyed. The tunnel ID should be valid, i.e., it should have been
     /// solicited by the Onion module in a previous ONION TUNNEL READY or ONION TUNNEL INCOMING
@@ -37,7 +30,7 @@ pub enum OnionRequest {
     /// tunnel which is used to forwarding the data; for incoming data it is the tunnel on which the
     /// data is received. For outgoing data, Onion should make a best effort to forward the given
     /// data. However, no guarantee is given: the data could be lost and/or delivered out of order.
-    Data(/* tunnel_id */ u32, /* tunnel_data */ Vec<u8>),
+    Data(/* tunnel_id */ u32, /* tunnel_data */ Bytes),
     /// This message identifies cover traffic which is sent to a random destination by the Onion
     /// module. The CM/UI module uses this message to fabricate cover traffic, mimicking the
     /// characteristics of real VoIP traffic. Upon receiving this message, the Onion module should
@@ -47,42 +40,43 @@ pub enum OnionRequest {
     Cover(/* cover_size */ u16),
 }
 
-impl ReadMessage for OnionRequest {
-    fn read_from<R: Read>(r: &mut R) -> Result<Self> {
-        let size = r.read_u16::<BE>()? as usize;
-        let message_type = r.read_u16::<BE>()?;
+impl FromBytes for OnionRequest {
+    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+        let size = buf.get_u16() as usize;
+        let message_type = buf.get_u16();
         return match message_type {
             ONION_TUNNEL_BUILD => {
-                let flag = r.read_u16::<BE>()?;
-                let onion_port = r.read_u16::<BE>()?;
-                let (dst_addr, addr_len) = read_ip_addr_from(r, (flag & 1) == 0)?;
+                let flag = buf.get_u16();
+                let dst_port = buf.get_u16();
+                let dst_ip = get_ip_addr(buf, (flag & 1) == 1);
+                let dst_addr = SocketAddr::new(dst_ip, dst_port);
 
-                let mut dst_hostkey = vec![0u8; size - 8 - addr_len];
-                r.read_exact(&mut dst_hostkey)?;
-                Ok(OnionRequest::Build(onion_port, dst_addr, dst_hostkey))
+                let dst_hostkey = buf.split_to(size - 8 - dst_addr.ip().size()).freeze();
+                Ok(OnionRequest::Build(dst_addr, dst_hostkey))
             }
             ONION_TUNNEL_DESTROY => {
-                let tunnel_id = r.read_u32::<BE>()?;
+                let tunnel_id = buf.get_u32();
                 Ok(OnionRequest::Destroy(tunnel_id))
             }
             ONION_TUNNEL_DATA => {
-                let tunnel_id = r.read_u32::<BE>()?;
-                let mut data = vec![0u8; size as usize - 8];
-                r.read_exact(&mut data)?;
+                let tunnel_id = buf.get_u32();
+                let data = buf.split_to(size - 8).freeze();
                 Ok(OnionRequest::Data(tunnel_id, data))
             }
             ONION_TUNNEL_COVER => {
-                let cover_size = r.read_u16::<BE>()?;
-                r.read_u16::<BE>()?;
+                let cover_size = buf.get_u16();
+                buf.get_u16();
                 Ok(OnionRequest::Cover(cover_size))
             }
             _ => Err(anyhow!("Unknown onion message type: {}", message_type)),
         };
     }
+}
 
-    fn id(&self) -> u16 {
+impl OnionRequest {
+    pub fn id(&self) -> u16 {
         match self {
-            OnionRequest::Build(_, _, _) => ONION_TUNNEL_BUILD,
+            OnionRequest::Build(_, _) => ONION_TUNNEL_BUILD,
             OnionRequest::Destroy(_) => ONION_TUNNEL_DESTROY,
             OnionRequest::Data(_, _) => ONION_TUNNEL_DATA,
             OnionRequest::Cover(_) => ONION_TUNNEL_COVER,
@@ -120,7 +114,7 @@ pub enum OnionResponse<'a> {
     Error(/* request_type */ u16, /* tunnel_id */ u32),
 }
 
-impl WriteMessage for OnionResponse<'_> {
+impl ToBytes for OnionResponse<'_> {
     fn size(&self) -> usize {
         match self {
             OnionResponse::Ready(_, dst_hostkey) => 8 + dst_hostkey.len(),
@@ -130,34 +124,33 @@ impl WriteMessage for OnionResponse<'_> {
         }
     }
 
-    fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
+    fn write_to(&self, buf: &mut BytesMut) {
         match self {
             OnionResponse::Ready(tunnel_id, dst_hostkey) => {
-                w.write_u16::<BE>(self.size() as u16)?;
-                w.write_u16::<BE>(ONION_TUNNEL_READY)?;
-                w.write_u32::<BE>(*tunnel_id)?;
-                w.write_all(dst_hostkey)?;
+                buf.put_u16(self.size() as u16);
+                buf.put_u16(ONION_TUNNEL_READY);
+                buf.put_u32(*tunnel_id);
+                buf.put(*dst_hostkey);
             }
             OnionResponse::Incoming(tunnel_id) => {
-                w.write_u16::<BE>(self.size() as u16)?;
-                w.write_u16::<BE>(ONION_TUNNEL_INCOMING)?;
-                w.write_u32::<BE>(*tunnel_id)?;
+                buf.put_u16(self.size() as u16);
+                buf.put_u16(ONION_TUNNEL_INCOMING);
+                buf.put_u32(*tunnel_id);
             }
             OnionResponse::Data(tunnel_id, tunnel_data) => {
-                w.write_u16::<BE>(self.size() as u16)?;
-                w.write_u16::<BE>(ONION_TUNNEL_DATA)?;
-                w.write_u32::<BE>(*tunnel_id)?;
-                w.write_all(tunnel_data)?;
+                buf.put_u16(self.size() as u16);
+                buf.put_u16(ONION_TUNNEL_DATA);
+                buf.put_u32(*tunnel_id);
+                buf.put(*tunnel_data);
             }
             OnionResponse::Error(request_type, tunnel_id) => {
-                w.write_u16::<BE>(self.size() as u16)?;
-                w.write_u16::<BE>(ONION_TUNNEL_ERROR)?;
-                w.write_u16::<BE>(*request_type)?;
-                w.write_u16::<BE>(0)?;
-                w.write_u32::<BE>(*tunnel_id)?;
+                buf.put_u16(self.size() as u16);
+                buf.put_u16(ONION_TUNNEL_ERROR);
+                buf.put_u16(*request_type);
+                buf.put_u16(0);
+                buf.put_u32(*tunnel_id);
             }
         }
-        Ok(())
     }
 }
 
@@ -196,21 +189,20 @@ pub enum RpsRequest {
     Query,
 }
 
-impl WriteMessage for RpsRequest {
+impl ToBytes for RpsRequest {
     fn size(&self) -> usize {
         match self {
             RpsRequest::Query => 4,
         }
     }
 
-    fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
+    fn write_to(&self, buf: &mut BytesMut) {
         match self {
             RpsRequest::Query => {
-                w.write_u16::<BE>(self.size() as u16)?;
-                w.write_u16::<BE>(RPS_QUERY)?;
+                buf.put_u16(self.size() as u16);
+                buf.put_u16(RPS_QUERY);
             }
         }
-        Ok(())
     }
 }
 
@@ -227,37 +219,40 @@ pub enum RpsResponse {
         /* port */ u16,
         /* portmap */ Vec<(Module, u16)>,
         /* peer_addr */ IpAddr,
-        /* peer_hostkey */ Vec<u8>,
+        /* peer_hostkey */ Bytes,
     ),
 }
 
-impl ReadMessage for RpsResponse {
-    fn read_from<R: Read>(r: &mut R) -> Result<Self> {
-        let size = r.read_u16::<BE>()? as usize;
-        let message_type = r.read_u16::<BE>()?;
+impl FromBytes for RpsResponse {
+    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+        let size = buf.get_u16() as usize;
+        let message_type = buf.get_u16();
         return match message_type {
             RPS_PEER => {
-                let port = r.read_u16::<BE>()?;
-                let portmap_len = r.read_u8()? as usize;
-                let flag = r.read_u8()?;
+                let port = buf.get_u16();
+                let portmap_len = buf.get_u8() as usize;
+                let flag = buf.get_u8();
 
                 let mut portmap = Vec::with_capacity(portmap_len);
                 for _ in 0..portmap_len {
-                    let mod_id = r.read_u16::<BE>()?;
-                    let port = r.read_u16::<BE>()?;
+                    let mod_id = buf.get_u16();
+                    let port = buf.get_u16();
                     portmap.push((Module::from_id(mod_id)?, port))
                 }
 
-                let (peer_addr, addr_len) = read_ip_addr_from(r, (flag & 1) == 0)?;
-                let mut peer_hostkey = vec![0u8; size - 8 - portmap_len * 4 - addr_len];
-                r.read_exact(&mut peer_hostkey)?;
+                let peer_addr = get_ip_addr(buf, (flag & 1) == 1);
+                let peer_hostkey = buf
+                    .split_to(size - 8 - portmap_len * 4 - peer_addr.size())
+                    .freeze();
                 Ok(RpsResponse::Peer(port, portmap, peer_addr, peer_hostkey))
             }
             _ => Err(anyhow!("Unknown RPS message type: {}", message_type)),
         };
     }
+}
 
-    fn id(&self) -> u16 {
+impl RpsResponse {
+    pub fn id(&self) -> u16 {
         match self {
             RpsResponse::Peer(_, _, _, _) => RPS_PEER,
         }
