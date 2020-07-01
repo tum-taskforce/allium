@@ -3,14 +3,16 @@
 use crate::onion_protocol::*;
 use crate::socket::OnionSocket;
 use anyhow::{anyhow, Context};
-use async_std::net::{SocketAddr, TcpListener, TcpStream};
-use async_std::stream::Stream;
-use async_std::sync::{Arc, Mutex, RwLock};
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::stream::StreamExt;
 use ring::rand::SecureRandom;
 use ring::{aead, agreement, rand, signature};
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::stream::Stream;
+use tokio::sync::{Mutex, RwLock};
 
 mod onion_protocol;
 mod socket;
@@ -182,7 +184,7 @@ where
     }
 
     pub async fn listen(self: Arc<Self>, addr: SocketAddr) -> Result<()> {
-        let listener = TcpListener::bind(addr).await?;
+        let mut listener = TcpListener::bind(addr).await?;
         println!("Listening fo p2p connections on {}", listener.local_addr()?);
         let mut incoming = listener.incoming();
         while let Some(stream) = incoming.next().await {
@@ -284,7 +286,7 @@ where
         let circuit_id = self.generate_circuit_id()?;
 
         // send secret to peer
-        let stream = async_std::net::TcpStream::connect(peer.addr).await?;
+        let stream = TcpStream::connect(peer.addr).await?;
         let mut socket = OnionSocket::new(stream);
         let peer_key = socket
             .initiate_handshake(circuit_id, handshake_key, &self.rng)

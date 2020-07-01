@@ -1,19 +1,20 @@
+use crate::utils::{FromBytes, ToBytes};
 use anyhow::{anyhow, Context};
-use async_std::net::{SocketAddr, TcpListener, TcpStream};
-use async_std::prelude::*;
-use async_std::sync::{Arc, Mutex};
-use async_std::{stream, task};
+use api_protocol::*;
+use bytes::BytesMut;
+use futures::stream::StreamExt;
+use onion::*;
 use serde::Deserialize;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::prelude::*;
+use tokio::stream;
+use tokio::sync::Mutex;
 
 #[allow(dead_code)]
 mod api_protocol;
 mod utils;
-
-use crate::utils::{FromBytes, ToBytes};
-use api_protocol::*;
-use async_std::io::{Read, Write};
-use bytes::BytesMut;
-use onion::*;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -51,7 +52,7 @@ struct ApiSocket<S> {
     buf: BytesMut,
 }
 
-impl<S: Read + Write + Unpin> ApiSocket<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin> ApiSocket<S> {
     pub(crate) fn new(stream: S) -> Self {
         ApiSocket {
             stream,
@@ -136,13 +137,13 @@ impl OnionModule {
 
     async fn listen_api(self: Arc<Self>) -> Result<()> {
         let api_address = &self.config.onion.api_address;
-        let listener = TcpListener::bind(api_address).await?;
+        let mut listener = TcpListener::bind(api_address).await?;
         println!("Listening fo api connections on {}", listener.local_addr()?);
         let mut incoming = listener.incoming();
         while let Some(stream) = incoming.next().await {
             let stream = stream?;
             let handler = self.clone();
-            task::spawn(async move {
+            tokio::spawn(async move {
                 handler.handle_api(stream).await.unwrap();
             });
         }
@@ -158,7 +159,7 @@ impl OnionModule {
             match msg {
                 OnionRequest::Build(_dst_addr, dst_hostkey) => {
                     let handler = self.clone();
-                    task::spawn(async move {
+                    tokio::spawn(async move {
                         let _res = match handler.onion.build_tunnel(3).await {
                             Ok(tunnel_id) => OnionResponse::Ready(tunnel_id, &dst_hostkey),
                             Err(_) => OnionResponse::Error(msg_id, todo!()),
@@ -181,7 +182,7 @@ impl OnionModule {
     }
 }
 
-#[async_std::main]
+#[tokio::main]
 async fn main() -> Result<()> {
     #[rustfmt::skip]
     let config: Config = toml::from_str(r#"

@@ -5,18 +5,17 @@ use crate::onion_protocol::{
 use crate::utils::{FromBytes, ToBytes};
 use crate::{CircuitId, Result, TunnelId};
 use anyhow::{anyhow, Context};
-use async_std::io::{Read, Write};
-use async_std::net::SocketAddr;
 use bytes::BytesMut;
-use futures::{AsyncReadExt, AsyncWriteExt};
 use ring::{aead, rand};
+use std::net::SocketAddr;
+use tokio::prelude::*;
 
 pub(crate) struct OnionSocket<S> {
     stream: S,
     buf: BytesMut,
 }
 
-impl<S: Write + Read + Unpin> OnionSocket<S> {
+impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     pub(crate) fn new(stream: S) -> Self {
         OnionSocket {
             stream,
