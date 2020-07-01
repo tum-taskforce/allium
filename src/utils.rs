@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn test_read_hostkey() -> Result<()> {
         let data = read_hostkey("testkey.pem")?;
-        let hostkey = RsaKeyPair::from_pkcs8(&data)?;
+        let _hostkey = RsaKeyPair::from_pkcs8(&data)?;
         Ok(())
     }
 }

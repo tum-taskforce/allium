@@ -557,7 +557,7 @@ mod tests {
         let dest = "127.0.0.1:4201".parse().unwrap();
         let tunnel_msg = TunnelRequest::Extend(tunnel_id, dest, key);
         let circuit_id = 0;
-        let mut msg = CircuitOpaque {
+        let msg = CircuitOpaque {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_msg,
@@ -573,7 +573,7 @@ mod tests {
         let mut read_msg = CircuitOpaque::read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
-        read_msg.decrypt(&rng, aes_keys.iter());
+        read_msg.decrypt(&rng, aes_keys.iter())?;
         let read_tunnel_msg = TunnelRequest::read_with_digest_from(&mut read_msg.payload)?;
         if let TunnelRequest::Extend(tunnel_id2, dest2, key2) = read_tunnel_msg {
             assert_eq!(tunnel_id, tunnel_id2);
@@ -598,7 +598,7 @@ mod tests {
         let tunnel_id = 123;
         let tunnel_msg = TunnelResponse::Extended(tunnel_id, key);
         let circuit_id = 0;
-        let mut msg = CircuitOpaque {
+        let msg = CircuitOpaque {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_msg,
@@ -616,11 +616,13 @@ mod tests {
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(&rng, aes_keys.iter())?;
         let read_tunnel_msg = TunnelResponse::read_with_digest_from(&mut read_msg.payload)?;
-        if let TunnelResponse::Extended(tunnel_id2, key2) = read_tunnel_msg {
-            assert_eq!(tunnel_id, tunnel_id2);
-            let key2 = key2.verify(&rsa_public)?;
-            let key2_bytes: &[u8] = &key2.bytes().as_ref();
-            assert_eq!(&key_bytes.as_ref(), &key2_bytes);
+        match read_tunnel_msg {
+            TunnelResponse::Extended(tunnel_id2, key2) => {
+                assert_eq!(tunnel_id, tunnel_id2);
+                let key2 = key2.verify(&rsa_public)?;
+                let key2_bytes: &[u8] = &key2.bytes().as_ref();
+                assert_eq!(&key_bytes.as_ref(), &key2_bytes);
+            }
         }
         Ok(())
     }
