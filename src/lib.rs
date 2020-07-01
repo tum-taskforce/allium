@@ -210,6 +210,7 @@ where
         let key = SignKey::sign(&key, &self.hostkey, &self.rng);
 
         let secret = self.derive_secret(private_key, &peer_key).unwrap();
+        let aes_keys = [secret];
         socket
             .finalize_handshake(circuit_id, key, &self.rng)
             .await?;
@@ -230,7 +231,62 @@ where
         //     self.in_circuits.write().await.remove(&circuit_id).unwrap();
         // }
 
-        // TODO recv loop
+        // should be Option<Circuit>
+        let mut relay_circuit_id: Option<CircuitId> = None;
+        let mut relay_socket: Option<OnionSocket<TcpStream>> = None;
+        // TODO timeouts, also handle incoming messages from realy_socket
+        while let msg = socket.next_message().await {
+            match msg {
+                Ok(mut msg) => {
+                    // match msg source, don't decrypt msgs from relay_socket
+                    msg.decrypt(&self.rng, aes_keys.iter())?;
+                    match TunnelRequest::read_with_digest_from(&mut msg.payload) {
+                        Ok(tunnel_msg) => {
+                            // addressed to us
+                            match tunnel_msg {
+                                TunnelRequest::Extend(tunnel_id, dest, key) => {
+                                    if relay_socket.is_some() {
+                                        // error
+                                        continue;
+                                    }
+
+                                    // TODO handle connect failure
+                                    let stream = TcpStream::connect(dest).await?;
+                                    relay_circuit_id = Some(0); // TODO generate
+                                    relay_socket = Some(OnionSocket::new(stream));
+                                    let peer_key = relay_socket
+                                        .as_mut()
+                                        .unwrap() // TODO avoid unwrap here
+                                        .initiate_handshake(circuit_id, key, &self.rng)
+                                        .await?;
+
+                                    socket
+                                        .finalize_tunnel_handshake(
+                                            circuit_id, tunnel_id, peer_key, &aes_keys, &self.rng,
+                                        )
+                                        .await?;
+                                }
+                                TunnelRequest::Data(tunnel_id, data) => unimplemented!(),
+                            }
+                        }
+                        Err(e) => {
+                            // forward to relay_socket (only if digest wrong)
+                            if let Some(relay_socket) = &mut relay_socket {
+                                // TODO avoid unwrap here
+                                relay_socket
+                                    .send_opaque(relay_circuit_id.unwrap(), msg.payload, &self.rng)
+                                    .await?;
+                            } else {
+                                // no realy_socket => proto breach teardown
+                            }
+                        }
+                    }
+                }
+                Err(_e) => {
+                    // socket closed or failed to read opaque message teardown
+                }
+            }
+        }
         Ok(())
     }
 
@@ -339,7 +395,7 @@ where
     async fn connect_peer(&self, peer: &Peer) -> Result<()> {
         let (private_key, key) = self.generate_ephemeral_key_pair().unwrap();
 
-        let circuit_id = 0;
+        let circuit_id = 0; // TODO random
         let stream = TcpStream::connect(peer.addr).await?;
         let mut socket = OnionSocket::new(stream);
         let peer_key = socket

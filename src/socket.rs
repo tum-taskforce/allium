@@ -136,4 +136,45 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             }
         }
     }
+
+    pub(crate) async fn finalize_tunnel_handshake(
+        &mut self,
+        circuit_id: CircuitId,
+        tunnel_id: TunnelId,
+        key: VerifyKey,
+        aes_keys: &[aead::LessSafeKey],
+        rng: &rand::SystemRandom,
+    ) -> Result<()> {
+        self.buf.clear();
+        let tunnel_req = TunnelResponse::Extended(tunnel_id, key);
+        let req = CircuitOpaque {
+            circuit_id,
+            payload: CircuitOpaquePayload {
+                msg: &tunnel_req,
+                rng,
+                encrypt_keys: aes_keys,
+            },
+        };
+
+        //req.write_to(&mut self.buf); FIXME
+        assert_eq!(self.buf.len(), MESSAGE_SIZE);
+        self.stream
+            .write_all(self.buf.as_ref())
+            .await
+            .context("Error while writing CircuitOpaque<TunnelRequest::Extend>")?;
+        Ok(())
+    }
+
+    pub(crate) async fn next_message(&mut self) -> Result<CircuitOpaque<BytesMut>> {
+        todo!()
+    }
+
+    pub(crate) async fn send_opaque(
+        &mut self,
+        circuit_id: CircuitId,
+        payload: BytesMut,
+        rng: &rand::SystemRandom,
+    ) -> Result<()> {
+        todo!()
+    }
 }
