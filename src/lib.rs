@@ -82,7 +82,7 @@ pub struct Onion<P: Stream<Item = Peer>> {
 
 impl<P> Onion<P>
 where
-    P: Stream<Item = Peer>,
+    P: Stream<Item = Peer> + Send + Sync,
 {
     /// Construct a new onion instance.
     /// Returns Err if the supplied hostkey is invalid.
@@ -190,9 +190,9 @@ where
         while let Some(stream) = incoming.next().await {
             let socket = OnionSocket::new(stream?);
             let handler = self.clone();
-            /*task::spawn(async move {
-                handler.handle(stream).await.unwrap();
-            });*/
+            tokio::spawn(async move {
+                handler.handle(socket).await.unwrap();
+            });
         }
         Ok(())
     }
@@ -438,5 +438,20 @@ where
                 Ok(aead::LessSafeKey::new(unbound))
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::stream;
+
+    #[tokio::test]
+    async fn test_listen() -> Result<()> {
+        let host_key = utils::read_hostkey("testkey.pem")?;
+        let peer_provider = stream::empty();
+        let onion = Arc::new(Onion::new(&host_key, peer_provider)?);
+        onion.listen("127.0.0.1:4201".parse().unwrap()).await?;
+        Ok(())
     }
 }
