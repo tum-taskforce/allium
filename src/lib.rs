@@ -16,9 +16,10 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time;
 use tokio::time::Duration;
 
-mod handler;
+mod circuit;
 mod onion_protocol;
 mod socket;
+mod tunnel;
 mod utils;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;

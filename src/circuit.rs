@@ -1,20 +1,21 @@
-use crate::onion_protocol::{CircuitOpaque, FromBytesExt, Key, SignKey, TunnelRequest};
+use crate::onion_protocol::{CircuitOpaque, FromBytesExt, SignKey, TunnelRequest};
 use crate::socket::OnionSocket;
+use crate::utils::derive_secret;
+use crate::utils::generate_ephemeral_key_pair;
 use crate::Result;
 use anyhow::anyhow;
 use anyhow::Context;
 use bytes::BytesMut;
-use ring::{aead, agreement, rand, signature};
-use std::sync::Arc;
+use ring::{aead, rand, signature};
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::Duration;
 
-type CircuitId = u16;
+pub(crate) type CircuitId = u16;
 
-struct Circuit {
-    id: CircuitId,
-    socket: OnionSocket<TcpStream>,
+pub(crate) struct Circuit {
+    pub(crate) id: CircuitId,
+    pub(crate) socket: OnionSocket<TcpStream>,
 }
 
 impl Circuit {
@@ -23,15 +24,15 @@ impl Circuit {
     }
 }
 
-struct Handler {
+pub(crate) struct CircuitHandler {
     in_circuit: Circuit,
     aes_keys: [aead::LessSafeKey; 1],
     out_circuit: Option<Circuit>,
     rng: rand::SystemRandom,
 }
 
-impl Handler {
-    async fn init(
+impl CircuitHandler {
+    pub(crate) async fn init(
         mut socket: OnionSocket<TcpStream>,
         host_key: &signature::RsaKeyPair,
     ) -> Result<Self> {
@@ -57,7 +58,7 @@ impl Handler {
         })
     }
 
-    async fn handle(&mut self) -> Result<()> {
+    pub(crate) async fn handle(&mut self) -> Result<()> {
         // main accept loop
         loop {
             // TODO needs proper timeout definition
@@ -201,31 +202,4 @@ impl Handler {
             }
         }
     }
-}
-
-fn generate_ephemeral_key_pair(
-    rng: &rand::SystemRandom,
-) -> Result<(agreement::EphemeralPrivateKey, Key)> {
-    let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, rng).unwrap();
-    let public_key = private_key.compute_public_key().unwrap();
-    // TODO maybe avoid allocating here
-    let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec().into());
-    Ok((private_key, key))
-}
-
-fn derive_secret(
-    private_key: agreement::EphemeralPrivateKey,
-    peer_key: &Key,
-) -> Result<aead::LessSafeKey> {
-    // TODO use proper key derivation function
-    agreement::agree_ephemeral(
-        private_key,
-        peer_key,
-        anyhow!("Key exchange failed"),
-        |key_material| {
-            let unbound = aead::UnboundKey::new(&aead::AES_128_GCM, &key_material[..16])
-                .context("Could not construct unbound key from keying material")?;
-            Ok(aead::LessSafeKey::new(unbound))
-        },
-    )
 }
