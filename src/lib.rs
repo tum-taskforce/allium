@@ -235,7 +235,8 @@ where
         let mut relay_circuit_id: Option<CircuitId> = None;
         let mut relay_socket: Option<OnionSocket<TcpStream>> = None;
         // TODO timeouts, also handle incoming messages from realy_socket
-        while let msg = socket.next_message().await {
+        loop {
+            let msg = socket.accept_opaque().await;
             match msg {
                 Ok(mut msg) => {
                     // match msg source, don't decrypt msgs from relay_socket

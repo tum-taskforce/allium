@@ -300,6 +300,19 @@ impl FromBytes for CircuitOpaque<BytesMut> {
     }
 }
 
+impl ToBytes for CircuitOpaque<BytesMut> {
+    fn size(&self) -> usize {
+        MESSAGE_SIZE
+    }
+
+    fn write_to(&self, buf: &mut BytesMut) {
+        buf.put_u8(CIRCUIT_OPAQUE);
+        buf.put_u8(0);
+        buf.put_u16(self.circuit_id);
+        buf.put(self.payload.as_ref())
+    }
+}
+
 impl<'a, M: ToBytes> CircuitOpaque<CircuitOpaquePayload<'a, M>> {
     pub(crate) fn encrypt(&self, buf: &mut BytesMut) -> Result<()> {
         for key in self.payload.encrypt_keys.iter() {
