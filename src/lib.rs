@@ -318,10 +318,15 @@ where
                     }
                 }
 
-                // Note: unwrap should be safe here since the if precondition is executed before the
-                // async statement. The precondition only returns true if (and only if) realay_socket
-                // holds some value (implicating unwrap succeeds).
-                msg = relay_socket.as_mut().unwrap().accept_opaque(), if relay_socket.is_some() => {
+                // TODO maybe make this more elegantly
+                Some(msg) = async {
+                    if let Some(s) = relay_socket.as_mut() {
+                        let msg = s.accept_opaque().await;
+                        Some(msg)
+                    } else {
+                        None
+                    }
+                } => {
                     // event from relay socket
                     // match whether a message has been received or if an error occured
                     match msg {
