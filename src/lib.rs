@@ -243,7 +243,7 @@ where
             let mut delay = time::delay_for(Duration::from_secs(10));
 
             tokio::select! {
-                msg = socket.next_message() => {
+                msg = socket.accept_opaque() => {
                     // event from contolling socket
                     // match whether a message has been received or if an error occured
                     match msg {
@@ -264,7 +264,7 @@ where
                                     if let Some(relay_socket) = &mut relay_socket {
                                         // TODO avoid unwrap here
                                         relay_socket
-                                            .send_opaque(relay_circuit_id.unwrap(), msg.payload, &self.rng)
+                                            .forward_opaque(relay_circuit_id.unwrap(), msg.payload, &self.rng)
                                             .await?;
                                     } else {
                                         // no realy_socket => proto breach teardown
@@ -289,7 +289,7 @@ where
                 // Note: unwrap should be safe here since the if precondition is executed before the
                 // async statement. The precondition only returns true if (and only if) realay_socket
                 // holds some value (implicating unwrap succeeds).
-                msg = relay_socket.as_mut().unwrap().next_message(), if relay_socket.is_some() => {
+                msg = relay_socket.as_mut().unwrap().accept_opaque(), if relay_socket.is_some() => {
                     // event from relay socket
                     // match whether a message has been received or if an error occured
                     match msg {
