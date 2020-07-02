@@ -254,6 +254,38 @@ where
                             match TunnelRequest::read_with_digest_from(&mut msg.payload) {
                                 Ok(tunnel_msg) => {
                                     // addressed to us
+                                    match tunnel_msg {
+                                        TunnelRequest::Extend(tunnel_id, dest, key) => {
+                                            if relay_socket.is_some() {
+                                                /* TODO reply to socket with EXTENDED
+                                                    this is required to prevent any deadlocks and errors in the tunnel
+                                                    since Alice in the tunnel waits for a EXTENDED packet
+                                                 */
+                                                continue;
+                                            } else {
+                                                /* TODO handle connect failure
+                                                    any error in here should never cause the entire loop to fail and we
+                                                    should always respond with EXTENDED (same reason as before)
+                                                    It may be preferable to capsulise this into another function
+                                                 */
+                                                let stream = TcpStream::connect(dest).await?;
+                                                relay_circuit_id = Some(0); // TODO generate
+                                                relay_socket = Some(OnionSocket::new(stream));
+                                                let peer_key = relay_socket
+                                                    .as_mut()
+                                                    .unwrap() // TODO avoid unwrap here
+                                                    .initiate_handshake(circuit_id, key, &self.rng)
+                                                    .await?;
+
+                                                socket
+                                                    .finalize_tunnel_handshake(
+                                                        circuit_id, tunnel_id, peer_key, &aes_keys, &self.rng,
+                                                    )
+                                                    .await?;
+                                            }
+                                        }
+                                        TunnelRequest::Data(tunnel_id, data) => unimplemented!(),
+                                    }
                                 }
                                 Err(e) => {
                                     /* TODO proper error match for unsupported messages, i.e. digest
