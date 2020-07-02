@@ -426,7 +426,7 @@ impl FromBytes for TunnelResponse<VerifyKey> {
     }
 }
 
-impl ToBytes for TunnelResponse<SignKey<'_>> {
+impl<K: ToBytes> ToBytes for TunnelResponse<K> {
     fn size(&self) -> usize {
         match self {
             TunnelResponse::Extended(_, peer_key) => {
@@ -438,12 +438,12 @@ impl ToBytes for TunnelResponse<SignKey<'_>> {
 
     fn write_to(&self, buf: &mut BytesMut) {
         match self {
-            TunnelResponse::Extended(tunnel_id, peer_key) => {
+            TunnelResponse::Extended(tunnel_id, key) => {
                 buf.put_u16(self.size() as u16);
                 buf.put_u8(TUNNEL_EXTENDED);
                 buf.put_u8(0);
                 buf.put_u32(*tunnel_id);
-                peer_key.write_to(buf);
+                key.write_to(buf);
             }
         }
     }
@@ -455,6 +455,17 @@ impl FromBytes for VerifyKey {
         let key_bytes = buf.split_to(KEY_LEN).freeze();
         let key = Key::new(&agreement::X25519, key_bytes);
         Ok(VerifyKey { key, signature })
+    }
+}
+
+impl ToBytes for VerifyKey {
+    fn size(&self) -> usize {
+        SIGNATURE_LEN + KEY_LEN
+    }
+
+    fn write_to(&self, buf: &mut BytesMut) {
+        buf.put(self.signature.as_ref());
+        buf.put(self.key.bytes().as_ref());
     }
 }
 
