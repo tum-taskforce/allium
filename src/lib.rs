@@ -329,7 +329,8 @@ where
         }
 
         // TODO timeouts, also handle incoming messages from realy_socket
-        while let msg = socket.next_message().await {
+        loop {
+            let msg = socket.accept_opaque().await;
             match msg {
                 Ok(mut msg) => {
                     // match msg source, don't decrypt msgs from relay_socket
@@ -368,7 +369,7 @@ where
                             if let Some(relay_socket) = &mut relay_socket {
                                 // TODO avoid unwrap here
                                 relay_socket
-                                    .send_opaque(relay_circuit_id.unwrap(), msg.payload, &self.rng)
+                                    .forward_opaque(relay_circuit_id.unwrap(), msg.payload, &self.rng)
                                     .await?;
                             } else {
                                 // no realy_socket => proto breach teardown

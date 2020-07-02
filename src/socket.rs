@@ -146,37 +146,55 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         rng: &rand::SystemRandom,
     ) -> Result<()> {
         self.buf.clear();
-        let tunnel_req = TunnelResponse::Extended(tunnel_id, key);
+        let tunnel_res = TunnelResponse::Extended(tunnel_id, key);
         let req = CircuitOpaque {
             circuit_id,
             payload: CircuitOpaquePayload {
-                msg: &tunnel_req,
+                msg: &tunnel_res,
                 rng,
                 encrypt_keys: aes_keys,
             },
         };
 
-        //req.write_to(&mut self.buf); FIXME
+        req.write_to(&mut self.buf);
         assert_eq!(self.buf.len(), MESSAGE_SIZE);
         self.stream
             .write_all(self.buf.as_ref())
             .await
-            .context("Error while writing CircuitOpaque<TunnelRequest::Extend>")?;
+            .context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
         Ok(())
     }
 
     /// Tries to read an entire onion protocol message before returning.
     ///
-    pub(crate) async fn next_message(&mut self) -> Result<CircuitOpaque<BytesMut>> {
-        todo!()
+    pub(crate) async fn accept_opaque(&mut self) -> Result<CircuitOpaque<BytesMut>> {
+        self.buf.resize(MESSAGE_SIZE, 0);
+        self.stream
+            .read_exact(&mut self.buf)
+            .await
+            .context("Error while reading CircuitOpaque")?; // TODO handle timeout
+        let msg =
+            CircuitOpaque::read_from(&mut self.buf).context("Invalid CircuitOpaque message")?;
+        Ok(msg)
     }
 
-    pub(crate) async fn send_opaque(
+    pub(crate) async fn forward_opaque(
         &mut self,
         circuit_id: CircuitId,
         payload: BytesMut,
         rng: &rand::SystemRandom,
     ) -> Result<()> {
-        todo!()
+        self.buf.clear();
+        let msg = CircuitOpaque {
+            circuit_id,
+            payload,
+        };
+
+        msg.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
+        self.stream
+            .write_all(self.buf.as_ref())
+            .await
+            .context("Error while writing CircuitOpaque")?;
+        Ok(())
     }
 }
