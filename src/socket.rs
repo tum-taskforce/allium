@@ -176,7 +176,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         Ok(msg)
     }
 
-    pub(crate) async fn send_opaque(
+    pub(crate) async fn forward_opaque(
         &mut self,
         circuit_id: CircuitId,
         payload: BytesMut,

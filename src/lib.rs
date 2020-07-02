@@ -275,7 +275,7 @@ where
                             if let Some(relay_socket) = &mut relay_socket {
                                 // TODO avoid unwrap here
                                 relay_socket
-                                    .send_opaque(relay_circuit_id.unwrap(), msg.payload, &self.rng)
+                                    .forward_opaque(relay_circuit_id.unwrap(), msg.payload, &self.rng)
                                     .await?;
                             } else {
                                 // no realy_socket => proto breach teardown
