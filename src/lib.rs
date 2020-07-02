@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::Stream;
 use tokio::sync::{Mutex, RwLock};
+use tokio::time;
+use tokio::time::Duration;
 
 mod onion_protocol;
 mod socket;
@@ -234,6 +236,98 @@ where
         // should be Option<Circuit>
         let mut relay_circuit_id: Option<CircuitId> = None;
         let mut relay_socket: Option<OnionSocket<TcpStream>> = None;
+
+        // main accept loop
+        loop {
+            // TODO needs proper timeout definition
+            let mut delay = time::delay_for(Duration::from_secs(10));
+
+            tokio::select! {
+                msg = socket.next_message() => {
+                    // event from contolling socket
+                    // match whether a message has been received or if an error occured
+                    match msg {
+                        Ok(mut msg) => {
+                            // decrpt message
+                            msg.decrypt(&self.rng, aes_keys.iter())?;
+                            // test if this message is directed to us or is broken
+                            match TunnelRequest::read_with_digest_from(&mut msg.payload) {
+                                Ok(tunnel_msg) => {
+                                    // addressed to us
+                                }
+                                Err(e) => {
+                                    /* TODO proper error match for unsupported messages, i.e. digest
+                                        correct, but message can't be parsed due to other protocol errors
+                                        like unsupported tunnel message types
+                                     */
+                                    // message not directed to us, forward to relay_socket
+                                    if let Some(relay_socket) = &mut relay_socket {
+                                        // TODO avoid unwrap here
+                                        relay_socket
+                                            .send_opaque(relay_circuit_id.unwrap(), msg.payload, &self.rng)
+                                            .await?;
+                                    } else {
+                                        // no realy_socket => proto breach teardown
+                                    }
+                                }
+                            }
+                        }
+                        Err(_e) => {
+                            /* possible scenarios:
+                               socket closed => teardown other socket
+                               no opaque message, but different message => react accordingly to what message
+                               unreadable message => teardown
+                               -> Beware: don't duplicate code since behavior should be highly equal to errors
+                                  from socket
+                             */
+                            todo!();
+                            break;
+                        }
+                    }
+                }
+
+                // Note: unwrap should be safe here since the if precondition is executed before the
+                // async statement. The precondition only returns true if (and only if) realay_socket
+                // holds some value (implicating unwrap succeeds).
+                msg = relay_socket.as_mut().unwrap().next_message(), if relay_socket.is_some() => {
+                    // event from relay socket
+                    // match whether a message has been received or if an error occured
+                    match msg {
+                        Ok(mut msg) => {
+                            // encrypt message and try to send it to socket
+                            todo!();
+                        }
+                        Err(_e) => {
+                            /* possible scenarios:
+                               socket closed => teardown other socket
+                               no opaque message, but different message => react accordingly to what message
+                               unreadable message => teardown
+                               -> Beware: don't duplicate code since behavior should be highly equal to errors
+                                  from socket
+                             */
+                            todo!();
+                            break;
+                        }
+                    }
+                }
+
+                _ = &mut delay => {
+                    /* Depending on the implementation of next_message, the timeout may also be
+                       triggered if only a partial message has been collected so far from any of the
+                       sockets when the timeout triggers.
+                       Potentially, this case could be changed to improve robustness, since any
+                       unhandled TCP packet loss may cause this to happen.
+                       TCP can trigger a request for any dropped TCP packets, so a switch to UDP
+                       could cause problems here, if the incoming onion packets are highly fractured
+                       into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
+                     */
+                    println!("timeout");
+                    // TODO teardown
+                    break;
+                }
+            }
+        }
+
         // TODO timeouts, also handle incoming messages from realy_socket
         while let msg = socket.next_message().await {
             match msg {

@@ -165,6 +165,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         Ok(())
     }
 
+    /// Tries to read an entire onion protocol message before returning.
+    ///
     pub(crate) async fn next_message(&mut self) -> Result<CircuitOpaque<BytesMut>> {
         todo!()
     }
