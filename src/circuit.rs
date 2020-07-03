@@ -9,6 +9,7 @@ use bytes::BytesMut;
 use ring::{aead, rand, signature};
 use std::cell::{RefCell, RefMut};
 use tokio::net::TcpStream;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::time;
 use tokio::time::Duration;
 
@@ -16,19 +17,19 @@ pub(crate) type CircuitId = u16;
 
 pub(crate) struct Circuit {
     pub(crate) id: CircuitId,
-    pub(crate) socket: RefCell<OnionSocket<TcpStream>>,
+    pub(crate) socket: Mutex<OnionSocket<TcpStream>>,
 }
 
 impl Circuit {
     pub(crate) fn new(id: CircuitId, socket: OnionSocket<TcpStream>) -> Self {
         Circuit {
             id,
-            socket: RefCell::new(socket),
+            socket: Mutex::new(socket),
         }
     }
 
-    pub(crate) fn socket(&self) -> RefMut<OnionSocket<TcpStream>> {
-        self.socket.borrow_mut()
+    pub(crate) async fn socket(&self) -> MutexGuard<'_, OnionSocket<TcpStream>> {
+        self.socket.lock().await
     }
 }
 
@@ -118,6 +119,7 @@ impl CircuitHandler {
                         if let Some(out_circuit) = &self.out_circuit {
                             out_circuit
                                 .socket()
+                                .await
                                 .forward_opaque(out_circuit.id, msg.payload, &self.rng)
                                 .await?;
                             Ok(())
@@ -165,11 +167,12 @@ impl CircuitHandler {
                     // TODO generate relay circuit id
                     self.out_circuit = Some(Circuit {
                         id: 0,
-                        socket: RefCell::new(relay_socket),
+                        socket: Mutex::new(relay_socket),
                     });
 
                     self.in_circuit
                         .socket()
+                        .await
                         .finalize_tunnel_handshake(
                             self.in_circuit.id,
                             tunnel_id,
@@ -194,6 +197,7 @@ impl CircuitHandler {
                 msg.encrypt(&self.rng, self.aes_keys.iter())?;
                 self.in_circuit
                     .socket()
+                    .await
                     .forward_opaque(self.in_circuit.id, msg.payload, &self.rng)
                     .await?;
                 Ok(())
@@ -213,12 +217,12 @@ impl CircuitHandler {
     }
 
     async fn accept_in_circuit(&self) -> Result<CircuitOpaque<BytesMut>> {
-        self.in_circuit.socket().accept_opaque().await
+        self.in_circuit.socket().await.accept_opaque().await
     }
 
     async fn accept_out_circuit(&self) -> Result<CircuitOpaque<BytesMut>> {
         match &self.out_circuit {
-            Some(c) => c.socket().accept_opaque().await,
+            Some(c) => c.socket().await.accept_opaque().await,
             None => futures::future::pending().await,
         }
     }
