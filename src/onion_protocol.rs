@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 const CIRCUIT_CREATE: u8 = 0x0;
 const CIRCUIT_CREATED: u8 = 0x1;
 const CIRCUIT_OPAQUE: u8 = 0x3;
+const CIRCUIT_TEARDOWN: u8 = 0xff;
 
 const TUNNEL_EXTEND: u8 = 0x10;
 const TUNNEL_DATA: u8 = 0x11;
@@ -95,6 +96,19 @@ pub(crate) struct CircuitOpaquePayload<'a, M> {
 pub(crate) struct CircuitOpaqueBytes {
     pub(crate) bytes: BytesMut,
     nonce: [u8; aead::NONCE_LEN],
+}
+
+/// A message exchanged between onion peers.
+/// Signals that the sending peer broke down the circuit and is no longer servicing the connection.
+///
+/// Header Format:
+/// ```text
+/// message_type: u8
+/// padding: u8
+/// circuit_id: u16
+/// ```
+pub(crate) struct CircuitTeardown {
+    pub(crate) circuit_id: CircuitId,
 }
 
 /// A fully decrypted relay message.
@@ -344,6 +358,37 @@ impl<'a, M: ToBytes> ToBytes for CircuitOpaque<CircuitOpaquePayload<'a, M>> {
         );
         self.encrypt(&mut payload_buf, nonce).unwrap();
         buf.unsplit(payload_buf);
+    }
+}
+
+/* == CircuitTeardown== */
+
+impl FromBytes for CircuitTeardown {
+    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+        let message_type = buf.get_u8();
+        match message_type {
+            CIRCUIT_TEARDOWN => {
+                buf.get_u8();
+                let circuit_id = buf.get_u16();
+                Ok(CircuitTeardown { circuit_id })
+            }
+            _ => Err(anyhow!(
+                "Expected CircuitTeardown message but got {}",
+                message_type
+            )),
+        }
+    }
+}
+
+impl ToBytes for CircuitTeardown {
+    fn size(&self) -> usize {
+        MESSAGE_SIZE
+    }
+
+    fn write_to(&self, buf: &mut BytesMut) {
+        buf.put_u8(CIRCUIT_TEARDOWN);
+        buf.put_u8(0);
+        buf.put_u16(self.circuit_id);
     }
 }
 
