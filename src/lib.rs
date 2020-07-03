@@ -22,6 +22,9 @@ mod socket;
 mod tunnel;
 mod utils;
 
+#[cfg(test)]
+mod tests;
+
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
 pub struct Peer {
@@ -549,35 +552,5 @@ where
                 Ok(aead::LessSafeKey::new(unbound))
             },
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ring::signature::KeyPair;
-    use tokio::stream;
-
-    #[tokio::test]
-    async fn test_listen() -> Result<()> {
-        let host_key = utils::read_hostkey("testkey.pem")?;
-        let peer_provider = stream::empty();
-        let onion = Arc::new(Onion::new(&host_key, peer_provider)?);
-        onion.listen("127.0.0.1:4201".parse().unwrap()).await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_handshake() -> Result<()> {
-        let host_key = utils::read_hostkey("testkey.pem")?;
-        let peer_key = signature::RsaKeyPair::from_pkcs8(&host_key)?
-            .public_key()
-            .as_ref()
-            .to_vec();
-        let peer_provider = stream::empty();
-        let onion = Arc::new(Onion::new(&host_key, peer_provider)?);
-        let peer = Peer::new("127.0.0.1:4201".parse().unwrap(), peer_key);
-        onion.connect_peer(&peer).await?;
-        Ok(())
     }
 }
