@@ -7,6 +7,7 @@ use anyhow::anyhow;
 use anyhow::Context;
 use bytes::BytesMut;
 use ring::{aead, rand, signature};
+use std::cell::{RefCell, RefMut};
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio::time::Duration;
@@ -15,12 +16,19 @@ pub(crate) type CircuitId = u16;
 
 pub(crate) struct Circuit {
     pub(crate) id: CircuitId,
-    pub(crate) socket: OnionSocket<TcpStream>,
+    pub(crate) socket: RefCell<OnionSocket<TcpStream>>,
 }
 
 impl Circuit {
     pub(crate) fn new(id: CircuitId, socket: OnionSocket<TcpStream>) -> Self {
-        Circuit { id, socket }
+        Circuit {
+            id,
+            socket: RefCell::new(socket),
+        }
+    }
+
+    pub(crate) fn socket(&self) -> RefMut<OnionSocket<TcpStream>> {
+        self.socket.borrow_mut()
     }
 }
 
@@ -65,10 +73,8 @@ impl CircuitHandler {
             let mut delay = time::delay_for(Duration::from_secs(10));
 
             tokio::select! {
-                msg = self.in_circuit.socket.accept_opaque() => self.handle_in_circuit(msg).await?,
-                Some(msg) = async {
-                    Some(self.out_circuit.as_mut()?.socket.accept_opaque().await)
-                } => self.handle_out_circuit(msg).await?,
+                msg = self.accept_in_circuit() => self.handle_in_circuit(msg).await?,
+                msg = self.accept_out_circuit() => self.handle_out_circuit(msg).await?,
                 _ = &mut delay => {
                     /* Depending on the implementation of next_message, the timeout may also be
                        triggered if only a partial message has been collected so far from any of the
@@ -109,10 +115,9 @@ impl CircuitHandler {
                            like unsupported tunnel message types
                         */
                         // message not directed to us, forward to relay_socket
-                        if let Some(out_circuit) = &mut self.out_circuit {
-                            // TODO avoid unwrap here
+                        if let Some(out_circuit) = &self.out_circuit {
                             out_circuit
-                                .socket
+                                .socket()
                                 .forward_opaque(out_circuit.id, msg.payload, &self.rng)
                                 .await?;
                             Ok(())
@@ -160,11 +165,11 @@ impl CircuitHandler {
                     // TODO generate relay circuit id
                     self.out_circuit = Some(Circuit {
                         id: 0,
-                        socket: relay_socket,
+                        socket: RefCell::new(relay_socket),
                     });
 
                     self.in_circuit
-                        .socket
+                        .socket()
                         .finalize_tunnel_handshake(
                             self.in_circuit.id,
                             tunnel_id,
@@ -186,7 +191,11 @@ impl CircuitHandler {
         match msg {
             Ok(mut msg) => {
                 // encrypt message and try to send it to socket
-                todo!();
+                msg.encrypt(&self.rng, self.aes_keys.iter())?;
+                self.in_circuit
+                    .socket()
+                    .forward_opaque(self.in_circuit.id, msg.payload, &self.rng)
+                    .await?;
                 Ok(())
             }
             Err(e) => {
@@ -200,6 +209,17 @@ impl CircuitHandler {
                 todo!();
                 Err(e)
             }
+        }
+    }
+
+    async fn accept_in_circuit(&self) -> Result<CircuitOpaque<BytesMut>> {
+        self.in_circuit.socket().accept_opaque().await
+    }
+
+    async fn accept_out_circuit(&self) -> Result<CircuitOpaque<BytesMut>> {
+        match &self.out_circuit {
+            Some(c) => c.socket().accept_opaque().await,
+            None => futures::future::pending().await,
         }
     }
 }

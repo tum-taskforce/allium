@@ -39,7 +39,7 @@ impl Tunnel {
 
         let peer_key = self
             .out_circuit
-            .socket
+            .socket()
             .initiate_tunnel_handshake(
                 self.out_circuit.id,
                 self.id,
