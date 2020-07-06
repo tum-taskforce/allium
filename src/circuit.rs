@@ -1,7 +1,7 @@
 use crate::onion_protocol::{
     CircuitOpaque, CircuitOpaqueBytes, FromBytesExt, SignKey, TunnelRequest,
 };
-use crate::socket::OnionSocket;
+use crate::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::utils::derive_secret;
 use crate::utils::generate_ephemeral_key_pair;
 use crate::Result;
@@ -100,7 +100,7 @@ impl CircuitHandler {
 
     async fn handle_in_circuit(
         &mut self,
-        msg: Result<CircuitOpaque<CircuitOpaqueBytes>>,
+        msg: SocketResult<CircuitOpaque<CircuitOpaqueBytes>>,
     ) -> Result<()> {
         // event from controlling socket
         // match whether a message has been received or if an error occurred
@@ -143,8 +143,7 @@ impl CircuitHandler {
                   -> Beware: don't duplicate code since behavior should be highly equal to errors
                      from socket
                 */
-                todo!();
-                Err(e)
+                todo!()
             }
         }
     }
@@ -195,7 +194,7 @@ impl CircuitHandler {
 
     async fn handle_out_circuit(
         &mut self,
-        msg: Result<CircuitOpaque<CircuitOpaqueBytes>>,
+        msg: SocketResult<CircuitOpaque<CircuitOpaqueBytes>>,
     ) -> Result<()> {
         // event from relay socket
         // match whether a message has been received or if an error occured
@@ -218,17 +217,16 @@ impl CircuitHandler {
                   -> Beware: don't duplicate code since behavior should be highly equal to errors
                      from socket
                 */
-                todo!();
-                Err(e)
+                todo!()
             }
         }
     }
 
-    async fn accept_in_circuit(&self) -> Result<CircuitOpaque<CircuitOpaqueBytes>> {
+    async fn accept_in_circuit(&self) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
         self.in_circuit.socket().await.accept_opaque().await
     }
 
-    async fn accept_out_circuit(&self) -> Result<CircuitOpaque<CircuitOpaqueBytes>> {
+    async fn accept_out_circuit(&self) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
         match &self.out_circuit {
             Some(c) => c.socket().await.accept_opaque().await,
             None => futures::future::pending().await,

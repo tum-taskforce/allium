@@ -8,10 +8,10 @@ use ring::rand::SecureRandom;
 use ring::{aead, agreement, digest, rand, signature};
 use std::net::SocketAddr;
 
-const CIRCUIT_CREATE: u8 = 0x0;
-const CIRCUIT_CREATED: u8 = 0x1;
-const CIRCUIT_OPAQUE: u8 = 0x3;
-const CIRCUIT_TEARDOWN: u8 = 0xff;
+pub(crate) const CIRCUIT_CREATE: u8 = 0x0;
+pub(crate) const CIRCUIT_CREATED: u8 = 0x1;
+pub(crate) const CIRCUIT_OPAQUE: u8 = 0x3;
+pub(crate) const CIRCUIT_TEARDOWN: u8 = 0xff;
 
 const TUNNEL_EXTEND: u8 = 0x10;
 const TUNNEL_DATA: u8 = 0x11;
