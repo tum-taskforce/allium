@@ -3,6 +3,7 @@ use anyhow::{anyhow, Context};
 use api_protocol::*;
 use bytes::BytesMut;
 use futures::stream::StreamExt;
+use log::{info, trace};
 use onion::*;
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -138,7 +139,10 @@ impl OnionModule {
     async fn listen_api(self: Arc<Self>) -> Result<()> {
         let api_address = &self.config.onion.api_address;
         let mut listener = TcpListener::bind(api_address).await?;
-        println!("Listening fo api connections on {}", listener.local_addr()?);
+        info!(
+            "Listening for API connections on {:?}",
+            listener.local_addr()
+        );
         let mut incoming = listener.incoming();
         while let Some(stream) = incoming.next().await {
             let stream = stream?;
@@ -151,7 +155,7 @@ impl OnionModule {
     }
 
     async fn handle_api(self: Arc<Self>, stream: TcpStream) -> Result<()> {
-        println!("Accepted api connection from: {}", stream.peer_addr()?);
+        trace!("Accepted api connection from: {:?}", stream.peer_addr());
         let mut socket = ApiSocket::new(stream);
 
         while let Some(msg) = socket.read_next::<OnionRequest>().await? {
@@ -184,6 +188,13 @@ impl OnionModule {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
+    info!(
+        "{} version {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+
     #[rustfmt::skip]
     let config: Config = toml::from_str(r#"
         hostkey = "testkey.pem"
@@ -197,7 +208,9 @@ async fn main() -> Result<()> {
         api_address = "127.0.0.1:4203"
     "#)?;
 
-    let onion_module = OnionModule::init(dbg!(config)).await?;
+    let onion_module = OnionModule::init(config)
+        .await
+        .context("Failed to initialize onion module")?;
     let onion_module = Arc::new(onion_module);
     onion_module.listen_api().await?;
     Ok(())

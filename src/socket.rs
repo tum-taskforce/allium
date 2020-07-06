@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context};
 use bytes::BytesMut;
 use ring::{aead, rand};
 use std::net::SocketAddr;
+use tokio::net::TcpStream;
 use tokio::prelude::*;
 
 pub(crate) struct OnionSocket<S> {
@@ -196,5 +197,11 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             .await
             .context("Error while writing CircuitOpaque")?;
         Ok(())
+    }
+}
+
+impl OnionSocket<TcpStream> {
+    pub(crate) fn peer_addr(&self) -> Result<SocketAddr> {
+        Ok(self.stream.peer_addr()?)
     }
 }

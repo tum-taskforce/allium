@@ -7,9 +7,8 @@ use crate::utils::generate_ephemeral_key_pair;
 use crate::Result;
 use anyhow::anyhow;
 use anyhow::Context;
-use bytes::BytesMut;
+use log::trace;
 use ring::{aead, rand, signature};
-use std::cell::{RefCell, RefMut};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::time;
@@ -47,6 +46,7 @@ impl CircuitHandler {
         mut socket: OnionSocket<TcpStream>,
         host_key: &signature::RsaKeyPair,
     ) -> Result<Self> {
+        trace!("Accepting handshake from {:?}", socket.peer_addr());
         let (circuit_id, peer_key) = socket
             .accept_handshake()
             .await

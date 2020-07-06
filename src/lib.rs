@@ -5,6 +5,7 @@ use crate::socket::OnionSocket;
 use anyhow::{anyhow, Context};
 use bytes::Bytes;
 use futures::stream::StreamExt;
+use log::{info, warn};
 use ring::rand::SecureRandom;
 use ring::{aead, agreement, rand, signature};
 use std::collections::HashMap;
@@ -192,14 +193,17 @@ where
 
     pub async fn listen(self: Arc<Self>, addr: SocketAddr) -> Result<()> {
         let mut listener = TcpListener::bind(addr).await?;
-        println!("Listening fo p2p connections on {}", listener.local_addr()?);
+        info!(
+            "Listening for P2P connections on {}",
+            listener.local_addr()?
+        );
         let mut incoming = listener.incoming();
         while let Some(stream) = incoming.next().await {
             let socket = OnionSocket::new(stream?);
             let handler = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = handler.handle(socket).await {
-                    eprintln!("{}", e);
+                    warn!("{}", e);
                 }
             });
         }
