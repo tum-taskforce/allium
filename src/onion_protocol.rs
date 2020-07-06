@@ -92,6 +92,11 @@ pub(crate) struct CircuitOpaquePayload<'a, M> {
     pub(crate) encrypt_keys: &'a [aead::LessSafeKey],
 }
 
+pub(crate) struct CircuitOpaqueBytes {
+    pub(crate) bytes: BytesMut,
+    nonce: [u8; aead::NONCE_LEN],
+}
+
 /// A fully decrypted relay message.
 ///
 /// Header Format:
@@ -239,57 +244,50 @@ impl ToBytes for CircuitCreated<SignKey<'_>> {
 
 /* == CircuitOpaque == */
 
-impl CircuitOpaque<BytesMut> {
+impl CircuitOpaque<CircuitOpaqueBytes> {
     pub(crate) fn decrypt<'k>(
         &mut self,
-        rng: &rand::SystemRandom,
         decrypt_keys: impl Iterator<Item = &'k aead::LessSafeKey>,
     ) -> Result<()> {
         for key in decrypt_keys {
-            let mut nonce_buf = [0u8; 12];
-            self.payload
-                .split_off(self.payload.len() - aead::NONCE_LEN)
-                .copy_to_slice(&mut nonce_buf);
-            let nonce = aead::Nonce::assume_unique_for_key(nonce_buf);
-            let plaintext = key
-                .open_in_place(nonce, aead::Aad::empty(), self.payload.as_mut())
+            let nonce = aead::Nonce::assume_unique_for_key(self.payload.nonce.clone());
+            let _plaintext = key
+                .open_in_place_no_tag(nonce, aead::Aad::empty(), self.payload.bytes.as_mut())
                 .context("Failed to decrypt message")?;
-            let plaintext_len = plaintext.len();
-            self.payload.truncate(plaintext_len);
         }
         Ok(())
     }
 
     pub(crate) fn encrypt<'k>(
         &mut self,
-        rng: &rand::SystemRandom,
         encrypt_keys: impl Iterator<Item = &'k aead::LessSafeKey>,
     ) -> Result<()> {
         for key in encrypt_keys {
-            let mut nonce_buf = [0u8; 12];
-            rng.fill(&mut nonce_buf)?;
-            let nonce = aead::Nonce::assume_unique_for_key(nonce_buf);
-            let tag = key
-                .seal_in_place_separate_tag(nonce, aead::Aad::empty(), self.payload.as_mut())
+            let nonce = aead::Nonce::assume_unique_for_key(self.payload.nonce.clone());
+            let _tag = key
+                .seal_in_place_separate_tag(nonce, aead::Aad::empty(), self.payload.bytes.as_mut())
                 .context("Failed to encrypt message")?;
-            self.payload.extend_from_slice(tag.as_ref());
-            self.payload.extend_from_slice(&nonce_buf);
         }
         Ok(())
     }
 }
 
-impl FromBytes for CircuitOpaque<BytesMut> {
+impl FromBytes for CircuitOpaque<CircuitOpaqueBytes> {
     fn read_from(buf: &mut BytesMut) -> Result<Self> {
         let message_type = buf.get_u8();
         match message_type {
             CIRCUIT_OPAQUE => {
                 buf.get_u8();
                 let circuit_id = buf.get_u16();
+                let mut nonce = [0u8; aead::NONCE_LEN];
+                buf.split_to(aead::NONCE_LEN).copy_to_slice(&mut nonce);
                 let payload = buf.split_off(0);
                 Ok(CircuitOpaque {
                     circuit_id,
-                    payload,
+                    payload: CircuitOpaqueBytes {
+                        bytes: payload,
+                        nonce,
+                    },
                 })
             }
             _ => Err(anyhow!(
@@ -300,7 +298,7 @@ impl FromBytes for CircuitOpaque<BytesMut> {
     }
 }
 
-impl ToBytes for CircuitOpaque<BytesMut> {
+impl ToBytes for CircuitOpaque<CircuitOpaqueBytes> {
     fn size(&self) -> usize {
         MESSAGE_SIZE
     }
@@ -309,30 +307,20 @@ impl ToBytes for CircuitOpaque<BytesMut> {
         buf.put_u8(CIRCUIT_OPAQUE);
         buf.put_u8(0);
         buf.put_u16(self.circuit_id);
-        buf.put(self.payload.as_ref())
+        buf.put(self.payload.nonce.as_ref());
+        buf.put(self.payload.bytes.as_ref())
     }
 }
 
 impl<'a, M: ToBytes> CircuitOpaque<CircuitOpaquePayload<'a, M>> {
-    pub(crate) fn encrypt(&self, buf: &mut BytesMut) -> Result<()> {
+    fn encrypt(&self, buf: &mut BytesMut, nonce: [u8; aead::NONCE_LEN]) -> Result<()> {
         for key in self.payload.encrypt_keys.iter() {
-            let mut nonce_buf = [0u8; aead::NONCE_LEN];
-            self.payload.rng.fill(&mut nonce_buf)?; // TODO maybe use counter instead
-            let nonce = aead::Nonce::assume_unique_for_key(nonce_buf);
-            let tag = key
+            let nonce = aead::Nonce::assume_unique_for_key(nonce.clone());
+            let _tag = key
                 .seal_in_place_separate_tag(nonce, aead::Aad::empty(), buf.as_mut())
                 .context("Failed to encrypt message")?;
-            buf.extend_from_slice(tag.as_ref());
-            buf.extend_from_slice(&nonce_buf);
         }
         Ok(())
-    }
-
-    pub(crate) fn payload_pad_size(&self) -> usize {
-        // 1024 - sizeof(CircuitOpaque header) - #keys * 16
-        return MESSAGE_SIZE
-            - 4
-            - self.payload.encrypt_keys.len() * (aead::MAX_TAG_LEN + aead::NONCE_LEN);
     }
 }
 
@@ -345,14 +333,16 @@ impl<'a, M: ToBytes> ToBytes for CircuitOpaque<CircuitOpaquePayload<'a, M>> {
         buf.put_u8(CIRCUIT_OPAQUE);
         buf.put_u8(0);
         buf.put_u16(self.circuit_id);
+        let mut nonce = [0u8; aead::NONCE_LEN];
+        self.payload.rng.fill(&mut nonce).unwrap(); // TODO maybe use counter instead
+        buf.extend_from_slice(&nonce);
         let mut payload_buf = buf.split_off(buf.len());
         self.payload.msg.write_with_digest_to(
             &mut payload_buf,
             self.payload.rng,
-            self.payload_pad_size(),
+            MESSAGE_SIZE - 4 - aead::NONCE_LEN,
         );
-        &payload_buf[..DIGEST_LEN];
-        self.encrypt(&mut payload_buf).unwrap();
+        self.encrypt(&mut payload_buf, nonce).unwrap();
         buf.unsplit(payload_buf);
     }
 }
@@ -597,8 +587,8 @@ mod tests {
         let mut read_msg = CircuitOpaque::read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
-        read_msg.decrypt(&rng, aes_keys.iter())?;
-        let read_tunnel_msg = TunnelRequest::read_with_digest_from(&mut read_msg.payload)?;
+        read_msg.decrypt(aes_keys.iter().rev())?;
+        let read_tunnel_msg = TunnelRequest::read_with_digest_from(&mut read_msg.payload.bytes)?;
         if let TunnelRequest::Extend(tunnel_id2, dest2, key2) = read_tunnel_msg {
             assert_eq!(tunnel_id, tunnel_id2);
             assert_eq!(dest, dest2);
@@ -638,8 +628,8 @@ mod tests {
         let mut read_msg = CircuitOpaque::read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
-        read_msg.decrypt(&rng, aes_keys.iter())?;
-        let read_tunnel_msg = TunnelResponse::read_with_digest_from(&mut read_msg.payload)?;
+        read_msg.decrypt(aes_keys.iter().rev())?;
+        let read_tunnel_msg = TunnelResponse::read_with_digest_from(&mut read_msg.payload.bytes)?;
         match read_tunnel_msg {
             TunnelResponse::Extended(tunnel_id2, key2) => {
                 assert_eq!(tunnel_id, tunnel_id2);

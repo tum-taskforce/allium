@@ -16,3 +16,6 @@ toml = "0.5"
 anyhow = "1.0"
 base64 = "0.12.2"
 bytes = "0.5.5"
+
+[patch.crates-io]
+ring = { git = "https://github.com/voidc/ring", branch = "open-no-tag" }

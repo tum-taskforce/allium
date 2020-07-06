@@ -1,6 +1,6 @@
 use crate::onion_protocol::{
-    CircuitCreate, CircuitCreated, CircuitOpaque, CircuitOpaquePayload, FromBytesExt, Key, SignKey,
-    ToBytesExt, TunnelRequest, TunnelResponse, VerifyKey, MESSAGE_SIZE,
+    CircuitCreate, CircuitCreated, CircuitOpaque, CircuitOpaqueBytes, CircuitOpaquePayload,
+    FromBytesExt, Key, SignKey, ToBytesExt, TunnelRequest, TunnelResponse, VerifyKey, MESSAGE_SIZE,
 };
 use crate::utils::{FromBytes, ToBytes};
 use crate::{CircuitId, Result, TunnelId};
@@ -122,8 +122,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             ));
         }
 
-        res.decrypt(&rng, aes_keys.iter().rev())?;
-        let tunnel_res = TunnelResponse::read_with_digest_from(&mut res.payload)
+        res.decrypt(aes_keys.iter().rev())?;
+        let tunnel_res = TunnelResponse::read_with_digest_from(&mut res.payload.bytes)
             .context("Invalid TunnelResponse message")?;
 
         match tunnel_res {
@@ -167,7 +167,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
     /// Tries to read an entire onion protocol message before returning.
     ///
-    pub(crate) async fn accept_opaque(&mut self) -> Result<CircuitOpaque<BytesMut>> {
+    pub(crate) async fn accept_opaque(&mut self) -> Result<CircuitOpaque<CircuitOpaqueBytes>> {
         self.buf.resize(MESSAGE_SIZE, 0);
         self.stream
             .read_exact(&mut self.buf)
@@ -181,7 +181,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     pub(crate) async fn forward_opaque(
         &mut self,
         circuit_id: CircuitId,
-        payload: BytesMut,
+        payload: CircuitOpaqueBytes,
         rng: &rand::SystemRandom,
     ) -> Result<()> {
         self.buf.clear();

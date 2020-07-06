@@ -254,9 +254,9 @@ where
                     match msg {
                         Ok(mut msg) => {
                             // decrpt message
-                            msg.decrypt(&self.rng, aes_keys.iter())?;
+                            msg.decrypt(aes_keys.iter())?;
                             // test if this message is directed to us or is broken
-                            match TunnelRequest::read_with_digest_from(&mut msg.payload) {
+                            match TunnelRequest::read_with_digest_from(&mut msg.payload.bytes) {
                                 Ok(tunnel_msg) => {
                                     // addressed to us
                                     match tunnel_msg {
