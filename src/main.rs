@@ -155,7 +155,7 @@ impl OnionModule {
     }
 
     async fn handle_api(self: Arc<Self>, stream: TcpStream) -> Result<()> {
-        trace!("Accepted api connection from: {:?}", stream.peer_addr());
+        trace!("Accepted API connection from: {:?}", stream.peer_addr());
         let mut socket = ApiSocket::new(stream);
 
         while let Some(msg) = socket.read_next::<OnionRequest>().await? {

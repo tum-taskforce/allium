@@ -194,8 +194,8 @@ where
     pub async fn listen(self: Arc<Self>, addr: SocketAddr) -> Result<()> {
         let mut listener = TcpListener::bind(addr).await?;
         info!(
-            "Listening for P2P connections on {}",
-            listener.local_addr()?
+            "Listening for P2P connections on {:?}",
+            listener.local_addr()
         );
         let mut incoming = listener.incoming();
         while let Some(stream) = incoming.next().await {

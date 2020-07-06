@@ -10,7 +10,7 @@ const TEST_PORT: u16 = 4200;
 
 async fn listen(mut listener: TcpListener, host_key: &signature::RsaKeyPair) -> Result<()> {
     println!(
-        "Listening for p2p connections on {}",
+        "Listening for P2P connections on {}",
         listener.local_addr()?
     );
     let stream = listener.incoming().next().await.unwrap()?;
