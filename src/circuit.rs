@@ -11,6 +11,7 @@ use crate::Result;
 use anyhow::anyhow;
 use anyhow::Context;
 use log::trace;
+use ring::rand::SecureRandom;
 use log::warn;
 use ring::{aead, rand, signature};
 use tokio::net::TcpStream;
@@ -35,6 +36,13 @@ impl Circuit {
 
     pub(crate) async fn socket(&self) -> MutexGuard<'_, OnionSocket<TcpStream>> {
         self.socket.lock().await
+    }
+
+    pub(crate) fn random_id(rng: &rand::SystemRandom) -> CircuitId {
+        // FIXME an attacker may fill up all ids
+        let mut id_buf = [0u8; 2];
+        rng.fill(&mut id_buf).unwrap();
+        u16::from_le_bytes(id_buf)
     }
 }
 
@@ -199,11 +207,8 @@ impl CircuitHandler {
                         .initiate_handshake(self.in_circuit.id, key, &self.rng)
                         .await?;
 
-                    // TODO generate relay circuit id
-                    self.out_circuit = Some(Circuit {
-                        id: 0,
-                        socket: Mutex::new(relay_socket),
-                    });
+                    self.out_circuit =
+                        Some(Circuit::new(Circuit::random_id(&self.rng), relay_socket));
 
                     self.in_circuit
                         .socket()

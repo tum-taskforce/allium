@@ -7,6 +7,7 @@ use crate::Result;
 use anyhow::Context;
 use thiserror::Error;
 use log::trace;
+use ring::rand::SecureRandom;
 use ring::{aead, rand};
 use tokio::net::TcpStream;
 use futures::Stream;
@@ -37,7 +38,7 @@ impl Tunnel {
         trace!("Creating tunnel {} to peer {}", id, &peer.addr);
         let (private_key, key) = generate_ephemeral_key_pair(rng).unwrap();
 
-        let circuit_id = 0; // TODO random
+        let circuit_id = Circuit::random_id(rng);
         let stream = TcpStream::connect(peer.addr)
             .await
             .context("Could not connect to peer")?;
@@ -80,6 +81,7 @@ impl Tunnel {
         let peer_key = peer_key
             .verify(&peer.hostkey)
             .context("Could not verify peer public key")?;
+
         let secret = derive_secret(private_key, &peer_key)?;
         self.aes_keys.insert(0, secret);
         Ok(())
@@ -125,5 +127,12 @@ impl Tunnel {
         final_peer: Peer,
     ) -> TunnelResult<()> {
         todo!()
+    }
+
+    pub(crate) fn random_id(rng: &rand::SystemRandom) -> TunnelId {
+        // FIXME an attacker may fill up all ids
+        let mut id_buf = [0u8; 4];
+        rng.fill(&mut id_buf).unwrap();
+        u32::from_le_bytes(id_buf)
     }
 }

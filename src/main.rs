@@ -113,7 +113,7 @@ impl RpsModule {
 }
 
 struct OnionModule {
-    onion: Onion<stream::Empty<Peer>>,
+    onion: Onion,
     config: Config,
     rps: Mutex<RpsModule>,
 }
