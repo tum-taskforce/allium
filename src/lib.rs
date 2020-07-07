@@ -16,6 +16,7 @@ use tokio::stream::Stream;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time;
 use tokio::time::Duration;
+use crate::circuit::CircuitHandler;
 
 mod circuit;
 mod onion_protocol;
@@ -293,7 +294,7 @@ where
                                                     .await?;
                                             }
                                         }
-                                        TunnelRequest::Data(tunnel_id, data) => unimplemented!(),
+                                        _ => unimplemented!(),
                                     }
                                 }
                                 Err(e) => {

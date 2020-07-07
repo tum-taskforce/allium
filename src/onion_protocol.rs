@@ -9,20 +9,26 @@ use ring::{aead, agreement, digest, rand, signature};
 use std::net::SocketAddr;
 use thiserror::Error;
 
-pub(crate) const CIRCUIT_CREATE: u8 = 0x0;
-pub(crate) const CIRCUIT_CREATED: u8 = 0x1;
-pub(crate) const CIRCUIT_OPAQUE: u8 = 0x3;
-pub(crate) const CIRCUIT_TEARDOWN: u8 = 0xff;
+const CIRCUIT_CREATE: u8 = 0x0;
+const CIRCUIT_CREATED: u8 = 0x1;
+const CIRCUIT_OPAQUE: u8 = 0x3;
+const CIRCUIT_TEARDOWN: u8 = 0xff;
 
 const TUNNEL_EXTEND: u8 = 0x10;
 const TUNNEL_TRUNCATE: u8 = 0x11;
 const TUNNEL_BEGIN: u8 = 0x12;
+const TUNNEL_END: u8 = 0x13;
 
 const TUNNEL_DATA: u8 = 0x30;
 
 const TUNNEL_EXTENDED: u8 = 0x20;
 const TUNNEL_TRUNCATED: u8 = 0x21;
-const TUNNEL_END: u8 = 0x22;
+
+pub(crate) const TUNNEL_EXTENDED_ERROR_NONE: u8 = 0x00;
+pub(crate) const TUNNEL_EXTENDED_ERROR_PEER_UNREACHABLE: u8 = 0x01;
+
+pub(crate) const TUNNEL_TRUNCATED_ERROR_NONE: u8 = 0x00;
+pub(crate) const TUNNEL_TRUNCATED_ERROR_OUT_CIRCUIT_EXISTS: u8 = 0x01;
 
 /// Length in bytes of the digest included in relay messages.
 /// Must not be greater than `digest::SHA256_OUTPUT_LEN` (= 32)
@@ -169,7 +175,7 @@ pub(crate) enum TunnelRequest {
 }
 
 pub(crate) enum TunnelResponse<K> {
-    Extended(TunnelId, /* peer_key */ K),
+    Extended(TunnelId, /* error_code */ u8, /* peer_key */ K),
     Truncated(TunnelId, /* error_code */ u8),
 }
 
@@ -518,10 +524,10 @@ impl FromBytes for TunnelProtocolResult<TunnelResponse<VerifyKey>> {
         let message_type = buf.get_u8();
         match message_type {
             TUNNEL_EXTENDED => {
-                buf.get_u8();
+                let error_code = buf.get_u8();
                 let tunnel_id = buf.get_u32();
                 let peer_key = VerifyKey::read_from(buf);
-                Ok(TunnelResponse::Extended(tunnel_id, peer_key))
+                Ok(TunnelResponse::Extended(tunnel_id, error_code, peer_key))
             }
             _ => Err(TunnelProtocolError::Unknown {
                 actual: message_type,
@@ -533,8 +539,8 @@ impl FromBytes for TunnelProtocolResult<TunnelResponse<VerifyKey>> {
 impl<K: ToBytes> ToBytes for TunnelResponse<K> {
     fn size(&self) -> usize {
         match self {
-            TunnelResponse::Extended(_, peer_key) => {
-                // size (2), type (1), padding (1), tunnel_id (4), peer_key
+            TunnelResponse::Extended(_, _, peer_key) => {
+                // size (2), type (1), error_code (1), tunnel_id (4), peer_key
                 2 + 1 + 1 + 4 + peer_key.size()
             }
             TunnelResponse::Truncated(_, _) => {
@@ -546,10 +552,10 @@ impl<K: ToBytes> ToBytes for TunnelResponse<K> {
 
     fn write_to(&self, buf: &mut BytesMut) {
         match self {
-            TunnelResponse::Extended(tunnel_id, key) => {
+            TunnelResponse::Extended(tunnel_id, error_code, key) => {
                 buf.put_u16(self.size() as u16);
                 buf.put_u8(TUNNEL_EXTENDED);
-                buf.put_u8(0);
+                buf.put_u8(*error_code);
                 buf.put_u32(*tunnel_id);
                 key.write_to(buf);
             }
@@ -562,6 +568,8 @@ impl<K: ToBytes> ToBytes for TunnelResponse<K> {
         }
     }
 }
+
+/* == Keys == */
 
 impl FromBytes for VerifyKey {
     fn read_from(buf: &mut BytesMut) -> Self {
@@ -721,7 +729,8 @@ mod tests {
         let aes_keys = generate_aes_keys(&rng)?;
 
         let tunnel_id = 123;
-        let tunnel_msg = TunnelResponse::Extended(tunnel_id, key);
+        let error_code = TUNNEL_EXTENDED_ERROR_NONE;
+        let tunnel_msg = TunnelResponse::Extended(tunnel_id, error_code, key);
         let circuit_id = 0;
         let msg = CircuitOpaque {
             circuit_id,
@@ -742,8 +751,9 @@ mod tests {
         read_msg.decrypt(aes_keys.iter().rev())?;
         let read_tunnel_msg = TunnelResponse::read_with_digest_from(&mut read_msg.payload.bytes)?;
         match read_tunnel_msg {
-            TunnelResponse::Extended(tunnel_id2, key2) => {
+            TunnelResponse::Extended(tunnel_id2, error_code2, key2) => {
                 assert_eq!(tunnel_id, tunnel_id2);
+                assert_eq!(error_code, error_code2);
                 let key2 = key2.verify(&rsa_public)?;
                 let key2_bytes: &[u8] = &key2.bytes().as_ref();
                 assert_eq!(&key_bytes.as_ref(), &key2_bytes);

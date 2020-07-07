@@ -210,17 +210,35 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         //.context("Invalid TunnelResponse message")?;
 
         match tunnel_res {
-            TunnelResponse::Extended(res_tunnel_id, res_key) => {
+            TunnelResponse::Extended(res_tunnel_id, error_code, res_key) => {
                 if res_tunnel_id != tunnel_id {
                     return Err(BrokenMessage);
                     //return Err(anyhow!("Tunnel ID in Extended does not match ID in Extend"));
                 }
-
+                if error_code != TUNNEL_EXTENDED_ERROR_NONE {
+                    // TODO Retry may be allowed
+                    return Err(BrokenMessage);
+                    //return Err(anyhow!("Tunnel Extend returned an error"));
+                }
                 Ok(res_key)
+            }
+            _ => {
+                // ignore all other replies
+                Err(BrokenMessage)
             }
         }
     }
 
+    /*
+    TODO split finalize_tunnel_handshake into error-handling and non-error-handling counter parts
+
+     */
+
+    /// Replies on this `OnionSocket` with an `EXTENDED` message.
+    ///
+    /// # Errors:
+    /// - `StreamTerminated` - The stream is broken
+    /// - `StreamTimeout` -  The stream operations timed out
     pub(crate) async fn finalize_tunnel_handshake(
         &mut self,
         circuit_id: CircuitId,
@@ -230,7 +248,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        let tunnel_res = TunnelResponse::Extended(tunnel_id, key);
+        let tunnel_res = TunnelResponse::Extended(tunnel_id, TUNNEL_EXTENDED_ERROR_NONE, key);
         let req = CircuitOpaque {
             circuit_id,
             payload: CircuitOpaquePayload {
@@ -242,8 +260,42 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         req.write_to(&mut self.buf);
         assert_eq!(self.buf.len(), MESSAGE_SIZE);
+        // TODO omit timeout here?
         self.write_buf_to_stream().await?;
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
+        Ok(())
+    }
+
+    /// Replies on this `OnionSocket` with a `TRUNCATED` message.
+    ///
+    /// # Errors:
+    /// - `StreamTerminated` - The stream is broken
+    /// - `StreamTimeout` -  The stream operations timed out
+    pub(crate) async fn finalize_tunnel_truncate(
+        &mut self,
+        circuit_id: CircuitId,
+        tunnel_id: TunnelId,
+        aes_keys: &[aead::LessSafeKey],
+        error_code: u8,
+        rng: &rand::SystemRandom,
+    ) -> SocketResult<()> {
+        self.buf.clear();
+        // FIXME why do I have to define Key here?
+        let tunnel_res = TunnelResponse::<VerifyKey>::Truncated(tunnel_id, error_code);
+        let req = CircuitOpaque {
+            circuit_id,
+            payload: CircuitOpaquePayload {
+                msg: &tunnel_res,
+                rng,
+                encrypt_keys: aes_keys,
+            },
+        };
+
+        req.write_to(&mut self.buf);
+        assert_eq!(self.buf.len(), MESSAGE_SIZE);
+        // TODO omit timeout here?
+        self.write_buf_to_stream().await?;
+        //.context("Error while writing CircuitOpaque<TunnelResponse::Truncated>")?;
         Ok(())
     }
 

@@ -1,6 +1,4 @@
-use crate::onion_protocol::{
-    CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelRequest,
-};
+use crate::onion_protocol::{CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelRequest, TunnelProtocolError, TUNNEL_TRUNCATED_ERROR_OUT_CIRCUIT_EXISTS, TUNNEL_TRUNCATED_ERROR_NONE, TUNNEL_EXTENDED_ERROR_NONE};
 use crate::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::utils::derive_secret;
 use crate::utils::generate_ephemeral_key_pair;
@@ -187,6 +185,40 @@ impl CircuitHandler {
                         .await?;
                     Ok(())
                 }
+            }
+            TunnelRequest::Truncate(tunnel_id) => {
+                if self.out_circuit.is_none() {
+                    self.in_circuit.socket().await
+                        .finalize_tunnel_truncate(
+                            self.in_circuit.id,
+                            tunnel_id,
+                            &self.aes_keys,
+                            TUNNEL_TRUNCATED_ERROR_OUT_CIRCUIT_EXISTS,
+                            &self.rng,
+                        )
+                        .await?;
+                    Ok(())
+                } else {
+                    // Teardown out circuit
+                    todo!();
+
+                    self.in_circuit.socket().await
+                        .finalize_tunnel_truncate(
+                            self.in_circuit.id,
+                            tunnel_id,
+                            &self.aes_keys,
+                            TUNNEL_TRUNCATED_ERROR_NONE,
+                            &self.rng,
+                        )
+                        .await?;
+                    Ok(())
+                }
+            }
+            TunnelRequest::Begin(tunnel_id) => {
+                todo!()
+            }
+            TunnelRequest::End(tunnel_id) => {
+                todo!()
             }
             TunnelRequest::Data(tunnel_id, data) => unimplemented!(),
         }
