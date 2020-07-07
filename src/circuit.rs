@@ -1,5 +1,5 @@
 use crate::onion_protocol::{
-    CircuitOpaque, CircuitOpaqueBytes, TryFromBytesExt, SignKey, TunnelRequest,
+    CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelRequest,
 };
 use crate::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::utils::derive_secret;

@@ -205,8 +205,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         res.decrypt(aes_keys.iter().rev())
             .map_err(|_| BrokenMessage)?;
-        let tunnel_res =
-            TunnelResponse::read_with_digest_from(&mut res.payload.bytes).map_err(|_| BrokenMessage)?;
+        let tunnel_res = TunnelResponse::read_with_digest_from(&mut res.payload.bytes)
+            .map_err(|_| BrokenMessage)?;
         //.context("Invalid TunnelResponse message")?;
 
         match tunnel_res {
@@ -258,7 +258,9 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     /// - `StreamTerminated` - The stream is broken
     /// - `TeardownMessage` - A `TEARDOWN`message has been received instead of `CIRCUIT CREATE`
     /// - `BrokenMessage` - The received answer message could not be parsed
-    pub(crate) async fn accept_opaque(&mut self) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
+    pub(crate) async fn accept_opaque(
+        &mut self,
+    ) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
         self.buf.resize(MESSAGE_SIZE, 0);
         // NOTE: no timeout applied here, parent is supposed to handle that
         self.stream.read_exact(&mut self.buf).await?;
