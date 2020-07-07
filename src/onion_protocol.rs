@@ -1,12 +1,13 @@
 use anyhow::{anyhow, Context};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::utils::{get_ip_addr, FromBytes, ToBytes};
+use crate::utils::{get_ip_addr, FromBytes, ToBytes, TryFromBytes};
 use crate::Result;
 use crate::{CircuitId, TunnelId};
 use ring::rand::SecureRandom;
 use ring::{aead, agreement, digest, rand, signature};
 use std::net::SocketAddr;
+use thiserror::Error;
 
 pub(crate) const CIRCUIT_CREATE: u8 = 0x0;
 pub(crate) const CIRCUIT_CREATED: u8 = 0x1;
@@ -25,6 +26,26 @@ const SIGNATURE_LEN: usize = 512;
 const KEY_LEN: usize = 32;
 
 pub(crate) const MESSAGE_SIZE: usize = 1024;
+
+#[derive(Error, Debug)]
+pub(crate) enum CircuitProtocolError {
+    #[error("Teardown while expecting {expected}")]
+    Teardown { expected: u8 },
+    #[error("Unknown tunnel message id: expected {expected} got {actual}")]
+    Unknown { expected: u8, actual: u8 },
+}
+
+pub(crate) type CircuitProtocolResult<T> = std::result::Result<T, CircuitProtocolError>;
+
+#[derive(Error, Debug)]
+pub(crate) enum TunnelProtocolError {
+    #[error("Unknown tunnel message id: {actual}")]
+    Unknown { actual: u8 },
+    #[error("Computed hash did not match the message hash")]
+    Digest,
+}
+
+pub(crate) type TunnelProtocolResult<T> = std::result::Result<T, TunnelProtocolError>;
 
 pub(crate) type Key = agreement::UnparsedPublicKey<Bytes>;
 
@@ -143,22 +164,22 @@ pub(crate) enum TunnelResponse<K> {
     Extended(TunnelId, /* peer_key */ K),
 }
 
-pub(crate) trait FromBytesExt: FromBytes {
-    fn read_with_digest_from(buf: &mut BytesMut) -> Result<Self>
+pub(crate) trait TryFromBytesExt: TryFromBytes<TunnelProtocolError> {
+    fn read_with_digest_from(buf: &mut BytesMut) -> TunnelProtocolResult<Self>
     where
         Self: Sized,
     {
         let digest = digest::digest(&digest::SHA256, &buf[DIGEST_LEN..]);
         if &digest.as_ref()[..DIGEST_LEN] == &buf[..DIGEST_LEN] {
             buf.advance(DIGEST_LEN);
-            Self::read_from(buf)
+            Self::try_read_from(buf)
         } else {
-            Err(anyhow!("Computed hash did not match the message hash"))
+            Err(TunnelProtocolError::Digest)
         }
     }
 }
 
-impl<T: FromBytes> FromBytesExt for T {}
+impl<T> TryFromBytesExt for T where T: TryFromBytes<TunnelProtocolError> {}
 
 pub(crate) trait ToBytesExt: ToBytes {
     fn write_with_digest_to(&self, buf: &mut BytesMut, rng: &rand::SystemRandom, pad_size: usize) {
@@ -191,8 +212,8 @@ impl<T: ToBytes> ToBytesExt for T {}
 
 /* == CircuitCreate == */
 
-impl FromBytes for CircuitCreate {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+impl FromBytes for CircuitProtocolResult<CircuitCreate> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let message_type = buf.get_u8();
         match message_type {
             CIRCUIT_CREATE => {
@@ -202,10 +223,13 @@ impl FromBytes for CircuitCreate {
                 let key = Key::new(&agreement::X25519, key_bytes);
                 Ok(CircuitCreate { circuit_id, key })
             }
-            _ => Err(anyhow!(
-                "Expected CircuitCreate message but got {}",
-                message_type
-            )),
+            CIRCUIT_TEARDOWN => Err(CircuitProtocolError::Teardown {
+                expected: CIRCUIT_CREATE,
+            }),
+            _ => Err(CircuitProtocolError::Unknown {
+                expected: CIRCUIT_CREATE,
+                actual: message_type,
+            }),
         }
     }
 }
@@ -225,20 +249,23 @@ impl ToBytes for CircuitCreate {
 
 /* == CircuitCreated == */
 
-impl FromBytes for CircuitCreated<VerifyKey> {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+impl FromBytes for CircuitProtocolResult<CircuitCreated<VerifyKey>> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let message_type = buf.get_u8();
         match message_type {
             CIRCUIT_CREATED => {
                 buf.get_u8();
                 let circuit_id = buf.get_u16();
-                let key = VerifyKey::read_from(buf)?;
+                let key = VerifyKey::read_from(buf);
                 Ok(CircuitCreated { circuit_id, key })
             }
-            _ => Err(anyhow!(
-                "Expected CircuitCreated message but got {}",
-                message_type
-            )),
+            CIRCUIT_TEARDOWN => Err(CircuitProtocolError::Teardown {
+                expected: CIRCUIT_CREATED,
+            }),
+            _ => Err(CircuitProtocolError::Unknown {
+                expected: CIRCUIT_CREATED,
+                actual: message_type,
+            }),
         }
     }
 }
@@ -286,8 +313,8 @@ impl CircuitOpaque<CircuitOpaqueBytes> {
     }
 }
 
-impl FromBytes for CircuitOpaque<CircuitOpaqueBytes> {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+impl FromBytes for CircuitProtocolResult<CircuitOpaque<CircuitOpaqueBytes>> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let message_type = buf.get_u8();
         match message_type {
             CIRCUIT_OPAQUE => {
@@ -304,10 +331,13 @@ impl FromBytes for CircuitOpaque<CircuitOpaqueBytes> {
                     },
                 })
             }
-            _ => Err(anyhow!(
-                "Expected CircuitOpaque message but got {}",
-                message_type
-            )),
+            CIRCUIT_TEARDOWN => Err(CircuitProtocolError::Teardown {
+                expected: CIRCUIT_OPAQUE,
+            }),
+            _ => Err(CircuitProtocolError::Unknown {
+                expected: CIRCUIT_OPAQUE,
+                actual: message_type,
+            }),
         }
     }
 }
@@ -363,23 +393,6 @@ impl<'a, M: ToBytes> ToBytes for CircuitOpaque<CircuitOpaquePayload<'a, M>> {
 
 /* == CircuitTeardown== */
 
-impl FromBytes for CircuitTeardown {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
-        let message_type = buf.get_u8();
-        match message_type {
-            CIRCUIT_TEARDOWN => {
-                buf.get_u8();
-                let circuit_id = buf.get_u16();
-                Ok(CircuitTeardown { circuit_id })
-            }
-            _ => Err(anyhow!(
-                "Expected CircuitTeardown message but got {}",
-                message_type
-            )),
-        }
-    }
-}
-
 impl ToBytes for CircuitTeardown {
     fn size(&self) -> usize {
         MESSAGE_SIZE
@@ -394,8 +407,8 @@ impl ToBytes for CircuitTeardown {
 
 /* == TunnelRequest == */
 
-impl FromBytes for TunnelRequest {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+impl FromBytes for TunnelProtocolResult<TunnelRequest> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u8();
         match message_type {
@@ -415,7 +428,9 @@ impl FromBytes for TunnelRequest {
                 let data = buf.split_to(size - 8).freeze();
                 Ok(TunnelRequest::Data(tunnel_id, data))
             }
-            _ => Err(anyhow!("Unknown TunnelRequest type {}", message_type)),
+            _ => Err(TunnelProtocolError::Unknown {
+                actual: message_type,
+            }),
         }
     }
 }
@@ -458,18 +473,20 @@ impl ToBytes for TunnelRequest {
 
 /* == TunnelResponse == */
 
-impl FromBytes for TunnelResponse<VerifyKey> {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+impl FromBytes for TunnelProtocolResult<TunnelResponse<VerifyKey>> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u8();
         match message_type {
             TUNNEL_EXTENDED => {
                 buf.get_u8();
                 let tunnel_id = buf.get_u32();
-                let peer_key = VerifyKey::read_from(buf)?;
+                let peer_key = VerifyKey::read_from(buf);
                 Ok(TunnelResponse::Extended(tunnel_id, peer_key))
             }
-            _ => Err(anyhow!("Unknown TunnelResponse type {}", message_type)),
+            _ => Err(TunnelProtocolError::Unknown {
+                actual: message_type,
+            }),
         }
     }
 }
@@ -498,11 +515,11 @@ impl<K: ToBytes> ToBytes for TunnelResponse<K> {
 }
 
 impl FromBytes for VerifyKey {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let signature = buf.split_to(SIGNATURE_LEN).freeze();
         let key_bytes = buf.split_to(KEY_LEN).freeze();
         let key = Key::new(&agreement::X25519, key_bytes);
-        Ok(VerifyKey { key, signature })
+        VerifyKey { key, signature }
     }
 }
 
@@ -574,7 +591,7 @@ mod tests {
         let msg = CircuitCreate { circuit_id, key };
         let mut buf = BytesMut::with_capacity(msg.size());
         msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
-        let read_msg = CircuitCreate::read_from(&mut buf)?;
+        let read_msg = CircuitCreate::try_read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         let key2_bytes: &[u8] = &read_msg.key.bytes().as_ref();
@@ -595,7 +612,7 @@ mod tests {
         let msg = CircuitCreated { circuit_id, key };
         let mut buf = BytesMut::with_capacity(msg.size());
         msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
-        let read_msg = CircuitCreated::read_from(&mut buf)?;
+        let read_msg = CircuitCreated::try_read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         let key2 = read_msg.key.verify(&rsa_public)?;
@@ -629,7 +646,7 @@ mod tests {
         //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
         msg.write_to(&mut buf);
         assert_eq!(buf.len(), MESSAGE_SIZE);
-        let mut read_msg = CircuitOpaque::read_from(&mut buf)?;
+        let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(aes_keys.iter().rev())?;
@@ -670,7 +687,7 @@ mod tests {
         //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
         msg.write_to(&mut buf);
         assert_eq!(buf.len(), MESSAGE_SIZE);
-        let mut read_msg = CircuitOpaque::read_from(&mut buf)?;
+        let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(aes_keys.iter().rev())?;

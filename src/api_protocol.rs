@@ -40,8 +40,8 @@ pub enum OnionRequest {
     Cover(/* cover_size */ u16),
 }
 
-impl FromBytes for OnionRequest {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+impl FromBytes for Result<OnionRequest> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u16();
         return match message_type {
@@ -223,8 +223,8 @@ pub enum RpsResponse {
     ),
 }
 
-impl FromBytes for RpsResponse {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+impl FromBytes for Result<RpsResponse> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u16();
         return match message_type {

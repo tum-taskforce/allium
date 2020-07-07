@@ -1,16 +1,16 @@
 use crate::onion_protocol::*;
-use crate::utils::{FromBytes, ToBytes};
+use crate::socket::OnionSocketError::{BrokenMessage, TeardownMessage};
+use crate::utils::{FromBytes, ToBytes, TryFromBytes};
 use crate::{CircuitId, Result, TunnelId};
 use anyhow::{anyhow, Context};
-use thiserror::Error;
 use bytes::BytesMut;
+use futures::Future;
 use ring::{aead, rand};
 use std::net::SocketAddr;
+use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::time::{timeout, Duration, Elapsed, Timeout};
-use crate::socket::OnionSocketError::{BrokenMessage, TeardownMessage};
-use futures::Future;
 
 #[derive(Error, Debug)]
 pub(crate) enum OnionSocketError {
@@ -30,7 +30,7 @@ pub(crate) enum OnionSocketError {
     /// with it. The `TEARDOWN` message is always allowed by protocol to indicate a closed circuit
     /// by the connected peer.
     #[error("received teardown message that cannot be handled")]
-    TeardownMessage(),
+    TeardownMessage,
     /// The received message does not comply with the protocol
     /// This may be caused by:
     /// - an undefined message type or tunnel message type
@@ -41,11 +41,20 @@ pub(crate) enum OnionSocketError {
     // not be ignored. Either way would be conforming to the specification.
     // TODO argument: message
     #[error("received broken message that cannot be parsed and violates protocol")]
-    BrokenMessage(),
+    BrokenMessage,
     // TODO remote error
 }
 
 pub(crate) type SocketResult<T> = std::result::Result<T, OnionSocketError>;
+
+impl From<CircuitProtocolError> for OnionSocketError {
+    fn from(e: CircuitProtocolError) -> Self {
+        match e {
+            CircuitProtocolError::Teardown { expected } => OnionSocketError::TeardownMessage,
+            CircuitProtocolError::Unknown { expected, actual } => OnionSocketError::BrokenMessage,
+        }
+    }
+}
 
 pub(crate) struct OnionSocket<S> {
     stream: S,
@@ -60,34 +69,20 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         }
     }
 
-    async fn write_buf_to_stream(
-        &mut self
-    ) -> std::result::Result<std::result::Result<(), io::Error>, Elapsed> {
-        timeout(Duration::from_secs(10), // TODO needs proper timeout definition
-                self.stream.write_all(self.buf.as_ref())).await
+    async fn write_buf_to_stream(&mut self) -> SocketResult<()> {
+        Ok(timeout(
+            Duration::from_secs(2), // TODO don't hard code timeouts
+            self.stream.write_all(self.buf.as_ref()),
+        )
+        .await??)
     }
 
-    async fn read_buf_from_stream(
-        &mut self
-    ) -> std::result::Result<std::result::Result<usize, io::Error>, Elapsed> {
-        timeout(Duration::from_secs(10), // TODO needs proper timeout definition
-                self.stream.read_exact(&mut self.buf)).await
-    }
-
-    // TODO This feels inappropriately placed
-    fn match_type_or_teardown<M: FromBytes>(&mut self, msg_type: u8) -> SocketResult<M> {
-        match self.buf.get(0) {
-            Some(t) if *t == msg_type => {
-                M::read_from(&mut self.buf).map_err(|_| BrokenMessage())
-            }
-            Some(t) if *t == CIRCUIT_TEARDOWN => {
-                // TODO invalid circuit ids are being ignored
-                Err(TeardownMessage())
-            }
-            _ => {
-                Err(BrokenMessage())
-            }
-        }
+    async fn read_buf_from_stream(&mut self) -> SocketResult<usize> {
+        Ok(timeout(
+            Duration::from_secs(5), // TODO don't hard code timeouts
+            self.stream.read_exact(&mut self.buf),
+        )
+        .await??)
     }
 
     /// Performs a circuit handshake with the peer connected to this socket.
@@ -111,15 +106,15 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         let req = CircuitCreate { circuit_id, key };
 
         req.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
-        self.write_buf_to_stream().await??;
+        self.write_buf_to_stream().await?;
 
-        self.read_buf_from_stream().await??;
-        self.match_type_or_teardown::<CircuitCreated<VerifyKey>>(CIRCUIT_CREATED)
-            .and_then(|res|
-                if res.circuit_id == circuit_id {Ok(res)}
-                else {Err(BrokenMessage()) }
-            )
-            .map(|res| res.key)
+        self.read_buf_from_stream().await?;
+        let res = CircuitCreated::try_read_from(&mut self.buf)?;
+        if res.circuit_id == circuit_id {
+            Ok(res.key)
+        } else {
+            Err(BrokenMessage)
+        }
     }
 
     /// Listends for incoming `CIRCUIT CREATE` messages and returns the circuit id and key in this
@@ -132,9 +127,9 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     /// - `BrokenMessage` - The received answer message could not be parsed
     pub(crate) async fn accept_handshake(&mut self) -> SocketResult<(CircuitId, Key)> {
         self.buf.resize(MESSAGE_SIZE, 0);
-        self.read_buf_from_stream().await??;
-        self.match_type_or_teardown::<CircuitCreate>(CIRCUIT_CREATE)
-            .map(|msg| (msg.circuit_id, msg.key))
+        self.read_buf_from_stream().await?;
+        let msg = CircuitCreate::try_read_from(&mut self.buf)?;
+        Ok((msg.circuit_id, msg.key))
     }
 
     /// Sends a `CIRCUIT CREATED` reply message to the connected peer with the given `circuit_id`
@@ -152,7 +147,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         self.buf.clear();
         let res = CircuitCreated { circuit_id, key };
         res.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
-        self.write_buf_to_stream().await??;
+        self.write_buf_to_stream().await?;
         Ok(())
     }
 
@@ -196,29 +191,28 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         req.write_to(&mut self.buf);
         assert_eq!(self.buf.len(), MESSAGE_SIZE);
-        self.write_buf_to_stream().await??;
+        self.write_buf_to_stream().await?;
 
-        self.read_buf_from_stream().await??;
-        let mut res =
-            self.match_type_or_teardown::<CircuitOpaque<BytesMut>>(CIRCUIT_OPAQUE)?;
+        self.read_buf_from_stream().await?;
+        let mut res = CircuitOpaque::try_read_from(&mut self.buf)?;
 
         if res.circuit_id != circuit_id {
-            return Err(BrokenMessage())
+            return Err(BrokenMessage);
             //return Err(anyhow!(
             //    "Circuit ID in Opaque response does not match ID in request"
             //));
         }
 
         res.decrypt(aes_keys.iter().rev())
-            .map_err(|_| BrokenMessage())?;
-        let tunnel_res = TunnelResponse::read_with_digest_from(&mut res.payload.bytes)
-            .map_err(|_| BrokenMessage())?;
-            //.context("Invalid TunnelResponse message")?;
+            .map_err(|_| BrokenMessage)?;
+        let tunnel_res =
+            TunnelResponse::read_with_digest_from(&mut res.payload.bytes).map_err(|_| BrokenMessage)?;
+        //.context("Invalid TunnelResponse message")?;
 
         match tunnel_res {
             TunnelResponse::Extended(res_tunnel_id, res_key) => {
                 if res_tunnel_id != tunnel_id {
-                    return Err(BrokenMessage());
+                    return Err(BrokenMessage);
                     //return Err(anyhow!("Tunnel ID in Extended does not match ID in Extend"));
                 }
 
@@ -248,8 +242,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         req.write_to(&mut self.buf);
         assert_eq!(self.buf.len(), MESSAGE_SIZE);
-        self.write_buf_to_stream().await??;
-            //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
+        self.write_buf_to_stream().await?;
+        //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
         Ok(())
     }
 
@@ -267,13 +261,9 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     pub(crate) async fn accept_opaque(&mut self) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
         self.buf.resize(MESSAGE_SIZE, 0);
         // NOTE: no timeout applied here, parent is supposed to handle that
-        self.stream
-            .read_exact(&mut self.buf)
-            .await?;
-            //.context("Error while reading CircuitOpaque")?; // TODO handle timeout
-        let msg =
-            self.match_type_or_teardown::<CircuitOpaque<BytesMut>>(CIRCUIT_OPAQUE)?;
-            // CircuitOpaque::read_from(&mut self.buf).context("Invalid CircuitOpaque message")?;
+        self.stream.read_exact(&mut self.buf).await?;
+        //.context("Error while reading CircuitOpaque")?;
+        let msg = CircuitOpaque::try_read_from(&mut self.buf)?;
         Ok(msg)
     }
 
@@ -290,8 +280,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         };
 
         msg.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
-        self.write_buf_to_stream().await??;
-            //.context("Error while writing CircuitOpaque")?;
+        self.write_buf_to_stream().await?;
+        //.context("Error while writing CircuitOpaque")?;
         Ok(())
     }
 }

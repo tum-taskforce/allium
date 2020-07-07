@@ -1,5 +1,5 @@
 use crate::onion_protocol::{
-    CircuitOpaque, CircuitOpaqueBytes, FromBytesExt, SignKey, TunnelRequest,
+    CircuitOpaque, CircuitOpaqueBytes, TryFromBytesExt, SignKey, TunnelRequest,
 };
 use crate::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::utils::derive_secret;
@@ -130,7 +130,7 @@ impl CircuitHandler {
                             Ok(())
                         } else {
                             // no relay_socket => proto breach teardown
-                            Err(e)
+                            Err(anyhow!("{:?}", e))
                         }
                     }
                 }

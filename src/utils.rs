@@ -9,9 +9,27 @@ use ring::{aead, agreement, rand};
 use std::fs::File;
 
 pub(crate) trait FromBytes {
-    fn read_from(buf: &mut BytesMut) -> Result<Self>
+    fn read_from(buf: &mut BytesMut) -> Self
     where
         Self: Sized;
+}
+
+pub(crate) trait TryFromBytes<E> {
+    fn try_read_from(buf: &mut BytesMut) -> std::result::Result<Self, E>
+    where
+        Self: Sized;
+}
+
+impl<T, E> TryFromBytes<E> for T
+where
+    std::result::Result<T, E>: FromBytes,
+{
+    fn try_read_from(buf: &mut BytesMut) -> std::result::Result<Self, E>
+    where
+        Self: Sized,
+    {
+        std::result::Result::<T, E>::read_from(buf)
+    }
 }
 
 pub(crate) trait ToBytes {
@@ -20,26 +38,26 @@ pub(crate) trait ToBytes {
 }
 
 impl FromBytes for Ipv4Addr {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let mut octets = [0u8; 4];
         buf.copy_to_slice(&mut octets);
-        Ok(Ipv4Addr::from(octets))
+        Ipv4Addr::from(octets)
     }
 }
 
 impl FromBytes for Ipv6Addr {
-    fn read_from(buf: &mut BytesMut) -> Result<Self> {
+    fn read_from(buf: &mut BytesMut) -> Self {
         let mut octets = [0u8; 16];
         buf.copy_to_slice(&mut octets);
-        Ok(Ipv6Addr::from(octets))
+        Ipv6Addr::from(octets)
     }
 }
 
 pub fn get_ip_addr(buf: &mut BytesMut, is_ipv6: bool) -> IpAddr {
     if !is_ipv6 {
-        IpAddr::V4(Ipv4Addr::read_from(buf).unwrap())
+        IpAddr::V4(Ipv4Addr::read_from(buf))
     } else {
-        IpAddr::V6(Ipv6Addr::read_from(buf).unwrap())
+        IpAddr::V6(Ipv6Addr::read_from(buf))
     }
 }
 

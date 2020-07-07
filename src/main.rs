@@ -1,4 +1,4 @@
-use crate::utils::{FromBytes, ToBytes};
+use crate::utils::{FromBytes, ToBytes, TryFromBytes};
 use anyhow::{anyhow, Context};
 use api_protocol::*;
 use bytes::BytesMut;
@@ -61,7 +61,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ApiSocket<S> {
         }
     }
 
-    pub async fn read_next<M: FromBytes>(&mut self) -> Result<Option<M>> {
+    pub async fn read_next<M: TryFromBytes<anyhow::Error>>(&mut self) -> Result<Option<M>> {
         let mut size_buf = [0u8; 2];
         self.stream.read_exact(&mut size_buf).await?;
         let size = u16::from_be_bytes(size_buf) as usize;
@@ -70,7 +70,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ApiSocket<S> {
         self.buf.reserve(size);
         self.buf.extend_from_slice(&size_buf);
         self.stream.read_exact(&mut self.buf[2..]).await?;
-        Ok(Some(M::read_from(&mut self.buf)?))
+        Ok(Some(M::try_read_from(&mut self.buf)?))
     }
 
     pub async fn write<M: ToBytes>(&mut self, message: M) -> Result<()> {
