@@ -15,9 +15,14 @@ pub(crate) const CIRCUIT_OPAQUE: u8 = 0x3;
 pub(crate) const CIRCUIT_TEARDOWN: u8 = 0xff;
 
 const TUNNEL_EXTEND: u8 = 0x10;
-const TUNNEL_DATA: u8 = 0x11;
+const TUNNEL_TRUNCATE: u8 = 0x11;
+const TUNNEL_BEGIN: u8 = 0x12;
+
+const TUNNEL_DATA: u8 = 0x30;
 
 const TUNNEL_EXTENDED: u8 = 0x20;
+const TUNNEL_TRUNCATED: u8 = 0x21;
+const TUNNEL_END: u8 = 0x22;
 
 /// Length in bytes of the digest included in relay messages.
 /// Must not be greater than `digest::SHA256_OUTPUT_LEN` (= 32)
@@ -151,6 +156,9 @@ pub(crate) enum TunnelRequest {
     /// key
     /// ```
     Extend(TunnelId, /* dest */ SocketAddr, /* key */ Key),
+    Truncate(TunnelId),
+    Begin(TunnelId),
+    End(TunnelId),
     /// Format:
     /// ```text
     /// _padding: u8
@@ -162,6 +170,7 @@ pub(crate) enum TunnelRequest {
 
 pub(crate) enum TunnelResponse<K> {
     Extended(TunnelId, /* peer_key */ K),
+    Truncated(TunnelId, /* error_code */ u8),
 }
 
 pub(crate) trait TryFromBytesExt: TryFromBytes<TunnelProtocolError> {
@@ -442,6 +451,18 @@ impl ToBytes for TunnelRequest {
                 // size (2), type (1), ip flag (1), tunnel id (4), ip addr, dest port (2), secret
                 2 + 1 + 1 + 4 + dest.ip().size() + 2 + key.bytes().len()
             }
+            TunnelRequest::Truncate(_) => {
+                // size (2), type (1), padding (1), tunnel_id (4)
+                2 + 1 + 1 + 4
+            }
+            TunnelRequest::Begin(_) => {
+                // size (2), type (1), padding (1), tunnel_id (4)
+                2 + 1 + 1 + 4
+            }
+            TunnelRequest::End(_) => {
+                // size (2), type (1), padding (1), tunnel_id (4)
+                2 + 1 + 1 + 4
+            }
             TunnelRequest::Data(_, data) => {
                 // size (2), type (1), padding (1), tunnel_id (4), data
                 2 + 1 + 1 + 4 + data.len()
@@ -459,6 +480,24 @@ impl ToBytes for TunnelRequest {
                 dest.ip().write_to(buf);
                 buf.put_u16(dest.port());
                 buf.put(key.bytes().as_ref());
+            }
+            TunnelRequest::Truncate(tunnel_id) => {
+                buf.put_u16(self.size() as u16);
+                buf.put_u8(TUNNEL_TRUNCATE);
+                buf.put_u8(0);
+                buf.put_u32(*tunnel_id);
+            }
+            TunnelRequest::Begin(tunnel_id) => {
+                buf.put_u16(self.size() as u16);
+                buf.put_u8(TUNNEL_BEGIN);
+                buf.put_u8(0);
+                buf.put_u32(*tunnel_id);
+            }
+            TunnelRequest::End(tunnel_id) => {
+                buf.put_u16(self.size() as u16);
+                buf.put_u8(TUNNEL_END);
+                buf.put_u8(0);
+                buf.put_u32(*tunnel_id);
             }
             TunnelRequest::Data(tunnel_id, data) => {
                 buf.put_u16(self.size() as u16);
@@ -498,6 +537,10 @@ impl<K: ToBytes> ToBytes for TunnelResponse<K> {
                 // size (2), type (1), padding (1), tunnel_id (4), peer_key
                 2 + 1 + 1 + 4 + peer_key.size()
             }
+            TunnelResponse::Truncated(_, _) => {
+                // size (2), type (1), error_code(1), tunnel_id (4)
+                2 + 1 + 1 + 4
+            }
         }
     }
 
@@ -509,6 +552,12 @@ impl<K: ToBytes> ToBytes for TunnelResponse<K> {
                 buf.put_u8(0);
                 buf.put_u32(*tunnel_id);
                 key.write_to(buf);
+            }
+            TunnelResponse::Truncated(tunnel_id, error_code) => {
+                buf.put_u16(self.size() as u16);
+                buf.put_u8(TUNNEL_TRUNCATED);
+                buf.put_u8(*error_code);
+                buf.put_u32(*tunnel_id);
             }
         }
     }
