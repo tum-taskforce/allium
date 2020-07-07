@@ -5,6 +5,8 @@ use anyhow::anyhow;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use onion::Result;
 use std::net::SocketAddr;
+use std::fmt;
+use serde::export::Formatter;
 
 const ONION_TUNNEL_BUILD: u16 = 560;
 const ONION_TUNNEL_READY: u16 = 561;
@@ -15,7 +17,6 @@ const ONION_TUNNEL_ERROR: u16 = 565;
 const ONION_TUNNEL_COVER: u16 = 566;
 
 /// Messages received by the onion module.
-#[derive(Debug)]
 pub enum OnionRequest {
     /// This message is to be used by the CM/UI module to request the Onion module to build a tunnel
     /// to the given destination in the next period.
@@ -38,6 +39,34 @@ pub enum OnionRequest {
     /// in a round. It is illegal to send this message when a tunnel is established and Onion has
     /// replied with ONION TUNNEL READY.
     Cover(/* cover_size */ u16),
+}
+
+impl fmt::Debug for OnionRequest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            OnionRequest::Build(dst_addr, _) => {
+                f.debug_struct("Build")
+                    .field("dst_addr", dst_addr)
+                    .finish()
+            },
+            OnionRequest::Destroy(tunnel_id) => {
+                f.debug_struct("Destroy")
+                    .field("tunnel_id", tunnel_id)
+                    .finish()
+            },
+            OnionRequest::Data(tunnel_id, data) => {
+                f.debug_struct("Data")
+                    .field("tunnel_id", tunnel_id)
+                    .field("data.len()", &data.len())
+                    .finish()
+            },
+            OnionRequest::Cover(cover_size) => {
+                f.debug_struct("Cover")
+                    .field("cover_size", cover_size)
+                    .finish()
+            },
+        }
+    }
 }
 
 impl FromBytes for Result<OnionRequest> {
