@@ -189,7 +189,7 @@ impl CircuitHandler {
             TunnelRequest::Truncate(tunnel_id) => {
                 if self.out_circuit.is_none() {
                     self.in_circuit.socket().await
-                        .finalize_tunnel_truncate(
+                        .reject_tunnel_truncate(
                             self.in_circuit.id,
                             tunnel_id,
                             &self.aes_keys,
@@ -207,7 +207,6 @@ impl CircuitHandler {
                             self.in_circuit.id,
                             tunnel_id,
                             &self.aes_keys,
-                            TUNNEL_TRUNCATED_ERROR_NONE,
                             &self.rng,
                         )
                         .await?;

@@ -85,6 +85,28 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         .await??)
     }
 
+    async fn encrypt_and_send_opaque<K: ToBytes>(
+        &mut self,
+        circuit_id: u16,
+        aes_keys: &[aead::LessSafeKey],
+        rng: &rand::SystemRandom,
+        tunnel_res: TunnelResponse<K>,
+    ) -> SocketResult<()> {
+        let req = CircuitOpaque {
+            circuit_id,
+            payload: CircuitOpaquePayload {
+                msg: &tunnel_res,
+                rng,
+                encrypt_keys: aes_keys,
+            },
+        };
+
+        req.write_to(&mut self.buf);
+        assert_eq!(self.buf.len(), MESSAGE_SIZE);
+        // TODO omit timeout here?
+        self.write_buf_to_stream().await
+    }
+
     /// Performs a circuit handshake with the peer connected to this socket.
     /// The `CIRCUIT CREATE` message is sent with the given `key` and sent to the peer. Then, this
     /// method tries to receive a `CIRCUIT CREATED` message from the peer. If parsed correctly, the
@@ -234,7 +256,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
      */
 
-    /// Replies on this `OnionSocket` with an `EXTENDED` message.
+    /// Replies on this `OnionSocket` with an `EXTENDED` message to a successful `EXTEND` call.
     ///
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
@@ -249,24 +271,32 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_res = TunnelResponse::Extended(tunnel_id, TUNNEL_EXTENDED_ERROR_NONE, key);
-        let req = CircuitOpaque {
-            circuit_id,
-            payload: CircuitOpaquePayload {
-                msg: &tunnel_res,
-                rng,
-                encrypt_keys: aes_keys,
-            },
-        };
-
-        req.write_to(&mut self.buf);
-        assert_eq!(self.buf.len(), MESSAGE_SIZE);
-        // TODO omit timeout here?
-        self.write_buf_to_stream().await?;
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res).await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
-        Ok(())
     }
 
-    /// Replies on this `OnionSocket` with a `TRUNCATED` message.
+    /// Replies on this `OnionSocket` with an `EXTENDED` message to a unsuccessful `EXTEND` call
+    /// with error code `error_code`.
+    ///
+    /// # Errors:
+    /// - `StreamTerminated` - The stream is broken
+    /// - `StreamTimeout` -  The stream operations timed out
+    pub(crate) async fn reject_tunnel_handshake(
+        &mut self,
+        circuit_id: CircuitId,
+        tunnel_id: TunnelId,
+        aes_keys: &[aead::LessSafeKey],
+        error_code: u8,
+        rng: &rand::SystemRandom,
+    ) -> SocketResult<()> {
+        self.buf.clear();
+        // TODO maybe think of better solution than implementing ToBytes for Unit?
+        let tunnel_res = TunnelResponse::Extended(tunnel_id, error_code, ());
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res).await
+        //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
+    }
+
+    /// Replies on this `OnionSocket` with a `TRUNCATED` message to a successful `TRUNCATE` call.
     ///
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
@@ -276,27 +306,34 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         tunnel_id: TunnelId,
         aes_keys: &[aead::LessSafeKey],
+        rng: &rand::SystemRandom,
+    ) -> SocketResult<()> {
+        self.buf.clear();
+        // FIXME why do I have to define Key here?
+        let tunnel_res = TunnelResponse::<()>::Truncated(tunnel_id, TUNNEL_TRUNCATED_ERROR_NONE);
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res).await
+        //.context("Error while writing CircuitOpaque<TunnelResponse::Truncated>")?;
+    }
+
+    /// Replies on this `OnionSocket` with an `TRUNCATED` message to a unsuccessful `TRUNCATE` call
+    /// with error code `error_code`.
+    ///
+    /// # Errors:
+    /// - `StreamTerminated` - The stream is broken
+    /// - `StreamTimeout` -  The stream operations timed out
+    pub(crate) async fn reject_tunnel_truncate(
+        &mut self,
+        circuit_id: CircuitId,
+        tunnel_id: TunnelId,
+        aes_keys: &[aead::LessSafeKey],
         error_code: u8,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         // FIXME why do I have to define Key here?
-        let tunnel_res = TunnelResponse::<VerifyKey>::Truncated(tunnel_id, error_code);
-        let req = CircuitOpaque {
-            circuit_id,
-            payload: CircuitOpaquePayload {
-                msg: &tunnel_res,
-                rng,
-                encrypt_keys: aes_keys,
-            },
-        };
-
-        req.write_to(&mut self.buf);
-        assert_eq!(self.buf.len(), MESSAGE_SIZE);
-        // TODO omit timeout here?
-        self.write_buf_to_stream().await?;
-        //.context("Error while writing CircuitOpaque<TunnelResponse::Truncated>")?;
-        Ok(())
+        let tunnel_res = TunnelResponse::<()>::Truncated(tunnel_id, error_code);
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res).await
+        //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
 
     /// Tries to read an entire onion protocol message before returning. This function does not
@@ -321,6 +358,11 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         Ok(msg)
     }
 
+    /// Forwards an already correctly encrypted `payload` to the stream in this `OnionSocket`
+    ///
+    /// # Errors:
+    /// - `StreamTerminated` - The stream is broken
+    /// - `StreamTimeout` -  The stream operations timed out
     pub(crate) async fn forward_opaque(
         &mut self,
         circuit_id: CircuitId,
@@ -334,6 +376,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         };
 
         msg.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
+        // FIXME Do we want to apply the timeout here? Generally: no, but what do we do instead?
         self.write_buf_to_stream().await?;
         //.context("Error while writing CircuitOpaque")?;
         Ok(())

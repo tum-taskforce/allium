@@ -552,12 +552,12 @@ impl<K: ToBytes> ToBytes for TunnelResponse<K> {
 
     fn write_to(&self, buf: &mut BytesMut) {
         match self {
-            TunnelResponse::Extended(tunnel_id, error_code, key) => {
+            TunnelResponse::Extended(tunnel_id, error_code, peer_key) => {
                 buf.put_u16(self.size() as u16);
                 buf.put_u8(TUNNEL_EXTENDED);
                 buf.put_u8(*error_code);
                 buf.put_u32(*tunnel_id);
-                key.write_to(buf);
+                peer_key.write_to(buf);
             }
             TunnelResponse::Truncated(tunnel_id, error_code) => {
                 buf.put_u16(self.size() as u16);
@@ -757,6 +757,10 @@ mod tests {
                 let key2 = key2.verify(&rsa_public)?;
                 let key2_bytes: &[u8] = &key2.bytes().as_ref();
                 assert_eq!(&key_bytes.as_ref(), &key2_bytes);
+            }
+            _ => {
+                // FIXME ugly, but I suck at rust
+                Err(anyhow!("Expected EXTENDED, received unknown"))?;
             }
         }
         Ok(())
