@@ -1,5 +1,4 @@
 use crate::onion_protocol::*;
-use crate::socket::OnionSocketError::{BrokenMessage, TeardownMessage};
 use crate::utils::{FromBytes, ToBytes, TryFromBytes};
 use crate::{CircuitId, Result, TunnelId};
 use anyhow::{anyhow, Context};
@@ -42,7 +41,11 @@ pub(crate) enum OnionSocketError {
     // TODO argument: message
     #[error("received broken message that cannot be parsed and violates protocol")]
     BrokenMessage,
-    // TODO remote error
+    /// An error was triggered remotely and the operation returned with an error code
+    #[error("the operation could not be completed remotely returning error code {:?}", error_code)]
+    RemoteError {
+        error_code: u8
+    }
 }
 
 pub(crate) type SocketResult<T> = std::result::Result<T, OnionSocketError>;
@@ -135,7 +138,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         if res.circuit_id == circuit_id {
             Ok(res.key)
         } else {
-            Err(BrokenMessage)
+            Err(OnionSocketError::BrokenMessage)
         }
     }
 
@@ -191,6 +194,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     /// - `StreamTimeout` -  The stream operations timed out
     /// - `TeardownMessage` - A `TEARDOWN`message has been received instead of `CIRCUIT CREATE`
     /// - `BrokenMessage` - The received answer message could not be parsed
+    /// - `RemoteError` - The `EXTENDED` message returned with an error code
     pub(crate) async fn initiate_tunnel_handshake(
         &mut self,
         circuit_id: CircuitId,
@@ -219,34 +223,34 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         let mut res = CircuitOpaque::try_read_from(&mut self.buf)?;
 
         if res.circuit_id != circuit_id {
-            return Err(BrokenMessage);
+            return Err(OnionSocketError::BrokenMessage);
             //return Err(anyhow!(
             //    "Circuit ID in Opaque response does not match ID in request"
             //));
         }
 
         res.decrypt(aes_keys.iter().rev())
-            .map_err(|_| BrokenMessage)?;
+            .map_err(|_| OnionSocketError::BrokenMessage)?;
         let tunnel_res = TunnelResponse::read_with_digest_from(&mut res.payload.bytes)
-            .map_err(|_| BrokenMessage)?;
+            .map_err(|_| OnionSocketError::BrokenMessage)?;
         //.context("Invalid TunnelResponse message")?;
 
         match tunnel_res {
             TunnelResponse::Extended(res_tunnel_id, error_code, res_key) => {
                 if res_tunnel_id != tunnel_id {
-                    return Err(BrokenMessage);
+                    return Err(OnionSocketError::BrokenMessage);
                     //return Err(anyhow!("Tunnel ID in Extended does not match ID in Extend"));
                 }
                 if error_code != TUNNEL_EXTENDED_ERROR_NONE {
                     // TODO Retry may be allowed
-                    return Err(BrokenMessage);
+                    return Err(OnionSocketError::RemoteError {error_code});
                     //return Err(anyhow!("Tunnel Extend returned an error"));
                 }
                 Ok(res_key)
             }
             _ => {
                 // ignore all other replies
-                Err(BrokenMessage)
+                Err(OnionSocketError::BrokenMessage)
             }
         }
     }
