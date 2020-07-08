@@ -159,17 +159,14 @@ impl OnionModule {
         let mut socket = ApiSocket::new(stream);
 
         while let Some(msg) = socket.read_next::<OnionRequest>().await? {
+            trace!("Handling {:?}", msg);
             let msg_id = msg.id();
             match msg {
-                OnionRequest::Build(_dst_addr, dst_hostkey) => {
+                OnionRequest::Build(dst_addr, dst_hostkey) => {
                     let handler = self.clone();
-                    tokio::spawn(async move {
-                        let _res = match handler.onion.build_tunnel(3).await {
-                            Ok(tunnel_id) => OnionResponse::Ready(tunnel_id, &dst_hostkey),
-                            Err(_) => OnionResponse::Error(msg_id, todo!()),
-                        };
-                        // FIXME writer.write(res).await.unwrap();
-                    });
+                    let dest = Peer::new(dst_addr, dst_hostkey.to_vec());
+                    let tunnel =
+                    handler.onion.build_tunnel(dest, 3).await?;
                 }
                 OnionRequest::Destroy(tunnel_id) => {
                     self.onion.destroy_tunnel(tunnel_id).await?;

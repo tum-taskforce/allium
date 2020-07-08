@@ -43,6 +43,7 @@ impl Peer {
 
 enum Request {
     Build {
+        dest: Peer,
         n_hops: usize,
         res: oneshot::Sender<Result<TunnelId>>,
     },
@@ -74,9 +75,13 @@ impl Onion {
         })
     }
 
-    pub async fn build_tunnel(&self, n_hops: usize) -> Result<TunnelId> {
+    pub async fn build_tunnel(&self, dest: Peer, n_hops: usize) -> Result<TunnelId> {
         let (tx, rx) = oneshot::channel();
-        let req = Request::Build { n_hops, res: tx };
+        let req = Request::Build {
+            dest,
+            n_hops,
+            res: tx,
+        };
         self.requests
             .send(req)
             .map_err(|_| anyhow!("Failed to send build request"))
@@ -140,30 +145,30 @@ where
         // TODO proper scheduling
         while let Some(req) = self.requests.recv().await {
             match req {
-                Request::Build { n_hops, res } => {
-                    res.send(self.handle_build(n_hops).await).unwrap();
+                Request::Build { dest, n_hops, res } => {
+                    res.send(self.handle_build(dest, n_hops).await).unwrap();
                 }
             }
         }
     }
 
-    async fn handle_build(&mut self, n_hops: usize) -> Result<TunnelId> {
+    async fn handle_build(&mut self, dest: Peer, n_hops: usize) -> Result<TunnelId> {
         let tunnel_id = Tunnel::random_id(&self.rng);
-        let peer = self
-            .peer_provider
-            .next()
-            .await
-            .ok_or(anyhow!("Failed to get random peer"))?;
+        let peer = self.random_peer().await?;
         let mut tunnel = Tunnel::init(tunnel_id, &peer, &self.rng).await?;
         for _ in 1..n_hops {
-            let peer = self
-                .peer_provider
-                .next()
-                .await
-                .ok_or(anyhow!("Failed to get random peer"))?;
+            let peer = self.random_peer().await?;
             tunnel.extend(&peer, &self.rng).await?;
         }
-
+        tunnel.extend(&dest, &self.rng).await?;
+        // TODO listen for incoming data
         Ok(tunnel_id)
+    }
+
+    async fn random_peer(&mut self) -> Result<Peer> {
+        self.peer_provider
+            .next()
+            .await
+            .ok_or(anyhow!("Failed to get random peer"))
     }
 }
