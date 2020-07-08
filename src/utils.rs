@@ -86,7 +86,7 @@ impl ToBytes for IpAddr {
     }
 }
 
-pub(crate) fn read_hostkey(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read_hostkey<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
     let file = BufReader::new(File::open(path)?);
     let key = file
         .lines()
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_read_hostkey() -> Result<()> {
-        let data = read_hostkey(Path::new("testkey.pem"))?;
+        let data = read_hostkey("testkey.pem")?;
         let _hostkey = RsaKeyPair::from_pkcs8(&data)?;
         Ok(())
     }

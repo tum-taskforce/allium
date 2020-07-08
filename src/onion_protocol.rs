@@ -786,7 +786,7 @@ mod tests {
     }
 
     fn read_rsa_testkey() -> Result<(signature::RsaKeyPair, signature::UnparsedPublicKey<Bytes>)> {
-        let key_pair = signature::RsaKeyPair::from_pkcs8(&read_hostkey(Path::new("testkey.pem"))?)?;
+        let key_pair = signature::RsaKeyPair::from_pkcs8(&read_hostkey("testkey.pem")?)?;
         let rsa_public_key = signature::UnparsedPublicKey::new(
             &signature::RSA_PKCS1_2048_8192_SHA256,
             key_pair.public_key().as_ref().to_vec().into(),

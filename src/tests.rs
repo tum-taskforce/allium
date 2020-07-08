@@ -22,7 +22,7 @@ async fn listen(mut listener: TcpListener, host_key: &signature::RsaKeyPair) -> 
 }
 
 fn read_rsa_testkey() -> Result<(signature::RsaKeyPair, Vec<u8>)> {
-    let key_pair = signature::RsaKeyPair::from_pkcs8(&read_hostkey(Path::new("testkey.pem"))?)?;
+    let key_pair = signature::RsaKeyPair::from_pkcs8(&read_hostkey("testkey.pem")?)?;
     let public_key = key_pair.public_key().as_ref().to_vec();
     Ok((key_pair, public_key))
 }

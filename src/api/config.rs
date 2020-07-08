@@ -1,7 +1,9 @@
 use crate::Result;
 use serde::Deserialize;
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -44,5 +46,11 @@ pub struct PeerConfig {
 impl Config {
     pub fn from_str(string: &str) -> Result<Self> {
         Ok(toml::from_str(string)?)
+    }
+
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let mut buf = String::new();
+        File::open(path)?.read_to_string(&mut buf)?;
+        Self::from_str(&buf)
     }
 }

@@ -6,6 +6,7 @@ use api::protocol::*;
 use futures::stream::StreamExt;
 use log::{info, trace};
 use onion::*;
+use std::env;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream;
@@ -76,7 +77,7 @@ impl OnionModule {
                     self.onion.send_data(tunnel_id, &tunnel_data).await?;
                 }
                 OnionRequest::Cover(_cover_size) => {
-                    unimplemented!();
+                    // unimplemented!();
                 }
             }
         }
@@ -93,21 +94,8 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    #[rustfmt::skip]
-    let config = Config::from_str(r#"
-        hostkey = "testkey.pem"
-
-        [onion]
-        api_address = "127.0.0.1:4200"
-        p2p_port = 4201
-        p2p_hostname = "127.0.0.1"
-
-        [rps]
-        peers = [
-            { p2p_address = "127.0.0.1:4202", hostkey = "testkey.pem" },
-            { p2p_address = "127.0.0.1:4203", hostkey = "testkey.pem" },
-        ]
-    "#)?;
+    let config_path = env::args().nth(1).unwrap_or("config.ini".to_string());
+    let config = Config::from_file(config_path)?;
 
     let onion_module = OnionModule::init(config)
         .await
