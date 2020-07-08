@@ -90,7 +90,7 @@ impl OnionModule {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    pretty_env_logger::init();
     info!(
         "{} version {}",
         env!("CARGO_PKG_NAME"),
