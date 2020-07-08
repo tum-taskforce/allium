@@ -4,9 +4,9 @@ use crate::utils::{get_ip_addr, FromBytes, ToBytes};
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use onion::Result;
-use std::net::SocketAddr;
-use std::fmt;
 use serde::export::Formatter;
+use std::fmt;
+use std::net::SocketAddr;
 
 const ONION_TUNNEL_BUILD: u16 = 560;
 const ONION_TUNNEL_READY: u16 = 561;
@@ -45,26 +45,21 @@ impl fmt::Debug for OnionRequest {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             OnionRequest::Build(dst_addr, _) => {
-                f.debug_struct("Build")
-                    .field("dst_addr", dst_addr)
-                    .finish()
-            },
-            OnionRequest::Destroy(tunnel_id) => {
-                f.debug_struct("Destroy")
-                    .field("tunnel_id", tunnel_id)
-                    .finish()
-            },
-            OnionRequest::Data(tunnel_id, data) => {
-                f.debug_struct("Data")
-                    .field("tunnel_id", tunnel_id)
-                    .field("data.len()", &data.len())
-                    .finish()
-            },
-            OnionRequest::Cover(cover_size) => {
-                f.debug_struct("Cover")
-                    .field("cover_size", cover_size)
-                    .finish()
-            },
+                f.debug_struct("Build").field("dst_addr", dst_addr).finish()
+            }
+            OnionRequest::Destroy(tunnel_id) => f
+                .debug_struct("Destroy")
+                .field("tunnel_id", tunnel_id)
+                .finish(),
+            OnionRequest::Data(tunnel_id, data) => f
+                .debug_struct("Data")
+                .field("tunnel_id", tunnel_id)
+                .field("data.len()", &data.len())
+                .finish(),
+            OnionRequest::Cover(cover_size) => f
+                .debug_struct("Cover")
+                .field("cover_size", cover_size)
+                .finish(),
         }
     }
 }

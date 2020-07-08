@@ -26,6 +26,7 @@ mod tests;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
+#[derive(Clone)]
 pub struct Peer {
     addr: SocketAddr,
     hostkey: signature::UnparsedPublicKey<Bytes>,
