@@ -634,13 +634,13 @@ impl<'a> SignKey<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{EphemeralPrivateKey, RsaPrivateKey};
+    use crate::crypto::{EphemeralPrivateKey, read_rsa_keypair};
     use ring::rand::SecureRandom;
 
     #[test]
     fn test_circuit_create() -> Result<()> {
         let rng = rand::SystemRandom::new();
-        let key = generate_ephemeral_key(&rng)?;
+        let key = EphemeralPrivateKey::generate(&rng).public_key();
         let key_bytes = key.bytes().clone();
 
         let circuit_id = 0;
@@ -658,10 +658,10 @@ mod tests {
     #[test]
     fn test_circuit_created() -> Result<()> {
         let rng = rand::SystemRandom::new();
-        let key = generate_ephemeral_key(&rng)?;
+        let key = EphemeralPrivateKey::generate(&rng).public_key();
         let key_bytes = key.bytes().clone();
 
-        let (rsa_private, rsa_public) = read_rsa_testkey()?;
+        let (rsa_private, rsa_public) = read_rsa_keypair("testkey.pem")?;
         let key = SignKey::sign(&key, &rsa_private, &rng);
 
         let circuit_id = 0;
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn test_tunnel_extend() -> Result<()> {
         let rng = rand::SystemRandom::new();
-        let key = generate_ephemeral_key(&rng)?;
+        let key = EphemeralPrivateKey::generate(&rng).public_key();
         let key_bytes = key.bytes().clone();
 
         let aes_keys = generate_aes_keys(&rng)?;
@@ -719,10 +719,10 @@ mod tests {
     #[test]
     fn test_tunnel_extended() -> Result<()> {
         let rng = rand::SystemRandom::new();
-        let key = generate_ephemeral_key(&rng)?;
+        let key = EphemeralPrivateKey::generate(&rng).public_key();
         let key_bytes = key.bytes().clone();
 
-        let (rsa_private, rsa_public) = read_rsa_testkey()?;
+        let (rsa_private, rsa_public) = read_rsa_keypair("testkey.pem")?;
         let key = SignKey::sign(&key, &rsa_private, &rng);
 
         let aes_keys = generate_aes_keys(&rng)?;
@@ -768,16 +768,6 @@ mod tests {
     #[test]
     fn test_tunnel_data() -> Result<()> {
         Ok(())
-    }
-
-    fn generate_ephemeral_key(rng: &rand::SystemRandom) -> Result<Key> {
-        Ok(EphemeralPrivateKey::generate(rng).public_key())
-    }
-
-    fn read_rsa_testkey() -> Result<(RsaPrivateKey, RsaPublicKey)> {
-        let private_key = RsaPrivateKey::from_pem_file("testkey.pem")?;
-        let public_key = private_key.public_key();
-        Ok((private_key, public_key))
     }
 
     fn generate_aes_keys(rng: &rand::SystemRandom) -> Result<[SessionKey; 1]> {

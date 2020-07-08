@@ -1,4 +1,4 @@
-use crate::crypto::{generate_ephemeral_key_pair, SessionKey};
+use crate::crypto::{generate_ephemeral_keypair, SessionKey};
 use crate::onion_protocol::{
     CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelProtocolError,
     TunnelRequest, TUNNEL_EXTENDED_ERROR_BRANCHING_DETECTED, TUNNEL_EXTENDED_ERROR_NONE,
@@ -65,7 +65,7 @@ impl CircuitHandler {
 
         let rng = rand::SystemRandom::new();
         // TODO handle errors
-        let (private_key, key) = generate_ephemeral_key_pair(&rng);
+        let (private_key, key) = generate_ephemeral_keypair(&rng);
         let key = SignKey::sign(&key, host_key, &rng);
 
         socket.finalize_handshake(circuit_id, key, &rng).await?;

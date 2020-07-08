@@ -41,7 +41,7 @@ impl EphemeralPublicKey {
     }
 }
 
-pub(crate) fn generate_ephemeral_key_pair(
+pub(crate) fn generate_ephemeral_keypair(
     rng: &rand::SystemRandom,
 ) -> (EphemeralPrivateKey, EphemeralPublicKey) {
     let private_key = EphemeralPrivateKey::generate(rng);
@@ -83,6 +83,12 @@ impl RsaPrivateKey {
             .sign(&signature::RSA_PKCS1_SHA256, rng, data, signature)?;
         Ok(())
     }
+}
+
+pub(crate) fn read_rsa_keypair<P: AsRef<Path>>(path: P) -> Result<(RsaPrivateKey, RsaPublicKey)> {
+    let private_key = RsaPrivateKey::from_pem_file(path)?;
+    let public_key = private_key.public_key();
+    Ok((private_key, public_key))
 }
 
 impl RsaPublicKey {

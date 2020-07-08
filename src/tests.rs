@@ -1,6 +1,6 @@
 use super::*;
 use crate::circuit::CircuitHandler;
-use crate::crypto::RsaPrivateKey;
+use crate::crypto::{RsaPrivateKey, read_rsa_keypair};
 use crate::tunnel::Tunnel;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -19,14 +19,8 @@ async fn listen(mut listener: TcpListener, host_key: &RsaPrivateKey) -> Result<(
     Ok(())
 }
 
-fn read_rsa_testkey() -> Result<(RsaPrivateKey, RsaPublicKey)> {
-    let private_key = RsaPrivateKey::from_pem_file("testkey.pem")?;
-    let public_key = private_key.public_key();
-    Ok((private_key, public_key))
-}
-
 async fn spawn_n_peers(n: usize) -> Vec<Peer> {
-    let (host_key, peer_key) = read_rsa_testkey().unwrap();
+    let (host_key, peer_key) = read_rsa_keypair("testkey.pem").unwrap();
     let mut peers = Vec::new();
     let host_key = Arc::new(host_key);
     for i in 0..n {
