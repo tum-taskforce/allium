@@ -1,8 +1,9 @@
-use crate::onion_protocol::{CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelRequest, TunnelProtocolError, TUNNEL_TRUNCATED_ERROR_OUT_CIRCUIT_EXISTS, TUNNEL_TRUNCATED_ERROR_NONE, TUNNEL_EXTENDED_ERROR_NONE};
+use crate::onion_protocol::{CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelRequest, TunnelProtocolError, TUNNEL_TRUNCATED_ERROR_NO_NEXT_HOP, TUNNEL_TRUNCATED_ERROR_NONE, TUNNEL_EXTENDED_ERROR_NONE, TUNNEL_EXTENDED_ERROR_PEER_UNREACHABLE, TUNNEL_EXTENDED_ERROR_BRANCHING_DETECTED};
 use crate::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::utils::derive_secret;
 use crate::utils::generate_ephemeral_key_pair;
 use crate::Result;
+use log::{warn};
 use anyhow::anyhow;
 use anyhow::Context;
 use log::trace;
@@ -86,8 +87,8 @@ impl CircuitHandler {
                        could cause problems here, if the incoming onion packets are highly fractured
                        into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
                      */
-                    println!("timeout");
-                    // TODO teardown
+                    warn!("Timeout triggered, terminating CircuitHandler");
+                    self.teardown_all().await;
                     break;
                 },
             }
@@ -104,6 +105,7 @@ impl CircuitHandler {
         // match whether a message has been received or if an error occurred
         match msg {
             Ok(mut msg) => {
+                // TODO final teardown after errors here
                 // decrypt message
                 msg.decrypt(self.aes_keys.iter().rev())?;
                 // test if this message is directed to us or is broken
@@ -133,15 +135,23 @@ impl CircuitHandler {
                     }
                 }
             }
+            Err(OnionSocketError::BrokenMessage) => {
+                self.teardown_in_circuit().await;
+                self.teardown_out_circuit().await;
+                Err(anyhow!("In Circuit breached protocol by sending unexpected message"))
+            }
+            Err(OnionSocketError::StreamTerminated(e)) => {
+                self.teardown_out_circuit().await;
+                Err(anyhow!("In Stream terminated"))
+            }
+            Err(OnionSocketError::TeardownMessage) => {
+                self.teardown_out_circuit().await;
+                Ok(())
+            }
             Err(e) => {
-                /* possible scenarios:
-                  socket closed => teardown other socket
-                  no opaque message, but different message => react accordingly to what message
-                  unreadable message => teardown
-                  -> Beware: don't duplicate code since behavior should be highly equal to errors
-                     from socket
-                */
-                todo!()
+                // Panicing stub
+                warn!("An unexpected error occured during handling of the in_socket");
+                panic!(e)
             }
         }
     }
@@ -150,10 +160,21 @@ impl CircuitHandler {
         match tunnel_msg {
             TunnelRequest::Extend(tunnel_id, dest, key) => {
                 if self.out_circuit.is_some() {
-                    /* TODO reply to socket with EXTENDED
+                    /* reply to socket with EXTENDED
                        this is required to prevent any deadlocks and errors in the tunnel
                        since Alice in the tunnel waits for a EXTENDED packet
                     */
+                    self.in_circuit
+                        .socket()
+                        .await
+                        .reject_tunnel_handshake(
+                            self.in_circuit.id,
+                            tunnel_id,
+                            &self.aes_keys,
+                            TUNNEL_EXTENDED_ERROR_BRANCHING_DETECTED,
+                            &self.rng,
+                        )
+                        .await?;
                     Ok(())
                 } else {
                     /* TODO handle connect failure
@@ -193,7 +214,7 @@ impl CircuitHandler {
                             self.in_circuit.id,
                             tunnel_id,
                             &self.aes_keys,
-                            TUNNEL_TRUNCATED_ERROR_OUT_CIRCUIT_EXISTS,
+                            TUNNEL_TRUNCATED_ERROR_NO_NEXT_HOP,
                             &self.rng,
                         )
                         .await?;
@@ -232,6 +253,7 @@ impl CircuitHandler {
         match msg {
             Ok(mut msg) => {
                 // encrypt message and try to send it to socket
+                // TODO final teardown after errors here
                 msg.encrypt(self.aes_keys.iter())?;
                 self.in_circuit
                     .socket()
@@ -240,15 +262,25 @@ impl CircuitHandler {
                     .await?;
                 Ok(())
             }
+            Err(OnionSocketError::BrokenMessage) => {
+                // NOTE: error handling will just be propagated, robustness could be improved here
+                self.teardown_all().await;
+                Err(anyhow!("Out Circuit breached protocol by sending unexpected message"))
+            }
+            Err(OnionSocketError::StreamTerminated(e)) => {
+                // NOTE: error handling will just be propagated, robustness could be improved here
+                self.teardown_in_circuit().await;
+                Err(anyhow!("Out Stream terminated"))
+            }
+            Err(OnionSocketError::TeardownMessage) => {
+                // NOTE: error handling will just be propagated, robustness could be improved here
+                self.teardown_in_circuit().await;
+                Ok(())
+            }
             Err(e) => {
-                /* possible scenarios:
-                  socket closed => teardown other socket
-                  no opaque message, but different message => react accordingly to what message
-                  unreadable message => teardown
-                  -> Beware: don't duplicate code since behavior should be highly equal to errors
-                     from socket
-                */
-                todo!()
+                // Panicing stub
+                warn!("An unexpected error occured during handling of the in_socket");
+                panic!(e)
             }
         }
     }
@@ -262,5 +294,17 @@ impl CircuitHandler {
             Some(c) => c.socket().await.accept_opaque().await,
             None => futures::future::pending().await,
         }
+    }
+
+    async fn teardown_all(&mut self) {
+        todo!()
+    }
+
+    async fn teardown_in_circuit(&mut self) {
+        todo!()
+    }
+
+    async fn teardown_out_circuit(&mut self) {
+        todo!()
     }
 }

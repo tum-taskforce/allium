@@ -345,7 +345,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     ///
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
-    /// - `TeardownMessage` - A `TEARDOWN`message has been received instead of `CIRCUIT CREATE`
+    /// - `TeardownMessage` - A `TEARDOWN` message has been received instead of `CIRCUIT CREATE`
     /// - `BrokenMessage` - The received answer message could not be parsed
     pub(crate) async fn accept_opaque(
         &mut self,

@@ -25,10 +25,16 @@ const TUNNEL_EXTENDED: u8 = 0x20;
 const TUNNEL_TRUNCATED: u8 = 0x21;
 
 pub(crate) const TUNNEL_EXTENDED_ERROR_NONE: u8 = 0x00;
-pub(crate) const TUNNEL_EXTENDED_ERROR_PEER_UNREACHABLE: u8 = 0x01;
+/// The `EXTENDED` call is rejected, because there already is an outgoing circuit from the targeted
+/// hop and tunnel branching is not allowed.
+pub(crate) const TUNNEL_EXTENDED_ERROR_BRANCHING_DETECTED: u8 = 0x01;
+/// The `EXTENDED` call was unsuccessful since the new peer was unreachable.
+pub(crate) const TUNNEL_EXTENDED_ERROR_PEER_UNREACHABLE: u8 = 0x02;
 
 pub(crate) const TUNNEL_TRUNCATED_ERROR_NONE: u8 = 0x00;
-pub(crate) const TUNNEL_TRUNCATED_ERROR_OUT_CIRCUIT_EXISTS: u8 = 0x01;
+/// The `TRUNCATED` call is rejected, because there is no outgoing circuit from the targeted hop
+/// that could be truncated.
+pub(crate) const TUNNEL_TRUNCATED_ERROR_NO_NEXT_HOP: u8 = 0x01;
 
 /// Length in bytes of the digest included in relay messages.
 /// Must not be greater than `digest::SHA256_OUTPUT_LEN` (= 32)
