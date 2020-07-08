@@ -23,9 +23,9 @@ impl<S: AsyncRead + Unpin> ApiSocket<S> {
         self.stream.read_exact(&mut size_buf).await?;
         let size = u16::from_be_bytes(size_buf) as usize;
 
-        self.buf.clear();
-        self.buf.reserve(size);
-        self.buf.extend_from_slice(&size_buf);
+        self.buf.resize(size, 0);
+        self.buf[0] = size_buf[0];
+        self.buf[1] = size_buf[1];
         self.stream.read_exact(&mut self.buf[2..]).await?;
         Ok(Some(M::try_read_from(&mut self.buf)?))
     }
