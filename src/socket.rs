@@ -381,6 +381,25 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         //.context("Error while writing CircuitOpaque")?;
         Ok(())
     }
+
+    /// Sends a `TEARDOWN` message via the stream.
+    ///
+    /// # Errors:
+    /// - `StreamTerminated` - The stream is broken
+    /// - `StreamTimeout` -  The stream operations timed out
+    pub(crate) async fn teardown(
+        &mut self,
+        circuit_id: CircuitId,
+        rng: &rand::SystemRandom,
+    ) -> SocketResult<()> {
+        self.buf.clear();
+        let res = CircuitTeardown { circuit_id };
+        res.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
+        // NOTE: A timeout needs to be applied here
+        self.write_buf_to_stream().await?;
+        Ok(())
+    }
+
 }
 
 impl OnionSocket<TcpStream> {

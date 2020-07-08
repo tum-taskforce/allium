@@ -115,11 +115,7 @@ impl CircuitHandler {
                         // addressed to us
                         self.handle_tunnel_message(tunnel_msg).await
                     }
-                    Err(e) => {
-                        /* TODO proper error match for unsupported messages, i.e. digest
-                           correct, but message can't be parsed due to other protocol errors
-                           like unsupported tunnel message types
-                        */
+                    Err(TunnelProtocolError::Digest) => {
                         // message not directed to us, forward to relay_socket
                         if let Some(out_circuit) = &self.out_circuit {
                             out_circuit
@@ -132,6 +128,14 @@ impl CircuitHandler {
                             // no relay_socket => proto breach teardown
                             Err(anyhow!("{:?}", e))
                         }
+                    }
+                    Err(TunnelProtocolError::Unknown { actual }) => {
+                        /* digest correct, but message can't be parsed due to other protocol errors
+                           like unsupported tunnel message types.
+                           A problem that might surface here is when the decryption randomly
+                           decrypted a packet not directed to us to a valid digest.
+                        */
+                        Err(anyhow!("Unsupported packet: {:?}", actual))
                     }
                 }
             }
@@ -221,7 +225,8 @@ impl CircuitHandler {
                     Ok(())
                 } else {
                     // Teardown out circuit
-                    todo!();
+                    self.teardown_out_circuit().await;
+                    self.out_circuit = None;
 
                     self.in_circuit.socket().await
                         .finalize_tunnel_truncate(
@@ -297,14 +302,23 @@ impl CircuitHandler {
     }
 
     async fn teardown_all(&mut self) {
-        todo!()
+        tokio::join!(self.teardown_in_circuit(), self.teardown_out_circuit());
     }
 
     async fn teardown_in_circuit(&mut self) {
-        todo!()
+        self.in_circuit
+            .socket()
+            .await
+            .teardown(out_circuit.id, &self.rng)
+            .await; // NOTE: Ignore any errors
     }
 
     async fn teardown_out_circuit(&mut self) {
-        todo!()
+        if let Some(out_circuit) = &self.out_circuit {
+            out_circuit.socket()
+                .await
+                .teardown(out_circuit.id, &self.rng)
+                .await;  // NOTE: Ignore any errors
+        }
     }
 }
