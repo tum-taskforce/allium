@@ -7,13 +7,6 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    /// Path to file containing PEM-encoded RSA hostkey in PKCS#8 format.
-    ///
-    /// Generated with:
-    /// ```text
-    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out testkey.pem
-    /// ```
-    pub hostkey: PathBuf,
     pub onion: OnionConfig,
     pub rps: RpsConfig,
 }
@@ -29,6 +22,14 @@ pub struct OnionConfig {
     /// Similar to p2p port this parameter determines the interface on which Onion listens for
     /// incoming P2P connections.
     pub p2p_hostname: IpAddr,
+    /// Path to file containing PEM-encoded RSA hostkey in DER format.
+    ///
+    /// Generated with:
+    /// ```text
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out testkey.pkcs8.pem
+    /// openssl rsa -in testkey.pkcs8.pem -out testkey.pem
+    /// ```
+    pub hostkey: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,5 +53,16 @@ impl Config {
         let mut buf = String::new();
         File::open(path)?.read_to_string(&mut buf)?;
         Self::from_str(&buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn test_read_config() {
+        let config = Config::from_file("config.ini").unwrap();
+        println!("{:#?}", config);
     }
 }

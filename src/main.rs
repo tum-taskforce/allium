@@ -7,6 +7,7 @@ use futures::stream::StreamExt;
 use log::{info, trace};
 use onion::*;
 use std::env;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream;
@@ -30,9 +31,10 @@ impl OnionModule {
         // TODO construct peer provider from rps (use buffering)
         let peer_provider = stream::empty();
 
-        let hostkey =
-            RsaPrivateKey::from_pem_file("testkey.pem").context("Could not read hostkey")?;
+        let hostkey = RsaPrivateKey::from_pem_file(&config.onion.hostkey)
+            .context("Could not read hostkey")?;
         let onion = Onion::new(hostkey, peer_provider)?;
+        let _onion_addr = SocketAddr::new(config.onion.p2p_hostname, config.onion.p2p_port);
         /*task::spawn(async {
             let addr = SocketAddr::new(config.onion.p2p_hostname.parse().unwrap(), config.onion.p2p_port);
             onion.listen(addr).await.unwrap();
