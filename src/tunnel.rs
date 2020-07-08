@@ -1,14 +1,13 @@
 use crate::circuit::Circuit;
+use crate::crypto::{generate_ephemeral_key_pair, SessionKey};
 use crate::socket::OnionSocket;
-use crate::utils::derive_secret;
-use crate::utils::generate_ephemeral_key_pair;
 use crate::Peer;
 use crate::Result;
 use anyhow::Context;
 use thiserror::Error;
 use log::trace;
+use ring::rand;
 use ring::rand::SecureRandom;
-use ring::{aead, rand};
 use tokio::net::TcpStream;
 use futures::Stream;
 
@@ -30,13 +29,13 @@ pub(crate) type TunnelResult<T> = std::result::Result<T, TunnelError>;
 pub(crate) struct Tunnel {
     pub(crate) id: TunnelId,
     out_circuit: Circuit,
-    aes_keys: Vec<aead::LessSafeKey>,
+    aes_keys: Vec<SessionKey>,
 }
 
 impl Tunnel {
     pub(crate) async fn init(id: TunnelId, peer: &Peer, rng: &rand::SystemRandom) -> Result<Self> {
         trace!("Creating tunnel {} to peer {}", id, &peer.addr);
-        let (private_key, key) = generate_ephemeral_key_pair(rng).unwrap();
+        let (private_key, key) = generate_ephemeral_key_pair(rng);
 
         let circuit_id = Circuit::random_id(rng);
         let stream = TcpStream::connect(peer.addr)
@@ -48,7 +47,7 @@ impl Tunnel {
         let peer_key = peer_key
             .verify(&peer.hostkey)
             .context("Could not verify peer public key")?;
-        let secret = derive_secret(private_key, &peer_key)?;
+        let secret = SessionKey::from_key_exchange(private_key, &peer_key)?;
         Ok(Self {
             id,
             out_circuit: Circuit::new(circuit_id, socket),
@@ -59,7 +58,7 @@ impl Tunnel {
     /// Performs a key exchange with the given peer and extends the tunnel with a new hop
     pub(crate) async fn extend(&mut self, peer: &Peer, rng: &rand::SystemRandom) -> TunnelResult<()> {
         trace!("Extending tunnel {} to peer {}", self.id, &peer.addr);
-        let (private_key, key) = generate_ephemeral_key_pair(rng).unwrap();
+        let (private_key, key) = generate_ephemeral_key_pair(rng);
 
         // TODO handle RemoteError
         let peer_key = self
@@ -82,7 +81,7 @@ impl Tunnel {
             .verify(&peer.hostkey)
             .context("Could not verify peer public key")?;
 
-        let secret = derive_secret(private_key, &peer_key)?;
+        let secret = SessionKey::from_key_exchange(private_key, &peer_key)?;
         self.aes_keys.insert(0, secret);
         Ok(())
     }

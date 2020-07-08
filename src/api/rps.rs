@@ -1,12 +1,11 @@
 use crate::api::config::{PeerConfig, RpsConfig};
 use crate::api::protocol::{Module, RpsRequest, RpsResponse};
 use crate::api::socket::ApiSocket;
-use crate::{utils, Result};
+use crate::Result;
 use anyhow::anyhow;
 use log::info;
-use onion::Peer;
+use onion::{Peer, RsaPrivateKey, RsaPublicKey};
 use ring::signature;
-use ring::signature::KeyPair;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 
@@ -42,13 +41,8 @@ impl RpsModule {
 }
 
 fn peer_from_config(config: &PeerConfig) -> Option<Peer> {
-    let hostkey = utils::read_hostkey(&config.hostkey).ok()?;
-    let public_key = signature::RsaKeyPair::from_pkcs8(&hostkey)
-        .ok()?
-        .public_key()
-        .as_ref()
-        .to_vec();
-    Some(Peer::new(config.p2p_address, public_key))
+    let hostkey = RsaPrivateKey::from_pem_file("testkey.pem").ok()?;
+    Some(Peer::new(config.p2p_address, hostkey.public_key()))
 }
 
 pub struct SocketRpsModule {
@@ -73,7 +67,8 @@ impl SocketRpsModule {
                         .find(|(m, _)| *m == Module::Onion)
                         .ok_or(anyhow!("Peer does not expose onion port"))?;
                     let peer_addr = SocketAddr::new(peer_addr, *peer_port);
-                    Ok(Peer::new(peer_addr, peer_hostkey.to_vec()))
+                    let peer_hostkey = RsaPublicKey::new(peer_hostkey.to_vec());
+                    Ok(Peer::new(peer_addr, peer_hostkey))
                 }
             }
         } else {

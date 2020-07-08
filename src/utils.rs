@@ -1,13 +1,5 @@
-use std::io::{BufRead, BufReader};
+use bytes::{Buf, BufMut, BytesMut};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-use crate::Result;
-use anyhow::anyhow;
-use anyhow::Context;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use ring::{aead, agreement, rand};
-use std::fs::File;
-use std::path::Path;
 
 pub(crate) trait FromBytes {
     fn read_from(buf: &mut BytesMut) -> Self
@@ -83,60 +75,5 @@ impl ToBytes for IpAddr {
             IpAddr::V4(ip) => buf.put(ip.octets().as_ref()),
             IpAddr::V6(ip) => buf.put(ip.octets().as_ref()),
         }
-    }
-}
-
-pub(crate) fn read_hostkey<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
-    let file = BufReader::new(File::open(path)?);
-    let key = file
-        .lines()
-        .map(|line| line.unwrap())
-        .skip(1)
-        .take_while(|line| !line.starts_with('-'))
-        .collect::<String>();
-    Ok(base64::decode(&key)?)
-}
-
-pub(crate) fn generate_ephemeral_key_pair(
-    rng: &rand::SystemRandom,
-) -> Result<(
-    agreement::EphemeralPrivateKey,
-    agreement::UnparsedPublicKey<Bytes>,
-)> {
-    let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, rng).unwrap();
-    let public_key = private_key.compute_public_key().unwrap();
-    // TODO maybe avoid allocating here
-    let key =
-        agreement::UnparsedPublicKey::new(&agreement::X25519, public_key.as_ref().to_vec().into());
-    Ok((private_key, key))
-}
-
-pub(crate) fn derive_secret(
-    private_key: agreement::EphemeralPrivateKey,
-    peer_key: &agreement::UnparsedPublicKey<Bytes>,
-) -> Result<aead::LessSafeKey> {
-    // TODO use proper key derivation function
-    agreement::agree_ephemeral(
-        private_key,
-        peer_key,
-        anyhow!("Key exchange failed"),
-        |key_material| {
-            let unbound = aead::UnboundKey::new(&aead::AES_128_GCM, &key_material[..16])
-                .context("Could not construct unbound key from keying material")?;
-            Ok(aead::LessSafeKey::new(unbound))
-        },
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ring::signature::RsaKeyPair;
-
-    #[test]
-    fn test_read_hostkey() -> Result<()> {
-        let data = read_hostkey("testkey.pem")?;
-        let _hostkey = RsaKeyPair::from_pkcs8(&data)?;
-        Ok(())
     }
 }

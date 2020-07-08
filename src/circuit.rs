@@ -1,3 +1,4 @@
+use crate::crypto::{generate_ephemeral_key_pair, SessionKey};
 use crate::onion_protocol::{
     CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelProtocolError,
     TunnelRequest, TUNNEL_EXTENDED_ERROR_BRANCHING_DETECTED, TUNNEL_EXTENDED_ERROR_NONE,
@@ -5,15 +6,13 @@ use crate::onion_protocol::{
     TUNNEL_TRUNCATED_ERROR_NO_NEXT_HOP,
 };
 use crate::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::utils::derive_secret;
-use crate::utils::generate_ephemeral_key_pair;
-use crate::Result;
+use crate::{Result, RsaPrivateKey};
 use anyhow::anyhow;
 use anyhow::Context;
 use log::trace;
+use ring::rand;
 use ring::rand::SecureRandom;
 use log::warn;
-use ring::{aead, rand, signature};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::time;
@@ -48,7 +47,7 @@ impl Circuit {
 
 pub(crate) struct CircuitHandler {
     in_circuit: Circuit,
-    aes_keys: [aead::LessSafeKey; 1],
+    aes_keys: [SessionKey; 1],
     out_circuit: Option<Circuit>,
     rng: rand::SystemRandom,
 }
@@ -56,7 +55,7 @@ pub(crate) struct CircuitHandler {
 impl CircuitHandler {
     pub(crate) async fn init(
         mut socket: OnionSocket<TcpStream>,
-        host_key: &signature::RsaKeyPair,
+        host_key: &RsaPrivateKey,
     ) -> Result<Self> {
         trace!("Accepting handshake from {:?}", socket.peer_addr());
         let (circuit_id, peer_key) = socket
@@ -66,12 +65,12 @@ impl CircuitHandler {
 
         let rng = rand::SystemRandom::new();
         // TODO handle errors
-        let (private_key, key) = generate_ephemeral_key_pair(&rng).unwrap();
+        let (private_key, key) = generate_ephemeral_key_pair(&rng);
         let key = SignKey::sign(&key, host_key, &rng);
 
         socket.finalize_handshake(circuit_id, key, &rng).await?;
 
-        let secret = derive_secret(private_key, &peer_key).unwrap();
+        let secret = SessionKey::from_key_exchange(private_key, &peer_key).unwrap();
         let in_circuit = Circuit::new(circuit_id, socket);
         Ok(Self {
             in_circuit,

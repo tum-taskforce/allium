@@ -30,8 +30,9 @@ impl OnionModule {
         // TODO construct peer provider from rps (use buffering)
         let peer_provider = stream::empty();
 
-        let hostkey = utils::read_hostkey(&config.hostkey).context("Could not read hostkey")?;
-        let onion = Onion::new(&hostkey, peer_provider)?;
+        let hostkey =
+            RsaPrivateKey::from_pem_file("testkey.pem").context("Could not read hostkey")?;
+        let onion = Onion::new(hostkey, peer_provider)?;
         /*task::spawn(async {
             let addr = SocketAddr::new(config.onion.p2p_hostname.parse().unwrap(), config.onion.p2p_port);
             onion.listen(addr).await.unwrap();
@@ -67,7 +68,7 @@ impl OnionModule {
             match msg {
                 OnionRequest::Build(dst_addr, dst_hostkey) => {
                     let handler = self.clone();
-                    let dest = Peer::new(dst_addr, dst_hostkey.to_vec());
+                    let dest = Peer::new(dst_addr, RsaPublicKey::new(dst_hostkey.to_vec()));
                     let _tunnel = handler.onion.build_tunnel(dest, 3).await?;
                 }
                 OnionRequest::Destroy(tunnel_id) => {

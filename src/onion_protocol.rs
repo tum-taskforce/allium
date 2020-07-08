@@ -1,11 +1,12 @@
 use anyhow::{anyhow, Context};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use crate::crypto::{EphemeralPublicKey, SessionKey};
 use crate::utils::{get_ip_addr, FromBytes, ToBytes, TryFromBytes};
-use crate::Result;
 use crate::{CircuitId, TunnelId};
+use crate::{Result, RsaPrivateKey, RsaPublicKey};
 use ring::rand::SecureRandom;
-use ring::{aead, agreement, digest, rand, signature};
+use ring::{aead, digest, rand};
 use std::net::SocketAddr;
 use thiserror::Error;
 
@@ -64,11 +65,11 @@ pub(crate) enum TunnelProtocolError {
 
 pub(crate) type TunnelProtocolResult<T> = std::result::Result<T, TunnelProtocolError>;
 
-pub(crate) type Key = agreement::UnparsedPublicKey<Bytes>;
+pub(crate) type Key = EphemeralPublicKey;
 
 pub(crate) struct SignKey<'a> {
     key: &'a Key,
-    key_pair: &'a signature::RsaKeyPair,
+    key_pair: &'a RsaPrivateKey,
     rng: &'a rand::SystemRandom,
 }
 
@@ -128,7 +129,7 @@ pub(crate) struct CircuitOpaque<P> {
 pub(crate) struct CircuitOpaquePayload<'a, M> {
     pub(crate) msg: &'a M,
     pub(crate) rng: &'a rand::SystemRandom,
-    pub(crate) encrypt_keys: &'a [aead::LessSafeKey],
+    pub(crate) encrypt_keys: &'a [SessionKey],
 }
 
 pub(crate) struct CircuitOpaqueBytes {
@@ -241,7 +242,7 @@ impl FromBytes for CircuitProtocolResult<CircuitCreate> {
                 buf.get_u8();
                 let circuit_id = buf.get_u16();
                 let key_bytes = buf.split_to(KEY_LEN).freeze();
-                let key = Key::new(&agreement::X25519, key_bytes);
+                let key = Key::new(key_bytes);
                 Ok(CircuitCreate { circuit_id, key })
             }
             CIRCUIT_TEARDOWN => Err(CircuitProtocolError::Teardown {
@@ -309,12 +310,10 @@ impl ToBytes for CircuitCreated<SignKey<'_>> {
 impl CircuitOpaque<CircuitOpaqueBytes> {
     pub(crate) fn decrypt<'k>(
         &mut self,
-        decrypt_keys: impl Iterator<Item = &'k aead::LessSafeKey>,
+        decrypt_keys: impl Iterator<Item = &'k SessionKey>,
     ) -> Result<()> {
         for key in decrypt_keys {
-            let nonce = aead::Nonce::assume_unique_for_key(self.payload.nonce.clone());
-            let _plaintext = key
-                .open_in_place_no_tag(nonce, aead::Aad::empty(), self.payload.bytes.as_mut())
+            key.decrypt(self.payload.nonce.clone(), self.payload.bytes.as_mut())
                 .context("Failed to decrypt message")?;
         }
         Ok(())
@@ -322,12 +321,10 @@ impl CircuitOpaque<CircuitOpaqueBytes> {
 
     pub(crate) fn encrypt<'k>(
         &mut self,
-        encrypt_keys: impl Iterator<Item = &'k aead::LessSafeKey>,
+        encrypt_keys: impl Iterator<Item = &'k SessionKey>,
     ) -> Result<()> {
         for key in encrypt_keys {
-            let nonce = aead::Nonce::assume_unique_for_key(self.payload.nonce.clone());
-            let _tag = key
-                .seal_in_place_separate_tag(nonce, aead::Aad::empty(), self.payload.bytes.as_mut())
+            key.encrypt(self.payload.nonce.clone(), self.payload.bytes.as_mut())
                 .context("Failed to encrypt message")?;
         }
         Ok(())
@@ -380,9 +377,7 @@ impl ToBytes for CircuitOpaque<CircuitOpaqueBytes> {
 impl<'a, M: ToBytes> CircuitOpaque<CircuitOpaquePayload<'a, M>> {
     fn encrypt(&self, buf: &mut BytesMut, nonce: [u8; aead::NONCE_LEN]) -> Result<()> {
         for key in self.payload.encrypt_keys.iter() {
-            let nonce = aead::Nonce::assume_unique_for_key(nonce.clone());
-            let _tag = key
-                .seal_in_place_separate_tag(nonce, aead::Aad::empty(), buf.as_mut())
+            key.encrypt(nonce.clone(), buf.as_mut())
                 .context("Failed to encrypt message")?;
         }
         Ok(())
@@ -440,7 +435,7 @@ impl FromBytes for TunnelProtocolResult<TunnelRequest> {
                 let dest_port = buf.get_u16();
                 let dest = SocketAddr::new(dest_ip, dest_port);
                 let key_bytes = buf.split_to(KEY_LEN).freeze();
-                let key = Key::new(&agreement::X25519, key_bytes);
+                let key = Key::new(key_bytes);
                 Ok(TunnelRequest::Extend(tunnel_id, dest, key))
             }
             TUNNEL_DATA => {
@@ -581,7 +576,7 @@ impl FromBytes for VerifyKey {
     fn read_from(buf: &mut BytesMut) -> Self {
         let signature = buf.split_to(SIGNATURE_LEN).freeze();
         let key_bytes = buf.split_to(KEY_LEN).freeze();
-        let key = Key::new(&agreement::X25519, key_bytes);
+        let key = Key::new(key_bytes);
         VerifyKey { key, signature }
     }
 }
@@ -598,7 +593,7 @@ impl ToBytes for VerifyKey {
 }
 
 impl VerifyKey {
-    pub(crate) fn verify(self, public_key: &signature::UnparsedPublicKey<Bytes>) -> Result<Key> {
+    pub(crate) fn verify(self, public_key: &RsaPublicKey) -> Result<Key> {
         match public_key.verify(self.key.bytes().as_ref(), self.signature.as_ref()) {
             Ok(_) => Ok(self.key),
             Err(_) => Err(anyhow!("Could not verify key signature")),
@@ -618,7 +613,6 @@ impl ToBytes for SignKey<'_> {
         buf.put(self.key.bytes().as_ref());
         self.key_pair
             .sign(
-                &signature::RSA_PKCS1_SHA256,
                 self.rng,
                 self.key.bytes().as_ref(),
                 &mut buf[sig_start..sig_end],
@@ -630,7 +624,7 @@ impl ToBytes for SignKey<'_> {
 impl<'a> SignKey<'a> {
     pub(crate) fn sign(
         key: &'a Key,
-        key_pair: &'a signature::RsaKeyPair,
+        key_pair: &'a RsaPrivateKey,
         rng: &'a rand::SystemRandom,
     ) -> Self {
         SignKey { key, key_pair, rng }
@@ -640,10 +634,8 @@ impl<'a> SignKey<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::read_hostkey;
+    use crate::crypto::{EphemeralPrivateKey, RsaPrivateKey};
     use ring::rand::SecureRandom;
-    use ring::signature::KeyPair;
-    use std::path::Path;
 
     #[test]
     fn test_circuit_create() -> Result<()> {
@@ -779,26 +771,18 @@ mod tests {
     }
 
     fn generate_ephemeral_key(rng: &rand::SystemRandom) -> Result<Key> {
-        let private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, rng)?;
-        let public_key = private_key.compute_public_key()?;
-        let key = Key::new(&agreement::X25519, public_key.as_ref().to_vec().into());
-        Ok(key)
+        Ok(EphemeralPrivateKey::generate(rng).public_key())
     }
 
-    fn read_rsa_testkey() -> Result<(signature::RsaKeyPair, signature::UnparsedPublicKey<Bytes>)> {
-        let key_pair = signature::RsaKeyPair::from_pkcs8(&read_hostkey("testkey.pem")?)?;
-        let rsa_public_key = signature::UnparsedPublicKey::new(
-            &signature::RSA_PKCS1_2048_8192_SHA256,
-            key_pair.public_key().as_ref().to_vec().into(),
-        );
-        Ok((key_pair, rsa_public_key))
+    fn read_rsa_testkey() -> Result<(RsaPrivateKey, RsaPublicKey)> {
+        let private_key = RsaPrivateKey::from_pem_file("testkey.pem")?;
+        let public_key = private_key.public_key();
+        Ok((private_key, public_key))
     }
 
-    fn generate_aes_keys(rng: &rand::SystemRandom) -> Result<[aead::LessSafeKey; 1]> {
+    fn generate_aes_keys(rng: &rand::SystemRandom) -> Result<[SessionKey; 1]> {
         let mut aes_key_bytes = [0u8; 16];
         rng.fill(&mut aes_key_bytes)?; // TODO not sure about this
-        let aes_key =
-            aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &aes_key_bytes)?);
-        Ok([aes_key])
+        Ok([SessionKey::from_bytes(&aes_key_bytes)?])
     }
 }

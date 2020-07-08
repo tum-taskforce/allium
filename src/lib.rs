@@ -5,17 +5,19 @@ use crate::circuit::{CircuitHandler, CircuitId};
 use crate::socket::OnionSocket;
 use crate::tunnel::{Tunnel, TunnelId};
 use anyhow::anyhow;
-use bytes::Bytes;
 use futures::stream::StreamExt;
 use log::{info, warn};
-use ring::{rand, signature};
+use ring::rand;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::stream::Stream;
 use tokio::sync::{mpsc, oneshot};
 
+pub use crate::crypto::{RsaPrivateKey, RsaPublicKey};
+
 mod circuit;
+mod crypto;
 mod onion_protocol;
 mod socket;
 mod tunnel;
@@ -29,15 +31,11 @@ pub type Result<T> = std::result::Result<T, anyhow::Error>;
 #[derive(Clone)]
 pub struct Peer {
     addr: SocketAddr,
-    hostkey: signature::UnparsedPublicKey<Bytes>,
+    hostkey: RsaPublicKey,
 }
 
 impl Peer {
-    pub fn new(addr: SocketAddr, hostkey: Vec<u8>) -> Self {
-        let hostkey = signature::UnparsedPublicKey::new(
-            &signature::RSA_PKCS1_2048_8192_SHA256,
-            hostkey.into(),
-        );
+    pub fn new(addr: SocketAddr, hostkey: RsaPublicKey) -> Self {
         Peer { addr, hostkey }
     }
 }
@@ -52,17 +50,16 @@ enum Request {
 
 pub struct Onion {
     requests: mpsc::UnboundedSender<Request>,
-    hostkey: signature::RsaKeyPair,
+    hostkey: RsaPrivateKey,
 }
 
 impl Onion {
     /// Construct a new onion instance.
     /// Returns Err if the supplied hostkey is invalid.
-    pub fn new<P>(hostkey: &[u8], peer_provider: P) -> Result<Self>
+    pub fn new<P>(hostkey: RsaPrivateKey, peer_provider: P) -> Result<Self>
     where
         P: Stream<Item = Peer> + Unpin + Send + Sync + 'static,
     {
-        let hostkey = signature::RsaKeyPair::from_pkcs8(hostkey)?;
         let (tx, rx) = mpsc::unbounded_channel();
         let round_handler = RoundHandler {
             requests: rx,

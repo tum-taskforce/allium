@@ -1,10 +1,11 @@
+use crate::crypto::SessionKey;
 use crate::onion_protocol::*;
 use crate::utils::{FromBytes, ToBytes, TryFromBytes};
 use crate::{CircuitId, Result, TunnelId};
 use anyhow::{anyhow, Context};
 use bytes::BytesMut;
 use futures::Future;
-use ring::{aead, rand};
+use ring::rand;
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -201,7 +202,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         tunnel_id: TunnelId,
         peer_addr: SocketAddr,
         key: Key,
-        aes_keys: &[aead::LessSafeKey],
+        aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<VerifyKey> {
         self.buf.clear();
@@ -265,7 +266,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         tunnel_id: TunnelId,
         key: VerifyKey,
-        aes_keys: &[aead::LessSafeKey],
+        aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();

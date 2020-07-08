@@ -1,15 +1,13 @@
 use super::*;
 use crate::circuit::CircuitHandler;
+use crate::crypto::RsaPrivateKey;
 use crate::tunnel::Tunnel;
-use crate::utils::read_hostkey;
-use ring::signature::KeyPair;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::Path;
 
 const TEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const TEST_PORT: u16 = 4200;
 
-async fn listen(mut listener: TcpListener, host_key: &signature::RsaKeyPair) -> Result<()> {
+async fn listen(mut listener: TcpListener, host_key: &RsaPrivateKey) -> Result<()> {
     println!(
         "Listening for P2P connections on {}",
         listener.local_addr()?
@@ -21,10 +19,10 @@ async fn listen(mut listener: TcpListener, host_key: &signature::RsaKeyPair) -> 
     Ok(())
 }
 
-fn read_rsa_testkey() -> Result<(signature::RsaKeyPair, Vec<u8>)> {
-    let key_pair = signature::RsaKeyPair::from_pkcs8(&read_hostkey("testkey.pem")?)?;
-    let public_key = key_pair.public_key().as_ref().to_vec();
-    Ok((key_pair, public_key))
+fn read_rsa_testkey() -> Result<(RsaPrivateKey, RsaPublicKey)> {
+    let private_key = RsaPrivateKey::from_pem_file("testkey.pem")?;
+    let public_key = private_key.public_key();
+    Ok((private_key, public_key))
 }
 
 async fn spawn_n_peers(n: usize) -> Vec<Peer> {
