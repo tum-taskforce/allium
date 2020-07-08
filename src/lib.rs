@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
+use crate::circuit::CircuitHandler;
 use crate::onion_protocol::*;
 use crate::socket::OnionSocket;
 use anyhow::{anyhow, Context};
@@ -16,7 +17,6 @@ use tokio::stream::Stream;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time;
 use tokio::time::Duration;
-use crate::circuit::CircuitHandler;
 
 mod circuit;
 mod onion_protocol;

@@ -271,7 +271,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_res = TunnelResponse::Extended(tunnel_id, TUNNEL_EXTENDED_ERROR_NONE, key);
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res).await
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+            .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
 
@@ -292,7 +293,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         self.buf.clear();
         // TODO maybe think of better solution than implementing ToBytes for Unit?
         let tunnel_res = TunnelResponse::Extended(tunnel_id, error_code, ());
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res).await
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+            .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
 
@@ -311,7 +313,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         self.buf.clear();
         // FIXME why do I have to define Key here?
         let tunnel_res = TunnelResponse::<()>::Truncated(tunnel_id, TUNNEL_TRUNCATED_ERROR_NONE);
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res).await
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+            .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Truncated>")?;
     }
 
@@ -332,7 +335,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         self.buf.clear();
         // FIXME why do I have to define Key here?
         let tunnel_res = TunnelResponse::<()>::Truncated(tunnel_id, error_code);
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res).await
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+            .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
 
@@ -399,7 +403,6 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         self.write_buf_to_stream().await?;
         Ok(())
     }
-
 }
 
 impl OnionSocket<TcpStream> {

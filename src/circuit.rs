@@ -1,12 +1,17 @@
-use crate::onion_protocol::{CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelRequest, TunnelProtocolError, TUNNEL_TRUNCATED_ERROR_NO_NEXT_HOP, TUNNEL_TRUNCATED_ERROR_NONE, TUNNEL_EXTENDED_ERROR_NONE, TUNNEL_EXTENDED_ERROR_PEER_UNREACHABLE, TUNNEL_EXTENDED_ERROR_BRANCHING_DETECTED};
+use crate::onion_protocol::{
+    CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelProtocolError,
+    TunnelRequest, TUNNEL_EXTENDED_ERROR_BRANCHING_DETECTED, TUNNEL_EXTENDED_ERROR_NONE,
+    TUNNEL_EXTENDED_ERROR_PEER_UNREACHABLE, TUNNEL_TRUNCATED_ERROR_NONE,
+    TUNNEL_TRUNCATED_ERROR_NO_NEXT_HOP,
+};
 use crate::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::utils::derive_secret;
 use crate::utils::generate_ephemeral_key_pair;
 use crate::Result;
-use log::{warn};
 use anyhow::anyhow;
 use anyhow::Context;
 use log::trace;
+use log::warn;
 use ring::{aead, rand, signature};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
@@ -142,7 +147,9 @@ impl CircuitHandler {
             Err(OnionSocketError::BrokenMessage) => {
                 self.teardown_in_circuit().await;
                 self.teardown_out_circuit().await;
-                Err(anyhow!("In Circuit breached protocol by sending unexpected message"))
+                Err(anyhow!(
+                    "In Circuit breached protocol by sending unexpected message"
+                ))
             }
             Err(OnionSocketError::StreamTerminated(e)) => {
                 self.teardown_out_circuit().await;
@@ -213,7 +220,9 @@ impl CircuitHandler {
             }
             TunnelRequest::Truncate(tunnel_id) => {
                 if self.out_circuit.is_none() {
-                    self.in_circuit.socket().await
+                    self.in_circuit
+                        .socket()
+                        .await
                         .reject_tunnel_truncate(
                             self.in_circuit.id,
                             tunnel_id,
@@ -228,7 +237,9 @@ impl CircuitHandler {
                     self.teardown_out_circuit().await;
                     self.out_circuit = None;
 
-                    self.in_circuit.socket().await
+                    self.in_circuit
+                        .socket()
+                        .await
                         .finalize_tunnel_truncate(
                             self.in_circuit.id,
                             tunnel_id,
@@ -239,12 +250,8 @@ impl CircuitHandler {
                     Ok(())
                 }
             }
-            TunnelRequest::Begin(tunnel_id) => {
-                todo!()
-            }
-            TunnelRequest::End(tunnel_id) => {
-                todo!()
-            }
+            TunnelRequest::Begin(tunnel_id) => todo!(),
+            TunnelRequest::End(tunnel_id) => todo!(),
             TunnelRequest::Data(tunnel_id, data) => unimplemented!(),
         }
     }
@@ -270,7 +277,9 @@ impl CircuitHandler {
             Err(OnionSocketError::BrokenMessage) => {
                 // NOTE: error handling will just be propagated, robustness could be improved here
                 self.teardown_all().await;
-                Err(anyhow!("Out Circuit breached protocol by sending unexpected message"))
+                Err(anyhow!(
+                    "Out Circuit breached protocol by sending unexpected message"
+                ))
             }
             Err(OnionSocketError::StreamTerminated(e)) => {
                 // NOTE: error handling will just be propagated, robustness could be improved here
@@ -315,10 +324,11 @@ impl CircuitHandler {
 
     async fn teardown_out_circuit(&mut self) {
         if let Some(out_circuit) = &self.out_circuit {
-            out_circuit.socket()
+            out_circuit
+                .socket()
                 .await
                 .teardown(out_circuit.id, &self.rng)
-                .await;  // NOTE: Ignore any errors
+                .await; // NOTE: Ignore any errors
         }
     }
 }

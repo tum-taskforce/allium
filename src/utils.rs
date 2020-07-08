@@ -39,8 +39,10 @@ pub(crate) trait ToBytes {
 
 // TODO maybe think of better solution
 impl ToBytes for () {
-    fn size(&self) -> usize { 0 }
-    fn write_to(&self, buf: &mut BytesMut) { }
+    fn size(&self) -> usize {
+        0
+    }
+    fn write_to(&self, buf: &mut BytesMut) {}
 }
 
 impl FromBytes for Ipv4Addr {
