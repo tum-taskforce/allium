@@ -1,16 +1,14 @@
 use crate::crypto::SessionKey;
 use crate::onion_protocol::*;
-use crate::utils::{FromBytes, ToBytes, TryFromBytes};
+use crate::utils::{ToBytes, TryFromBytes};
 use crate::{CircuitId, Result, TunnelId};
-use anyhow::{anyhow, Context};
 use bytes::BytesMut;
-use futures::Future;
 use ring::rand;
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
-use tokio::time::{timeout, Duration, Elapsed, Timeout};
+use tokio::time::{timeout, Duration, Elapsed};
 
 #[derive(Error, Debug)]
 pub(crate) enum OnionSocketError {
@@ -43,10 +41,11 @@ pub(crate) enum OnionSocketError {
     #[error("received broken message that cannot be parsed and violates protocol")]
     BrokenMessage,
     /// An error was triggered remotely and the operation returned with an error code
-    #[error("the operation could not be completed remotely returning error code {:?}", error_code)]
-    RemoteError {
-        error_code: u8
-    }
+    #[error(
+        "the operation could not be completed remotely returning error code {:?}",
+        error_code
+    )]
+    RemoteError { error_code: u8 },
 }
 
 pub(crate) type SocketResult<T> = std::result::Result<T, OnionSocketError>;
@@ -92,7 +91,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     async fn encrypt_and_send_opaque<K: ToBytes>(
         &mut self,
         circuit_id: u16,
-        aes_keys: &[aead::LessSafeKey],
+        aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
         tunnel_res: TunnelResponse<K>,
     ) -> SocketResult<()> {
@@ -244,7 +243,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
                 }
                 if error_code != TUNNEL_EXTENDED_ERROR_NONE {
                     // TODO Retry may be allowed
-                    return Err(OnionSocketError::RemoteError {error_code});
+                    return Err(OnionSocketError::RemoteError { error_code });
                     //return Err(anyhow!("Tunnel Extend returned an error"));
                 }
                 Ok(res_key)
@@ -286,7 +285,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         tunnel_id: TunnelId,
-        aes_keys: &[aead::LessSafeKey],
+        aes_keys: &[SessionKey],
         error_code: u8,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
@@ -307,7 +306,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         tunnel_id: TunnelId,
-        aes_keys: &[aead::LessSafeKey],
+        aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
@@ -328,7 +327,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         tunnel_id: TunnelId,
-        aes_keys: &[aead::LessSafeKey],
+        aes_keys: &[SessionKey],
         error_code: u8,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {

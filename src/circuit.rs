@@ -10,9 +10,9 @@ use crate::{Result, RsaPrivateKey};
 use anyhow::anyhow;
 use anyhow::Context;
 use log::trace;
+use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
-use log::warn;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::time;
@@ -138,8 +138,10 @@ impl CircuitHandler {
                             Ok(())
                         } else {
                             // no relay_socket => proto breach teardown
-                            Err(anyhow!("Cannot forward CircuitOpaque since there is no out circuit, \
-                            is the encryption correct?"))
+                            Err(anyhow!(
+                                "Cannot forward CircuitOpaque since there is no out circuit, \
+                            is the encryption correct?"
+                            ))
                         }
                     }
                     Err(TunnelProtocolError::Unknown { actual }) => {

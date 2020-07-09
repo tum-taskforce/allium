@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
-use crate::circuit::CircuitHandler;
 use crate::circuit::{CircuitHandler, CircuitId};
 use crate::socket::OnionSocket;
 use crate::tunnel::{Tunnel, TunnelId};

@@ -5,13 +5,13 @@ use crate::socket::OnionSocket;
 use crate::Result;
 use crate::{Event, Peer};
 use anyhow::Context;
-use thiserror::Error;
+use futures::Stream;
 use log::trace;
 use ring::rand;
 use ring::rand::SecureRandom;
+use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use futures::Stream;
 
 pub(crate) type TunnelId = u32;
 
@@ -19,10 +19,12 @@ pub(crate) type TunnelId = u32;
 pub(crate) enum TunnelError {
     /// The requested operation could not be run to completion, but the tunnel has a consistent
     /// state that can be expanded on
+    #[error("Incomplete")]
     Incomplete,
     /// The requested operation could not be completed and the tunnel is left in a broken state
     /// that needs to be cleaned up. This may be triggered by an undecryptable `OPAQUE` message,
     /// or a `TEARDOWN` message from the first hop.
+    #[error("Broken")]
     Broken,
 }
 
@@ -58,7 +60,11 @@ impl Tunnel {
     }
 
     /// Performs a key exchange with the given peer and extends the tunnel with a new hop
-    pub(crate) async fn extend(&mut self, peer: &Peer, rng: &rand::SystemRandom) -> TunnelResult<()> {
+    pub(crate) async fn extend(
+        &mut self,
+        peer: &Peer,
+        rng: &rand::SystemRandom,
+    ) -> TunnelResult<()> {
         trace!("Extending tunnel {} to peer {}", self.id, &peer.addr);
         let (private_key, key) = crypto::generate_ephemeral_keypair(rng);
 
