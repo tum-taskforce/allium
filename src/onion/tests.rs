@@ -1,7 +1,7 @@
-use super::*;
-use crate::circuit::CircuitHandler;
-use crate::crypto::{self, RsaPrivateKey};
-use crate::tunnel::Tunnel;
+use crate::onion::circuit::CircuitHandler;
+use crate::onion::crypto::{self, RsaPrivateKey};
+use crate::onion::tunnel::Tunnel;
+use crate::*;
 use std::net::{IpAddr, Ipv4Addr};
 
 const TEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);

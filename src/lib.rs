@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
-use crate::circuit::{CircuitHandler, CircuitId};
-use crate::socket::OnionSocket;
-use crate::tunnel::{Tunnel, TunnelId};
+use crate::onion::circuit::{CircuitHandler, CircuitId};
+use crate::onion::socket::OnionSocket;
+use crate::onion::tunnel::{Tunnel, TunnelId};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -14,17 +14,10 @@ use tokio::net::TcpListener;
 use tokio::stream::Stream;
 use tokio::sync::{mpsc, oneshot};
 
-pub use crate::crypto::{RsaPrivateKey, RsaPublicKey};
+pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
 
-mod circuit;
-mod crypto;
-mod onion_protocol;
-mod socket;
-mod tunnel;
+mod onion;
 mod utils;
-
-#[cfg(test)]
-mod tests;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 

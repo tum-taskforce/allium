@@ -1,11 +1,11 @@
-use crate::crypto::{self, SessionKey};
-use crate::onion_protocol::{
+use crate::onion::crypto::{self, SessionKey};
+use crate::onion::protocol::{
     CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelProtocolError,
     TunnelRequest, TUNNEL_EXTENDED_ERROR_BRANCHING_DETECTED, TUNNEL_EXTENDED_ERROR_NONE,
     TUNNEL_EXTENDED_ERROR_PEER_UNREACHABLE, TUNNEL_TRUNCATED_ERROR_NONE,
     TUNNEL_TRUNCATED_ERROR_NO_NEXT_HOP,
 };
-use crate::socket::{OnionSocket, OnionSocketError, SocketResult};
+use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::{Result, RsaPrivateKey};
 use anyhow::anyhow;
 use anyhow::Context;

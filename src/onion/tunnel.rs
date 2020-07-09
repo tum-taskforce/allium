@@ -1,7 +1,7 @@
-use crate::circuit::Circuit;
-use crate::crypto::{self, SessionKey};
-use crate::onion_protocol::{TryFromBytesExt, TunnelRequest};
-use crate::socket::OnionSocket;
+use crate::onion::circuit::Circuit;
+use crate::onion::crypto::{self, SessionKey};
+use crate::onion::protocol::{TryFromBytesExt, TunnelRequest};
+use crate::onion::socket::OnionSocket;
 use crate::Result;
 use crate::{Event, Peer};
 use anyhow::Context;

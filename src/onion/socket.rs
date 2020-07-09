@@ -1,5 +1,5 @@
-use crate::crypto::SessionKey;
-use crate::onion_protocol::*;
+use crate::onion::crypto::SessionKey;
+use crate::onion::protocol::*;
 use crate::utils::{ToBytes, TryFromBytes};
 use crate::{CircuitId, Result, TunnelId};
 use bytes::BytesMut;

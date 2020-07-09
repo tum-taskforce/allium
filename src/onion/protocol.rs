@@ -1,10 +1,9 @@
-use anyhow::{anyhow, Context};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-
-use crate::crypto::{EphemeralPublicKey, SessionKey};
+use crate::onion::crypto::{EphemeralPublicKey, SessionKey};
 use crate::utils::{self, FromBytes, ToBytes, TryFromBytes};
 use crate::{CircuitId, TunnelId};
 use crate::{Result, RsaPrivateKey, RsaPublicKey};
+use anyhow::{anyhow, Context};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use ring::rand::SecureRandom;
 use ring::{aead, digest, rand};
 use std::net::SocketAddr;
@@ -634,7 +633,7 @@ impl<'a> SignKey<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{self, EphemeralPrivateKey};
+    use crate::onion::crypto::{self, EphemeralPrivateKey};
     use ring::rand;
 
     #[test]
