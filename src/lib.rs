@@ -5,6 +5,7 @@ use crate::circuit::{CircuitHandler, CircuitId};
 use crate::socket::OnionSocket;
 use crate::tunnel::{Tunnel, TunnelId};
 use anyhow::anyhow;
+use bytes::Bytes;
 use futures::stream::StreamExt;
 use log::{info, warn};
 use ring::rand;
@@ -48,29 +49,28 @@ enum Request {
     },
 }
 
+#[derive(Debug)]
+pub enum Event {
+    Data { tunnel_id: TunnelId, data: Bytes },
+}
+
+#[derive(Clone)]
 pub struct Onion {
     requests: mpsc::UnboundedSender<Request>,
-    hostkey: RsaPrivateKey,
 }
 
 impl Onion {
     /// Construct a new onion instance.
-    /// Returns Err if the supplied hostkey is invalid.
-    pub fn new<P>(hostkey: RsaPrivateKey, peer_provider: P) -> Result<Self>
+    /// Returns the constructed instance and an event stream.
+    pub fn new<P>(peer_provider: P) -> Result<(Self, impl Stream<Item = Event>)>
     where
         P: Stream<Item = Peer> + Unpin + Send + Sync + 'static,
     {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let round_handler = RoundHandler {
-            requests: rx,
-            rng: rand::SystemRandom::new(),
-            peer_provider,
-        };
-
-        Ok(Onion {
-            requests: tx,
-            hostkey,
-        })
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let (evt_tx, evt_rx) = mpsc::channel(100);
+        let round_handler = RoundHandler::new(req_rx, evt_tx, peer_provider);
+        let onion = Onion { requests: req_tx };
+        Ok((onion, evt_rx))
     }
 
     pub async fn build_tunnel(&self, dest: Peer, n_hops: usize) -> Result<TunnelId> {
@@ -94,37 +94,39 @@ impl Onion {
     pub async fn send_data(&self, tunnel_id: TunnelId, data: &[u8]) -> Result<()> {
         Ok(())
     }
+}
 
-    pub async fn listen(self: Arc<Self>, addr: SocketAddr) -> Result<()> {
-        let mut listener = TcpListener::bind(addr).await?;
-        info!(
-            "Listening for P2P connections on {:?}",
-            listener.local_addr()
-        );
-        let mut incoming = listener.incoming();
-        while let Some(stream) = incoming.next().await {
-            let socket = OnionSocket::new(stream?);
-            let onion = self.clone();
-            tokio::spawn(async move {
-                let mut handler = match CircuitHandler::init(socket, &onion.hostkey).await {
-                    Ok(handler) => handler,
-                    Err(e) => {
-                        warn!("{}", e);
-                        return;
-                    }
-                };
-
-                if let Err(e) = handler.handle().await {
+pub async fn listen(addr: SocketAddr, hostkey: RsaPrivateKey) -> Result<()> {
+    let hostkey = Arc::new(hostkey);
+    let mut listener = TcpListener::bind(addr).await?;
+    info!(
+        "Listening for P2P connections on {:?}",
+        listener.local_addr()
+    );
+    let mut incoming = listener.incoming();
+    while let Some(stream) = incoming.next().await {
+        let socket = OnionSocket::new(stream?);
+        let hostkey = hostkey.clone();
+        tokio::spawn(async move {
+            let mut handler = match CircuitHandler::init(socket, &hostkey).await {
+                Ok(handler) => handler,
+                Err(e) => {
                     warn!("{}", e);
+                    return;
                 }
-            });
-        }
-        Ok(())
+            };
+
+            if let Err(e) = handler.handle().await {
+                warn!("{}", e);
+            }
+        });
     }
+    Ok(())
 }
 
 struct RoundHandler<P> {
     requests: mpsc::UnboundedReceiver<Request>,
+    events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
     peer_provider: P,
 }
@@ -133,6 +135,20 @@ impl<P> RoundHandler<P>
 where
     P: Stream<Item = Peer> + Unpin + Send + Sync + 'static,
 {
+    pub(crate) fn new(
+        requests: mpsc::UnboundedReceiver<Request>,
+        events: mpsc::Sender<Event>,
+        peer_provider: P,
+    ) -> Self {
+        let rng = rand::SystemRandom::new();
+        RoundHandler {
+            requests,
+            events,
+            rng,
+            peer_provider,
+        }
+    }
+
     /// Tunnels created in one period should be torn down and rebuilt for the next period.
     /// However, Onion should ensure that this is done transparently to the modules, using these
     /// tunnels. This could be achieved by creating a new tunnel before the end of a period and
@@ -150,6 +166,8 @@ where
         }
     }
 
+    /// Builds a new tunnel to `dest` over `n_hops` additional peers.
+    /// Performs a handshake with each hop and then spawns a task for handling incoming messages.
     async fn handle_build(&mut self, dest: Peer, n_hops: usize) -> Result<TunnelId> {
         let tunnel_id = Tunnel::random_id(&self.rng);
         let peer = self.random_peer().await?;
@@ -159,7 +177,12 @@ where
             tunnel.extend(&peer, &self.rng).await?;
         }
         tunnel.extend(&dest, &self.rng).await?;
-        // TODO listen for incoming data
+        tokio::spawn({
+            let events = self.events.clone();
+            async move {
+                tunnel.handle_tunnel_messages(events).await.unwrap();
+            }
+        });
         Ok(tunnel_id)
     }
 

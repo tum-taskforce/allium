@@ -2,14 +2,15 @@ use crate::circuit::Circuit;
 use crate::crypto::{self, SessionKey};
 use crate::onion_protocol::{TryFromBytesExt, TunnelRequest};
 use crate::socket::OnionSocket;
-use crate::Peer;
 use crate::Result;
+use crate::{Event, Peer};
 use anyhow::Context;
 use thiserror::Error;
 use log::trace;
 use ring::rand;
 use ring::rand::SecureRandom;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use futures::Stream;
 
 pub(crate) type TunnelId = u32;
@@ -85,6 +86,21 @@ impl Tunnel {
         let secret = SessionKey::from_key_exchange(private_key, &peer_key)?;
         self.aes_keys.insert(0, secret);
         Ok(())
+    }
+
+    pub(crate) async fn handle_tunnel_messages(
+        &self,
+        mut events: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        loop {
+            let mut msg = self.out_circuit.socket.lock().await.accept_opaque().await?;
+            msg.decrypt(self.aes_keys.iter().rev())?;
+            let tunnel_msg = TunnelRequest::read_with_digest_from(&mut msg.payload.bytes);
+            if let Ok(TunnelRequest::Data(tunnel_id, data)) = tunnel_msg {
+                let event = Event::Data { tunnel_id, data };
+                events.send(event).await?
+            }
+        }
     }
 
     /// Truncates the tunnel by one hop

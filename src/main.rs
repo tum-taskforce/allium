@@ -9,78 +9,88 @@ use onion::*;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::join;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream;
+use tokio::stream::Stream;
 use tokio::sync::Mutex;
 
 mod api;
 mod utils;
 
 struct OnionModule {
-    onion: Onion,
-    config: Config,
-    rps: Mutex<RpsModule>,
+    connections: Mutex<Vec<ApiSocket<OwnedWriteHalf>>>,
 }
 
 impl OnionModule {
-    async fn init(config: Config) -> Result<Self> {
-        let rps = RpsModule::new(&config.rps)
-            .await
-            .context("Failed to connect to RPS module")?;
-        let rps = Mutex::new(rps);
-        // TODO construct peer provider from rps (use buffering)
-        let peer_provider = stream::empty();
-
-        let hostkey = RsaPrivateKey::from_pem_file(&config.onion.hostkey)
-            .context("Could not read hostkey")?;
-        let onion = Onion::new(hostkey, peer_provider)?;
-        let _onion_addr = SocketAddr::new(config.onion.p2p_hostname, config.onion.p2p_port);
-        /*task::spawn(async {
-            let addr = SocketAddr::new(config.onion.p2p_hostname.parse().unwrap(), config.onion.p2p_port);
-            onion.listen(addr).await.unwrap();
-        });*/
-        Ok(OnionModule { onion, config, rps })
+    pub fn new() -> Self {
+        OnionModule {
+            connections: Mutex::new(Vec::new()),
+        }
     }
 
-    async fn listen_api(self: Arc<Self>) -> Result<()> {
-        let api_address = &self.config.onion.api_address;
-        let mut listener = TcpListener::bind(api_address).await?;
+    async fn listen_api(self: Arc<Self>, addr: SocketAddr, onion: Onion) -> Result<()> {
+        let mut listener = TcpListener::bind(addr).await?;
         info!(
             "Listening for API connections on {:?}",
             listener.local_addr()
         );
         let mut incoming = listener.incoming();
         while let Some(stream) = incoming.next().await {
-            let stream = stream?;
             let handler = self.clone();
+            let stream = stream?;
+            let onion = onion.clone();
             tokio::spawn(async move {
-                handler.handle_api(stream).await.unwrap();
+                handler.handle_api(stream, onion).await.unwrap();
             });
         }
         Ok(())
     }
 
-    async fn handle_api(self: Arc<Self>, stream: TcpStream) -> Result<()> {
+    async fn handle_api(&self, stream: TcpStream, onion: Onion) -> Result<()> {
         trace!("Accepted API connection from: {:?}", stream.peer_addr());
-        let mut socket = ApiSocket::new(stream);
+        let (read_stream, write_stream) = stream.into_split();
+        self.connections
+            .lock()
+            .await
+            .push(ApiSocket::new(write_stream));
+        let mut socket = ApiSocket::new(read_stream);
 
         while let Some(msg) = socket.read_next::<OnionRequest>().await? {
             trace!("Handling {:?}", msg);
             let _msg_id = msg.id();
             match msg {
                 OnionRequest::Build(dst_addr, dst_hostkey) => {
-                    let handler = self.clone();
                     let dest = Peer::new(dst_addr, RsaPublicKey::new(dst_hostkey.to_vec()));
-                    let _tunnel = handler.onion.build_tunnel(dest, 3).await?;
+                    let _tunnel = onion.build_tunnel(dest, 3).await?;
                 }
                 OnionRequest::Destroy(tunnel_id) => {
-                    self.onion.destroy_tunnel(tunnel_id).await?;
+                    onion.destroy_tunnel(tunnel_id).await?;
                 }
                 OnionRequest::Data(tunnel_id, tunnel_data) => {
-                    self.onion.send_data(tunnel_id, &tunnel_data).await?;
+                    onion.send_data(tunnel_id, &tunnel_data).await?;
                 }
                 OnionRequest::Cover(_cover_size) => {
                     // unimplemented!();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_events<E>(&self, mut events: E) -> Result<()>
+    where
+        E: Stream<Item = Event> + Unpin,
+    {
+        while let Some(event) = events.next().await {
+            match event {
+                Event::Data { tunnel_id, data } => {
+                    // TODO only send messages to clients which have subscribed to this tunnel
+                    for conn in self.connections.lock().await.iter_mut() {
+                        let res = OnionResponse::Data(tunnel_id, data.as_ref());
+                        conn.write(res).await?;
+                    }
                 }
             }
         }
@@ -100,10 +110,38 @@ async fn main() -> Result<()> {
     let config_path = env::args().nth(1).unwrap_or("config.ini".to_string());
     let config = Config::from_file(config_path)?;
 
-    let onion_module = OnionModule::init(config)
+    let rps = RpsModule::new(&config.rps)
         .await
-        .context("Failed to initialize onion module")?;
-    let onion_module = Arc::new(onion_module);
-    onion_module.listen_api().await?;
+        .context("Failed to connect to RPS module")?;
+    let rps = Mutex::new(rps);
+    // TODO construct peer provider from rps (use buffering)
+    let peer_provider = stream::empty();
+
+    let onion_addr = SocketAddr::new(config.onion.p2p_hostname, config.onion.p2p_port);
+    let hostkey =
+        RsaPrivateKey::from_pem_file(&config.onion.hostkey).context("Could not read hostkey")?;
+    let onion_listen_task = tokio::spawn(async move {
+        onion::listen(onion_addr, hostkey).await.unwrap();
+    });
+
+    let (onion, events) = Onion::new(peer_provider)?;
+    let onion_module = Arc::new(OnionModule::new());
+
+    let api_listen_task = tokio::spawn({
+        let api_handler = onion_module.clone();
+        let api_addr = config.onion.api_address.clone();
+        async move {
+            api_handler.listen_api(api_addr, onion).await.unwrap();
+        }
+    });
+
+    let event_task = tokio::spawn({
+        let event_handler = onion_module.clone();
+        async move {
+            event_handler.handle_events(events).await.unwrap();
+        }
+    });
+
+    join!(onion_listen_task, api_listen_task, event_task);
     Ok(())
 }
