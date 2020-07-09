@@ -56,7 +56,7 @@ impl Tunnel {
     }
 
     /// Performs a key exchange with the given peer and extends the tunnel with a new hop
-    pub(crate) async fn extend(&mut self, peer: &Peer, rng: &rand::SystemRandom) -> Result<()> {
+    pub(crate) async fn extend(&mut self, peer: &Peer, rng: &rand::SystemRandom) -> TunnelResult<()> {
         trace!("Extending tunnel {} to peer {}", self.id, &peer.addr);
         let (private_key, key) = generate_ephemeral_key_pair(rng).unwrap();
 
@@ -86,7 +86,7 @@ impl Tunnel {
     }
 
     /// Truncates the tunnel by one hop
-    pub(crate) async fn truncate(&mut self, rng: &rand::SystemRandom) -> Result<()> {
+    pub(crate) async fn truncate(&mut self, rng: &rand::SystemRandom) -> TunnelResult<()> {
         todo!()
     }
 
@@ -105,7 +105,7 @@ impl Tunnel {
     /// before tearing down the old tunnel. Be aware that the other endpoint peer should not be
     /// allowed to use the old tunnel indefinitely despite receiving a `TUNNEL END` packet. Any old
     /// tunnel that has been replaced should only have finite lifetime.
-    pub(crate) async fn begin(&mut self, rng: &rand::SystemRandom) -> Result<()> {
+    pub(crate) async fn begin(&mut self, rng: &rand::SystemRandom) -> TunnelResult<()> {
         todo!()
     }
 
@@ -123,8 +123,7 @@ impl Tunnel {
         length: usize,
         peer_provider: P,
         final_peer: Peer,
-
-    ) {
+    ) -> TunnelResult<()> {
         todo!()
     }
 }

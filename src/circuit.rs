@@ -131,7 +131,8 @@ impl CircuitHandler {
                             Ok(())
                         } else {
                             // no relay_socket => proto breach teardown
-                            Err(anyhow!("{:?}", e))
+                            Err(anyhow!("Cannot forward CircuitOpaque since there is no out circuit, \
+                            is the encryption correct?"))
                         }
                     }
                     Err(TunnelProtocolError::Unknown { actual }) => {
@@ -318,7 +319,7 @@ impl CircuitHandler {
         self.in_circuit
             .socket()
             .await
-            .teardown(out_circuit.id, &self.rng)
+            .teardown(self.in_circuit.id, &self.rng)
             .await; // NOTE: Ignore any errors
     }
 

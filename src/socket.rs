@@ -255,11 +255,6 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         }
     }
 
-    /*
-    TODO split finalize_tunnel_handshake into error-handling and non-error-handling counter parts
-
-     */
-
     /// Replies on this `OnionSocket` with an `EXTENDED` message to a successful `EXTEND` call.
     ///
     /// # Errors:
