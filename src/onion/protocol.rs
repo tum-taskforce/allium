@@ -166,13 +166,12 @@ pub(crate) enum TunnelRequest {
     /// Format:
     /// ```text
     /// ipv6_flag: u8
-    /// tunnel_id: u32
     /// dest.addr(): [u8; 4] or [u8; 16] (depending on ipv6_flag)
     /// dest.port(): u16
     /// key
     /// ```
-    Extend(TunnelId, /* dest */ SocketAddr, /* key */ Key),
-    Truncate(TunnelId),
+    Extend(/* dest */ SocketAddr, /* key */ Key),
+    Truncate,
     Begin(TunnelId),
     End(TunnelId),
     /// Format:
@@ -185,13 +184,13 @@ pub(crate) enum TunnelRequest {
 }
 
 pub(crate) enum TunnelResponseExtended<K> {
-    Success(TunnelId, /* peer_key */ K),
-    Error(TunnelId, TunnelExtendedErrorCode),
+    Success( /* peer_key */ K),
+    Error(TunnelExtendedErrorCode),
 }
 
 pub(crate) enum TunnelResponseTruncated {
-    Success(TunnelId),
-    Error(TunnelId, TunnelTruncatedErrorCode)
+    Success,
+    Error(TunnelTruncatedErrorCode)
 }
 
 pub(crate) trait TryFromBytesExt: TryFromBytes<TunnelProtocolError> {
@@ -438,13 +437,12 @@ impl FromBytes for TunnelProtocolResult<TunnelRequest> {
         match message_type {
             TUNNEL_EXTEND => {
                 let ipv6_flag = buf.get_u8();
-                let tunnel_id = buf.get_u32();
                 let dest_ip = utils::get_ip_addr(buf, ipv6_flag == 1);
                 let dest_port = buf.get_u16();
                 let dest = SocketAddr::new(dest_ip, dest_port);
                 let key_bytes = buf.split_to(KEY_LEN).freeze();
                 let key = Key::new(key_bytes);
-                Ok(TunnelRequest::Extend(tunnel_id, dest, key))
+                Ok(TunnelRequest::Extend(dest, key))
             }
             TUNNEL_DATA => {
                 buf.get_u8();
@@ -462,13 +460,13 @@ impl FromBytes for TunnelProtocolResult<TunnelRequest> {
 impl ToBytes for TunnelRequest {
     fn size(&self) -> usize {
         match self {
-            TunnelRequest::Extend(_, dest, key) => {
-                // size (2), type (1), ip flag (1), tunnel id (4), ip addr, dest port (2), secret
-                2 + 1 + 1 + 4 + dest.ip().size() + 2 + key.bytes().len()
+            TunnelRequest::Extend(dest, key) => {
+                // size (2), type (1), ip flag (1), ip addr, dest port (2), secret
+                2 + 1 + 1 + dest.ip().size() + 2 + key.bytes().len()
             }
-            TunnelRequest::Truncate(_) => {
-                // size (2), type (1), padding (1), tunnel_id (4)
-                2 + 1 + 1 + 4
+            TunnelRequest::Truncate => {
+                // size (2), type (1), padding (1)
+                2 + 1 + 1
             }
             TunnelRequest::Begin(_) => {
                 // size (2), type (1), padding (1), tunnel_id (4)
@@ -487,20 +485,18 @@ impl ToBytes for TunnelRequest {
 
     fn write_to(&self, buf: &mut BytesMut) {
         match self {
-            TunnelRequest::Extend(tunnel_id, dest, key) => {
+            TunnelRequest::Extend(dest, key) => {
                 buf.put_u16(self.size() as u16);
                 buf.put_u8(TUNNEL_EXTEND);
                 buf.put_u8(if dest.is_ipv6() { 1 } else { 0 });
-                buf.put_u32(*tunnel_id);
                 dest.ip().write_to(buf);
                 buf.put_u16(dest.port());
                 buf.put(key.bytes().as_ref());
             }
-            TunnelRequest::Truncate(tunnel_id) => {
+            TunnelRequest::Truncate => {
                 buf.put_u16(self.size() as u16);
                 buf.put_u8(TUNNEL_TRUNCATE);
                 buf.put_u8(0);
-                buf.put_u32(*tunnel_id);
             }
             TunnelRequest::Begin(tunnel_id) => {
                 buf.put_u16(self.size() as u16);
@@ -525,18 +521,35 @@ impl ToBytes for TunnelRequest {
     }
 }
 
-/* == TunnelResponse == */
+/* == TunnelResponseExtended == */
 
-impl FromBytes for TunnelProtocolResult<TunnelResponse<VerifyKey>> {
+impl FromBytes for TunnelProtocolResult<TunnelResponseExtended<VerifyKey>> {
     fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u8();
         match message_type {
             TUNNEL_EXTENDED => {
                 let error_code = buf.get_u8();
-                let tunnel_id = buf.get_u32();
-                let peer_key = VerifyKey::read_from(buf);
-                Ok(TunnelResponse::Extended(tunnel_id, error_code, peer_key))
+                if error_code == 0x00 { // TODO maybe not hardcoded
+                    let peer_key = VerifyKey::read_from(buf);
+                    Ok(TunnelResponseExtended::Success(peer_key))
+                } else {
+                    // TODO implement from for TunnelExtendedErrorCode
+                    match error_code {
+                        i if i == TunnelExtendedErrorCode::BranchingDetected as u8 => {
+                            Ok(TunnelResponseExtended::Error(TunnelExtendedErrorCode::BranchingDetected))
+                        }
+                        i if i == TunnelExtendedErrorCode::PeerUnreachable as u8 => {
+                            Ok(TunnelResponseExtended::Error(TunnelExtendedErrorCode::PeerUnreachable))
+                        }
+                        _ => {
+                            // TODO this is also not ideal
+                            Err(TunnelProtocolError::Unknown {
+                                actual: message_type
+                            })
+                        }
+                    }
+                }
             }
             _ => Err(TunnelProtocolError::Unknown {
                 actual: message_type,
@@ -545,34 +558,95 @@ impl FromBytes for TunnelProtocolResult<TunnelResponse<VerifyKey>> {
     }
 }
 
-impl<K: ToBytes> ToBytes for TunnelResponse<K> {
+impl<K: ToBytes> ToBytes for TunnelResponseExtended<K> {
     fn size(&self) -> usize {
         match self {
-            TunnelResponse::Extended(_, _, peer_key) => {
-                // size (2), type (1), error_code (1), tunnel_id (4), peer_key
-                2 + 1 + 1 + 4 + peer_key.size()
+            TunnelResponseExtended::Success(peer_key) => {
+                // size (2), type (1), error_code (1), peer_key
+                2 + 1 + 1 + peer_key.size()
             }
-            TunnelResponse::Truncated(_, _) => {
-                // size (2), type (1), error_code(1), tunnel_id (4)
-                2 + 1 + 1 + 4
+            TunnelResponseExtended::Error(_) => {
+                // size (2), type (1), error_code (1)
+                2 + 1 + 1
             }
         }
     }
 
     fn write_to(&self, buf: &mut BytesMut) {
         match self {
-            TunnelResponse::Extended(tunnel_id, error_code, peer_key) => {
+            TunnelResponseExtended::Success(peer_key) => {
                 buf.put_u16(self.size() as u16);
                 buf.put_u8(TUNNEL_EXTENDED);
-                buf.put_u8(*error_code as u8);
-                buf.put_u32(*tunnel_id);
+                buf.put_u8(0x00); // TODO maybe not hardcoded
                 peer_key.write_to(buf);
             }
-            TunnelResponse::Truncated(tunnel_id, error_code) => {
+            TunnelResponseExtended::Error(error_code) => {
                 buf.put_u16(self.size() as u16);
-                buf.put_u8(TUNNEL_TRUNCATED);
-                buf.put_u8(*error_code);
-                buf.put_u32(*tunnel_id);
+                buf.put_u8(TUNNEL_EXTENDED);
+                buf.put_u8(*error_code as u8); // TODO maybe not hardcoded
+            }
+        }
+    }
+}
+
+/* == TunnelResponseTruncated == */
+
+impl FromBytes for TunnelProtocolResult<TunnelResponseTruncated> {
+    fn read_from(buf: &mut BytesMut) -> Self {
+        let size = buf.get_u16() as usize;
+        let message_type = buf.get_u8();
+        match message_type {
+            TUNNEL_TRUNCATED => {
+                let error_code = buf.get_u8();
+                if error_code == 0x00 { // TODO maybe not hardcoded
+                    Ok(TunnelResponseTruncated::Success)
+                } else {
+                    // TODO implement from for TunnelTruncatedErrorCode
+                    match error_code {
+                        i if i == TunnelTruncatedErrorCode::NoNextHop as u8 => {
+                            Ok(TunnelResponseTruncated::Error(TunnelTruncatedErrorCode::NoNextHop))
+                        }
+                        _ => {
+                            // TODO this is also not ideal
+                            Err(TunnelProtocolError::Unknown {
+                                actual: message_type
+                            })
+                        }
+                    }
+                }
+            }
+            _ => Err(TunnelProtocolError::Unknown {
+                actual: message_type,
+            }),
+        }
+    }
+}
+
+impl ToBytes for TunnelResponseTruncated {
+    fn size(&self) -> usize {
+        match self {
+            TunnelResponseTruncated::Success => {
+                // size (2), type (1), error_code (1)
+                2 + 1 + 1
+            }
+            TunnelResponseTruncated::Error(_) => {
+                // size (2), type (1), error_code (1)
+                2 + 1 + 1
+            }
+        }
+    }
+
+    fn write_to(&self, buf: &mut BytesMut) {
+        match self {
+            TunnelResponseTruncated::Success => {
+                buf.put_u16(self.size() as u16);
+                buf.put_u8(TUNNEL_EXTENDED);
+                buf.put_u8(0x00); // TODO maybe not hardcoded
+            }
+            TunnelResponseTruncated::Error(error_code) => {
+                buf.put_u16(self.size() as u16);
+                buf.put_u8(TUNNEL_EXTENDED);
+                buf.put_u8(*error_code as u8); // TODO maybe not hardcoded
             }
         }
     }
@@ -695,7 +769,7 @@ mod tests {
 
         let tunnel_id = 123;
         let dest = "127.0.0.1:4201".parse().unwrap();
-        let tunnel_msg = TunnelRequest::Extend(tunnel_id, dest, key);
+        let tunnel_msg = TunnelRequest::Extend(dest, key);
         let circuit_id = 0;
         let msg = CircuitOpaque {
             circuit_id,
@@ -715,8 +789,8 @@ mod tests {
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(aes_keys.iter().rev())?;
         let read_tunnel_msg = TunnelRequest::read_with_digest_from(&mut read_msg.payload.bytes)?;
-        if let TunnelRequest::Extend(tunnel_id2, dest2, key2) = read_tunnel_msg {
-            assert_eq!(tunnel_id, tunnel_id2);
+        if let TunnelRequest::Extend(dest2, key2) = read_tunnel_msg {
+            //assert_eq!(tunnel_id, tunnel_id2);
             assert_eq!(dest, dest2);
             let key2_bytes: &[u8] = &key2.bytes().as_ref();
             assert_eq!(&key_bytes.as_ref(), &key2_bytes);

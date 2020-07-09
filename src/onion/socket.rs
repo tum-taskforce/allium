@@ -134,7 +134,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: u16,
         aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
-        tunnel_res: TunnelResponse<K>,
+        tunnel_res: K,
     ) -> SocketResult<()> {
         let req = CircuitOpaque {
             circuit_id,
@@ -178,13 +178,12 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     pub(crate) async fn finalize_tunnel_handshake(
         &mut self,
         circuit_id: CircuitId,
-        tunnel_id: TunnelId,
         key: VerifyKey,
         aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        let tunnel_res = TunnelResponse::Extended(tunnel_id, TUNNEL_EXTENDED_ERROR_NONE, key);
+        let tunnel_res = TunnelResponseExtended::Success(key);
         self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
@@ -199,14 +198,13 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     pub(crate) async fn reject_tunnel_handshake(
         &mut self,
         circuit_id: CircuitId,
-        tunnel_id: TunnelId,
         aes_keys: &[SessionKey],
-        error_code: u8,
+        error_code: TunnelExtendedErrorCode,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         // TODO maybe think of better solution than implementing ToBytes for Unit?
-        let tunnel_res = TunnelResponse::Extended(tunnel_id, error_code, ());
+        let tunnel_res = TunnelResponseExtended::<()>::Error(error_code);
         self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
@@ -220,13 +218,12 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     pub(crate) async fn finalize_tunnel_truncate(
         &mut self,
         circuit_id: CircuitId,
-        tunnel_id: TunnelId,
         aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         // FIXME why do I have to define Key here?
-        let tunnel_res = TunnelResponse::<()>::Truncated(tunnel_id, TUNNEL_TRUNCATED_ERROR_NONE);
+        let tunnel_res = TunnelResponseTruncated::Success;
         self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Truncated>")?;
@@ -241,14 +238,13 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     pub(crate) async fn reject_tunnel_truncate(
         &mut self,
         circuit_id: CircuitId,
-        tunnel_id: TunnelId,
         aes_keys: &[SessionKey],
-        error_code: u8,
+        error_code: TunnelTruncatedErrorCode,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         // FIXME why do I have to define Key here?
-        let tunnel_res = TunnelResponse::<()>::Truncated(tunnel_id, error_code);
+        let tunnel_res = TunnelResponseTruncated::Error(error_code);
         self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
@@ -359,7 +355,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         rng: &rand::SystemRandom,
     ) -> SocketResult<VerifyKey> {
         self.buf.clear();
-        let tunnel_req = TunnelRequest::Extend(tunnel_id, peer_addr, key);
+        let tunnel_req = TunnelRequest::Extend(peer_addr, key);
         let req = CircuitOpaque {
             circuit_id,
             payload: CircuitOpaquePayload {
@@ -385,22 +381,23 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         res.decrypt(aes_keys.iter().rev())
             .map_err(|_| OnionSocketError::BrokenMessage)?;
-        let tunnel_res = TunnelResponse::read_with_digest_from(&mut res.payload.bytes)
+        let tunnel_res = TunnelResponseExtended::read_with_digest_from(&mut res.payload.bytes)
             .map_err(|_| OnionSocketError::BrokenMessage)?;
         //.context("Invalid TunnelResponse message")?;
 
         match tunnel_res {
-            TunnelResponse::Extended(res_tunnel_id, error_code, res_key) => {
-                if res_tunnel_id != tunnel_id {
-                    return Err(OnionSocketError::BrokenMessage);
-                    //return Err(anyhow!("Tunnel ID in Extended does not match ID in Extend"));
-                }
-                if error_code != TUNNEL_EXTENDED_ERROR_NONE {
-                    // TODO Retry may be allowed
-                    return Err(OnionSocketError::RemoteError { error_code });
-                    //return Err(anyhow!("Tunnel Extend returned an error"));
-                }
+            TunnelResponseExtended::Success(res_key) => {
                 Ok(res_key)
+            }
+            TunnelResponseExtended::Error(error_code) => {
+                let code = error_code as u8;
+                if code != 0x00 { // TODO maybe not hardcoded
+                    // TODO Retry may be allowed
+                    Err(OnionSocketError::RemoteError { error_code: code })
+                    //return Err(anyhow!("Tunnel Extend returned an error"));
+                } else {
+                    Err(OnionSocketError::BrokenMessage)
+                }
             }
             _ => {
                 // ignore all other replies

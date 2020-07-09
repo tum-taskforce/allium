@@ -150,8 +150,7 @@ impl CircuitHandler {
                 }
             }
             Err(OnionSocketError::BrokenMessage) => {
-                self.teardown_in_circuit().await;
-                self.teardown_out_circuit().await;
+                self.teardown_all().await;
                 Err(anyhow!(
                     "In Circuit breached protocol by sending unexpected message"
                 ))
@@ -174,7 +173,7 @@ impl CircuitHandler {
 
     async fn handle_tunnel_message(&mut self, tunnel_msg: TunnelRequest) -> Result<()> {
         match tunnel_msg {
-            TunnelRequest::Extend(tunnel_id, dest, key) => {
+            TunnelRequest::Extend(dest, key) => {
                 if self.out_circuit.is_some() {
                     /* reply to socket with EXTENDED
                        this is required to prevent any deadlocks and errors in the tunnel
@@ -185,9 +184,8 @@ impl CircuitHandler {
                         .await
                         .reject_tunnel_handshake(
                             self.in_circuit.id,
-                            tunnel_id,
                             &self.aes_keys,
-                            TUNNEL_EXTENDED_ERROR_BRANCHING_DETECTED,
+                            TunnelExtendedErrorCode::BranchingDetected,
                             &self.rng,
                         )
                         .await?;
@@ -211,7 +209,6 @@ impl CircuitHandler {
                         .await
                         .finalize_tunnel_handshake(
                             self.in_circuit.id,
-                            tunnel_id,
                             peer_key,
                             &self.aes_keys,
                             &self.rng,
@@ -220,16 +217,15 @@ impl CircuitHandler {
                     Ok(())
                 }
             }
-            TunnelRequest::Truncate(tunnel_id) => {
+            TunnelRequest::Truncate => {
                 if self.out_circuit.is_none() {
                     self.in_circuit
                         .socket()
                         .await
                         .reject_tunnel_truncate(
                             self.in_circuit.id,
-                            tunnel_id,
                             &self.aes_keys,
-                            TUNNEL_TRUNCATED_ERROR_NO_NEXT_HOP,
+                            TunnelTruncatedErrorCode::NoNextHop,
                             &self.rng,
                         )
                         .await?;
@@ -244,7 +240,6 @@ impl CircuitHandler {
                         .await
                         .finalize_tunnel_truncate(
                             self.in_circuit.id,
-                            tunnel_id,
                             &self.aes_keys,
                             &self.rng,
                         )
@@ -313,10 +308,12 @@ impl CircuitHandler {
     }
 
     async fn teardown_all(&mut self) {
-        tokio::join!(self.teardown_in_circuit(), self.teardown_out_circuit());
+        self.teardown_in_circuit().await;
+        self.teardown_out_circuit().await;
     }
 
     async fn teardown_in_circuit(&mut self) {
+        // TODO make sure this is run in finite time
         self.in_circuit
             .socket()
             .await
@@ -325,6 +322,7 @@ impl CircuitHandler {
     }
 
     async fn teardown_out_circuit(&mut self) {
+        // TODO make sure this is run in finite time
         if let Some(out_circuit) = &self.out_circuit {
             out_circuit
                 .socket()
