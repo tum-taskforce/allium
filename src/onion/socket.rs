@@ -399,10 +399,6 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
                     Err(OnionSocketError::BrokenMessage)
                 }
             }
-            _ => {
-                // ignore all other replies
-                Err(OnionSocketError::BrokenMessage)
-            }
         }
     }
 }

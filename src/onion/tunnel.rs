@@ -1,7 +1,7 @@
 use crate::onion::circuit::Circuit;
 use crate::onion::crypto::{self, SessionKey};
 use crate::onion::protocol::{TryFromBytesExt, TunnelRequest};
-use crate::onion::socket::OnionSocket;
+use crate::onion::socket::{OnionSocket, OnionSocketError};
 use crate::Result;
 use crate::{Event, Peer};
 use anyhow::Context;
@@ -19,13 +19,25 @@ pub(crate) type TunnelId = u32;
 pub(crate) enum TunnelError {
     /// The requested operation could not be run to completion, but the tunnel has a consistent
     /// state that can be expanded on
-    #[error("Incomplete")]
+    #[error("Tunnel operation could not be completed")]
     Incomplete,
     /// The requested operation could not be completed and the tunnel is left in a broken state
     /// that needs to be cleaned up. This may be triggered by an undecryptable `OPAQUE` message,
     /// or a `TEARDOWN` message from the first hop.
-    #[error("Broken")]
+    #[error("Tunnel operation caused the tunnel to break")]
     Broken,
+}
+
+impl From<OnionSocketError> for TunnelError {
+    fn from(e: OnionSocketError) -> Self {
+        match e {
+            OnionSocketError::StreamTerminated(_) => { TunnelError::Broken },
+            OnionSocketError::StreamTimeout(_) => { TunnelError::Broken },
+            OnionSocketError::TeardownMessage => { TunnelError::Broken },
+            OnionSocketError::BrokenMessage => { TunnelError::Broken },
+            OnionSocketError::RemoteError { .. } => { TunnelError::Incomplete },
+        }
+    }
 }
 
 pub(crate) type TunnelResult<T> = std::result::Result<T, TunnelError>;
@@ -68,7 +80,6 @@ impl Tunnel {
         trace!("Extending tunnel {} to peer {}", self.id, &peer.addr);
         let (private_key, key) = crypto::generate_ephemeral_keypair(rng);
 
-        // TODO handle RemoteError
         let peer_key = self
             .out_circuit
             .socket()
@@ -87,9 +98,13 @@ impl Tunnel {
         // TODO notify peer(s) upon failure
         let peer_key = peer_key
             .verify(&peer.hostkey)
-            .context("Could not verify peer public key")?;
+            // TODO introduce error indicating broken final hop
+            .map_err(|_| TunnelError::Broken)?;
+            //.context("Could not verify peer public key")?;
 
-        let secret = SessionKey::from_key_exchange(private_key, &peer_key)?;
+        let secret = SessionKey::from_key_exchange(private_key, &peer_key)
+            // TODO introduce error indicating broken final hop
+            .map_err(|_| TunnelError::Broken)?;
         self.aes_keys.insert(0, secret);
         Ok(())
     }
