@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use crate::utils::{get_ip_addr, FromBytes, ToBytes};
+use crate::utils::{self, FromBytes, ToBytes};
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use onion::Result;
@@ -72,7 +72,7 @@ impl FromBytes for Result<OnionRequest> {
             ONION_TUNNEL_BUILD => {
                 let flag = buf.get_u16();
                 let dst_port = buf.get_u16();
-                let dst_ip = get_ip_addr(buf, (flag & 1) == 1);
+                let dst_ip = utils::get_ip_addr(buf, (flag & 1) == 1);
                 let dst_addr = SocketAddr::new(dst_ip, dst_port);
 
                 let dst_hostkey = buf.split_to(size - 8 - dst_addr.ip().size()).freeze();
@@ -264,7 +264,7 @@ impl FromBytes for Result<RpsResponse> {
                     portmap.push((Module::from_id(mod_id)?, port))
                 }
 
-                let peer_addr = get_ip_addr(buf, (flag & 1) == 1);
+                let peer_addr = utils::get_ip_addr(buf, (flag & 1) == 1);
                 let peer_hostkey = buf
                     .split_to(size - 8 - portmap_len * 4 - peer_addr.size())
                     .freeze();

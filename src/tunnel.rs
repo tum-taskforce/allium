@@ -1,5 +1,6 @@
 use crate::circuit::Circuit;
-use crate::crypto::{generate_ephemeral_keypair, SessionKey};
+use crate::crypto::{self, SessionKey};
+use crate::onion_protocol::{TryFromBytesExt, TunnelRequest};
 use crate::socket::OnionSocket;
 use crate::Peer;
 use crate::Result;
@@ -35,7 +36,7 @@ pub(crate) struct Tunnel {
 impl Tunnel {
     pub(crate) async fn init(id: TunnelId, peer: &Peer, rng: &rand::SystemRandom) -> Result<Self> {
         trace!("Creating tunnel {} to peer {}", id, &peer.addr);
-        let (private_key, key) = generate_ephemeral_keypair(rng);
+        let (private_key, key) = crypto::generate_ephemeral_keypair(rng);
 
         let circuit_id = Circuit::random_id(rng);
         let stream = TcpStream::connect(peer.addr)
@@ -58,7 +59,7 @@ impl Tunnel {
     /// Performs a key exchange with the given peer and extends the tunnel with a new hop
     pub(crate) async fn extend(&mut self, peer: &Peer, rng: &rand::SystemRandom) -> TunnelResult<()> {
         trace!("Extending tunnel {} to peer {}", self.id, &peer.addr);
-        let (private_key, key) = generate_ephemeral_keypair(rng);
+        let (private_key, key) = crypto::generate_ephemeral_keypair(rng);
 
         // TODO handle RemoteError
         let peer_key = self

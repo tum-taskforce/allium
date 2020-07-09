@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::crypto::{EphemeralPublicKey, SessionKey};
-use crate::utils::{get_ip_addr, FromBytes, ToBytes, TryFromBytes};
+use crate::utils::{self, FromBytes, ToBytes, TryFromBytes};
 use crate::{CircuitId, TunnelId};
 use crate::{Result, RsaPrivateKey, RsaPublicKey};
 use ring::rand::SecureRandom;
@@ -431,7 +431,7 @@ impl FromBytes for TunnelProtocolResult<TunnelRequest> {
             TUNNEL_EXTEND => {
                 let ipv6_flag = buf.get_u8();
                 let tunnel_id = buf.get_u32();
-                let dest_ip = get_ip_addr(buf, ipv6_flag == 1);
+                let dest_ip = utils::get_ip_addr(buf, ipv6_flag == 1);
                 let dest_port = buf.get_u16();
                 let dest = SocketAddr::new(dest_ip, dest_port);
                 let key_bytes = buf.split_to(KEY_LEN).freeze();
@@ -634,8 +634,8 @@ impl<'a> SignKey<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{EphemeralPrivateKey, read_rsa_keypair};
-    use ring::rand::SecureRandom;
+    use crate::crypto::{self, EphemeralPrivateKey};
+    use ring::rand;
 
     #[test]
     fn test_circuit_create() -> Result<()> {
@@ -661,7 +661,7 @@ mod tests {
         let key = EphemeralPrivateKey::generate(&rng).public_key();
         let key_bytes = key.bytes().clone();
 
-        let (rsa_private, rsa_public) = read_rsa_keypair("testkey.pem")?;
+        let (rsa_private, rsa_public) = crypto::read_rsa_keypair("testkey.pem")?;
         let key = SignKey::sign(&key, &rsa_private, &rng);
 
         let circuit_id = 0;
@@ -722,7 +722,7 @@ mod tests {
         let key = EphemeralPrivateKey::generate(&rng).public_key();
         let key_bytes = key.bytes().clone();
 
-        let (rsa_private, rsa_public) = read_rsa_keypair("testkey.pem")?;
+        let (rsa_private, rsa_public) = crypto::read_rsa_keypair("testkey.pem")?;
         let key = SignKey::sign(&key, &rsa_private, &rng);
 
         let aes_keys = generate_aes_keys(&rng)?;

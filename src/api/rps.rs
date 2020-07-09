@@ -5,7 +5,6 @@ use crate::Result;
 use anyhow::anyhow;
 use log::info;
 use onion::{Peer, RsaPrivateKey, RsaPublicKey};
-use ring::signature;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 
@@ -41,7 +40,7 @@ impl RpsModule {
 }
 
 fn peer_from_config(config: &PeerConfig) -> Option<Peer> {
-    let hostkey = RsaPrivateKey::from_pem_file("testkey.pem").ok()?;
+    let hostkey = RsaPrivateKey::from_pem_file(&config.hostkey).ok()?;
     Some(Peer::new(config.p2p_address, hostkey.public_key()))
 }
 
