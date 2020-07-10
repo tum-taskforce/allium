@@ -40,6 +40,7 @@ pub(crate) enum OnionSocketError {
     // TODO argument: message
     #[error("received broken message that cannot be parsed and violates protocol")]
     BrokenMessage,
+    Peer,
 }
 
 pub(crate) type SocketResult<T> = std::result::Result<T, OnionSocketError>;
@@ -49,6 +50,15 @@ impl From<CircuitProtocolError> for OnionSocketError {
         match e {
             CircuitProtocolError::Teardown { expected } => OnionSocketError::TeardownMessage,
             CircuitProtocolError::Unknown { expected, actual } => OnionSocketError::BrokenMessage,
+        }
+    }
+}
+
+impl<E> From<TunnelProtocolError<E>> for OnionSocketError {
+    fn from(e: TunnelProtocolError<E>) -> Self {
+        match e {
+            TunnelProtocolError::Peer(_) => OnionSocketError::Peer,
+            _ => OnionSocketError::BrokenMessage,
         }
     }
 }
@@ -390,8 +400,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         res.decrypt(aes_keys.iter().rev())
             .map_err(|_| OnionSocketError::BrokenMessage)?;
-        let tunnel_res = TunnelResponseExtended::read_with_digest_from(&mut res.payload.bytes)
-            .map_err(|_| OnionSocketError::BrokenMessage)?;
+        let tunnel_res = TunnelResponseExtended::read_with_digest_from(&mut res.payload.bytes)?;
         //.context("Invalid TunnelResponse message")?;
 
         Ok(tunnel_res.peer_key)
@@ -445,8 +454,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         res.decrypt(aes_keys.iter().rev())
             .map_err(|_| OnionSocketError::BrokenMessage)?;
-        let tunnel_res = TunnelResponseTruncated::read_with_digest_from(&mut res.payload.bytes)
-            .map_err(|_| OnionSocketError::BrokenMessage)?;
+        let tunnel_res = TunnelResponseTruncated::read_with_digest_from(&mut res.payload.bytes)?;
         //.context("Invalid TunnelResponse message")?;
 
         Ok(())

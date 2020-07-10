@@ -30,7 +30,10 @@ pub(crate) enum TunnelError {
 
 impl From<OnionSocketError> for TunnelError {
     fn from(e: OnionSocketError) -> Self {
-        TunnelError::Broken(Some(e))
+        match e {
+            OnionSocketError::Peer => TunnelError::Incomplete,
+            e => TunnelError::Broken(Some(e)),
+        }
     }
 }
 
@@ -95,7 +98,6 @@ impl Tunnel {
             .await
             .initiate_tunnel_handshake(self.out_circuit.id, peer.addr, key, &self.aes_keys, rng)
             .await?;
-        //.map_err(|_| TunnelError::Incomplete)?;
 
         /*
         let peer_key = peer_key
