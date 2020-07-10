@@ -42,7 +42,7 @@ pub(crate) type TunnelResult<T> = std::result::Result<T, TunnelError>;
 pub(crate) struct Tunnel {
     pub(crate) id: TunnelId,
     out_circuit: Circuit,
-    aes_keys: Vec<SessionKey>,
+    session_keys: Vec<SessionKey>,
 }
 
 impl Tunnel {
@@ -61,7 +61,7 @@ impl Tunnel {
         Ok(Self {
             id,
             out_circuit: Circuit::new(circuit_id, socket),
-            aes_keys: vec![secret],
+            session_keys: vec![secret],
         })
     }
 
@@ -80,7 +80,7 @@ impl Tunnel {
     /// Returns the length of a tunnel. The result of this function may be used with caution if the
     /// tunnel is in a broken state.
     pub(crate) fn len(&self) -> usize {
-        self.aes_keys.len()
+        self.session_keys.len()
     }
 
     /// Performs a key exchange with the given peer and extends the tunnel with a new hop
@@ -96,7 +96,7 @@ impl Tunnel {
             .out_circuit
             .socket()
             .await
-            .initiate_tunnel_handshake(self.out_circuit.id, peer.addr, key, &self.aes_keys, rng)
+            .initiate_tunnel_handshake(self.out_circuit.id, peer.addr, key, &self.session_keys, rng)
             .await?;
 
         /*
@@ -113,7 +113,7 @@ impl Tunnel {
 
         // Any failure because of any incorrect secret answer should not cause our tunnel to become corrupted
         if let Ok(secret) = Tunnel::derive_secret(&peer, private_key, peer_key) {
-            self.aes_keys.insert(0, secret);
+            self.session_keys.insert(0, secret);
             Ok(())
         } else {
             // key derivation failed, the final hop needs to be truncated
@@ -132,7 +132,7 @@ impl Tunnel {
             // TODO send event in case of error
             let mut msg = self.out_circuit.socket.lock().await.accept_opaque().await?;
             // TODO send event in case of error
-            msg.decrypt(self.aes_keys.iter().rev())?;
+            msg.decrypt(self.session_keys.iter().rev())?;
             let tunnel_msg = TunnelRequest::read_with_digest_from(&mut msg.payload.bytes);
             match tunnel_msg {
                 Ok(TunnelRequest::Data(tunnel_id, data)) => {
@@ -162,18 +162,18 @@ impl Tunnel {
         n: usize,
         rng: &rand::SystemRandom,
     ) -> TunnelResult<()> {
-        if n >= self.aes_keys.len() {
+        if n >= self.session_keys.len() {
             return Err(TunnelError::Incomplete);
         }
 
         self.out_circuit
             .socket()
             .await
-            .truncate_tunnel(self.out_circuit.id, &self.aes_keys[n..], rng)
+            .truncate_tunnel(self.out_circuit.id, &self.session_keys[n..], rng)
             .await?;
 
         for _ in 0..n {
-            &self.aes_keys.remove(0);
+            &self.session_keys.remove(0);
         }
         Ok(())
     }
@@ -197,7 +197,7 @@ impl Tunnel {
         self.out_circuit
             .socket()
             .await
-            .begin(self.out_circuit.id, self.id, &self.aes_keys, rng)
+            .begin(self.out_circuit.id, self.id, &self.session_keys, rng)
             .await?;
         Ok(())
     }
@@ -223,7 +223,7 @@ impl Tunnel {
         final_peer: &Peer,
         rng: &rand::SystemRandom,
     ) -> TunnelResult<()> {
-        while self.aes_keys.len() >= length {
+        while self.session_keys.len() >= length {
             match self.truncate(1, rng).await {
                 Err(TunnelError::Broken(e)) => {
                     // do not try to fix this error to prevent endless looping
@@ -236,7 +236,7 @@ impl Tunnel {
             }
         }
 
-        while self.aes_keys.len() < length {
+        while self.session_keys.len() < length {
             if let Some(peer) = peer_provider.next().await {
                 match self.extend(&peer, &rng).await {
                     Err(TunnelError::Broken(e)) => {

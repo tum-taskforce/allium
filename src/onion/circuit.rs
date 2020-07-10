@@ -45,7 +45,7 @@ impl Circuit {
 
 pub(crate) struct CircuitHandler {
     in_circuit: Circuit,
-    aes_keys: [SessionKey; 1],
+    session_key: [SessionKey; 1],
     out_circuit: Option<Circuit>,
     events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
@@ -74,7 +74,7 @@ impl CircuitHandler {
         let in_circuit = Circuit::new(circuit_id, socket);
         Ok(Self {
             in_circuit,
-            aes_keys: [secret],
+            session_key: [secret],
             out_circuit: None,
             events,
             rng,
@@ -120,7 +120,7 @@ impl CircuitHandler {
             Ok(mut msg) => {
                 // TODO final teardown after errors here
                 // decrypt message
-                msg.decrypt(self.aes_keys.iter().rev())?;
+                msg.decrypt(self.session_key.iter().rev())?;
                 // test if this message is directed to us or is broken
                 let tunnel_msg = TunnelRequest::read_with_digest_from(&mut msg.payload.bytes);
                 match tunnel_msg {
@@ -191,7 +191,7 @@ impl CircuitHandler {
                         .await
                         .reject_tunnel_handshake(
                             self.in_circuit.id,
-                            &self.aes_keys,
+                            &self.session_key,
                             TunnelExtendedError::BranchingDetected,
                             &self.rng,
                         )
@@ -217,7 +217,7 @@ impl CircuitHandler {
                         .finalize_tunnel_handshake(
                             self.in_circuit.id,
                             peer_key,
-                            &self.aes_keys,
+                            &self.session_key,
                             &self.rng,
                         )
                         .await?;
@@ -231,7 +231,7 @@ impl CircuitHandler {
                         .await
                         .reject_tunnel_truncate(
                             self.in_circuit.id,
-                            &self.aes_keys,
+                            &self.session_key,
                             TunnelTruncatedError::NoNextHop,
                             &self.rng,
                         )
@@ -245,7 +245,7 @@ impl CircuitHandler {
                     self.in_circuit
                         .socket()
                         .await
-                        .finalize_tunnel_truncate(self.in_circuit.id, &self.aes_keys, &self.rng)
+                        .finalize_tunnel_truncate(self.in_circuit.id, &self.session_key, &self.rng)
                         .await?;
                     Ok(())
                 }
@@ -268,7 +268,7 @@ impl CircuitHandler {
             Ok(mut msg) => {
                 // encrypt message and try to send it to socket
                 // TODO final teardown after errors here
-                msg.encrypt(self.aes_keys.iter())?;
+                msg.encrypt(self.session_key.iter())?;
                 self.in_circuit
                     .socket()
                     .await

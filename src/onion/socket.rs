@@ -138,7 +138,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     async fn encrypt_and_send_opaque<K: ToBytes>(
         &mut self,
         circuit_id: u16,
-        aes_keys: &[SessionKey],
+        session_keys: &[SessionKey],
         rng: &rand::SystemRandom,
         tunnel_res: K,
     ) -> SocketResult<()> {
@@ -147,7 +147,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
             payload: CircuitOpaquePayload {
                 msg: &tunnel_res,
                 rng,
-                encrypt_keys: aes_keys,
+                encrypt_keys: session_keys,
             },
         };
 
@@ -185,12 +185,12 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         key: VerifyKey,
-        aes_keys: &[SessionKey],
+        session_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_res = TunnelResponseExtended { peer_key: key };
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
@@ -204,12 +204,12 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     pub(crate) async fn reject_tunnel_handshake(
         &mut self,
         circuit_id: CircuitId,
-        aes_keys: &[SessionKey],
+        session_keys: &[SessionKey],
         error: TunnelExtendedError,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, error)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, error)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
@@ -222,13 +222,13 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     pub(crate) async fn finalize_tunnel_truncate(
         &mut self,
         circuit_id: CircuitId,
-        aes_keys: &[SessionKey],
+        session_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         // FIXME why do I have to define Key here?
         let tunnel_res = TunnelResponseTruncated;
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Truncated>")?;
     }
@@ -242,12 +242,12 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     pub(crate) async fn reject_tunnel_truncate(
         &mut self,
         circuit_id: CircuitId,
-        aes_keys: &[SessionKey],
+        session_keys: &[SessionKey],
         error: TunnelTruncatedError,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, error)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, error)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
@@ -307,12 +307,12 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         tunnel_id: TunnelId,
-        aes_keys: &[SessionKey],
+        session_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_res = TunnelRequest::Begin(tunnel_id);
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
             .await
     }
 }
@@ -371,7 +371,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         peer_addr: SocketAddr,
         key: Key,
-        aes_keys: &[SessionKey],
+        session_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<VerifyKey> {
         self.buf.clear();
@@ -381,7 +381,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             payload: CircuitOpaquePayload {
                 msg: &tunnel_req,
                 rng,
-                encrypt_keys: aes_keys,
+                encrypt_keys: session_keys,
             },
         };
 
@@ -400,7 +400,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             //));
         }
 
-        res.decrypt(aes_keys.iter().rev())
+        res.decrypt(session_keys.iter().rev())
             .map_err(|_| OnionSocketError::BrokenMessage)?;
         let tunnel_res = TunnelResponseExtended::read_with_digest_from(&mut res.payload.bytes)?;
         //.context("Invalid TunnelResponse message")?;
@@ -425,7 +425,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     pub(crate) async fn truncate_tunnel(
         &mut self,
         circuit_id: CircuitId,
-        aes_keys: &[SessionKey],
+        session_keys: &[SessionKey],
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
@@ -435,7 +435,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             payload: CircuitOpaquePayload {
                 msg: &tunnel_req,
                 rng,
-                encrypt_keys: aes_keys,
+                encrypt_keys: session_keys,
             },
         };
 
@@ -454,7 +454,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             //));
         }
 
-        res.decrypt(aes_keys.iter().rev())
+        res.decrypt(session_keys.iter().rev())
             .map_err(|_| OnionSocketError::BrokenMessage)?;
         let tunnel_res = TunnelResponseTruncated::read_with_digest_from(&mut res.payload.bytes)?;
         //.context("Invalid TunnelResponse message")?;
