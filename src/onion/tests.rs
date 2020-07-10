@@ -14,7 +14,8 @@ async fn listen(mut listener: TcpListener, host_key: &RsaPrivateKey) -> Result<(
     );
     let stream = listener.incoming().next().await.unwrap()?;
     let socket = OnionSocket::new(stream);
-    let mut handler = CircuitHandler::init(socket, host_key).await?;
+    let (events, _) = mpsc::channel(0);
+    let mut handler = CircuitHandler::init(socket, host_key, events).await?;
     handler.handle().await?;
     Ok(())
 }

@@ -54,13 +54,28 @@ pub struct Onion {
 impl Onion {
     /// Construct a new onion instance.
     /// Returns the constructed instance and an event stream.
-    pub fn new<P>(peer_provider: P) -> Result<(Self, impl Stream<Item = Event>)>
+    pub fn new<P>(
+        listen_addr: SocketAddr,
+        hostkey: RsaPrivateKey,
+        peer_provider: P,
+    ) -> Result<(Self, impl Stream<Item = Event>)>
     where
         P: Stream<Item = Peer> + Unpin + Send + Sync + 'static,
     {
         let (req_tx, req_rx) = mpsc::unbounded_channel();
         let (evt_tx, evt_rx) = mpsc::channel(100);
-        let round_handler = RoundHandler::new(req_rx, evt_tx, peer_provider);
+
+        tokio::spawn({
+            let events = evt_tx.clone();
+            let mut round_handler = RoundHandler::new(req_rx, events, peer_provider);
+            async move { round_handler.next_round().await }
+        });
+
+        tokio::spawn({
+            let events = evt_tx.clone();
+            listen(listen_addr, hostkey, events)
+        });
+
         let onion = Onion { requests: req_tx };
         Ok((onion, evt_rx))
     }
@@ -88,7 +103,11 @@ impl Onion {
     }
 }
 
-pub async fn listen(addr: SocketAddr, hostkey: RsaPrivateKey) -> Result<()> {
+pub async fn listen(
+    addr: SocketAddr,
+    hostkey: RsaPrivateKey,
+    events: mpsc::Sender<Event>,
+) -> Result<()> {
     let hostkey = Arc::new(hostkey);
     let mut listener = TcpListener::bind(addr).await?;
     info!(
@@ -99,8 +118,9 @@ pub async fn listen(addr: SocketAddr, hostkey: RsaPrivateKey) -> Result<()> {
     while let Some(stream) = incoming.next().await {
         let socket = OnionSocket::new(stream?);
         let hostkey = hostkey.clone();
+        let events = events.clone();
         tokio::spawn(async move {
-            let mut handler = match CircuitHandler::init(socket, &hostkey).await {
+            let mut handler = match CircuitHandler::init(socket, &hostkey, events).await {
                 Ok(handler) => handler,
                 Err(e) => {
                     warn!("{}", e);

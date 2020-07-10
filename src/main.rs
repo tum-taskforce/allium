@@ -120,11 +120,8 @@ async fn main() -> Result<()> {
     let onion_addr = SocketAddr::new(config.onion.p2p_hostname, config.onion.p2p_port);
     let hostkey =
         RsaPrivateKey::from_pem_file(&config.onion.hostkey).context("Could not read hostkey")?;
-    let onion_listen_task = tokio::spawn(async move {
-        onion::listen(onion_addr, hostkey).await.unwrap();
-    });
 
-    let (onion, events) = Onion::new(peer_provider)?;
+    let (onion, events) = Onion::new(onion_addr, hostkey, peer_provider)?;
     let onion_module = Arc::new(OnionModule::new());
 
     let api_listen_task = tokio::spawn({
@@ -142,6 +139,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    join!(onion_listen_task, api_listen_task, event_task);
+    join!(api_listen_task, event_task);
     Ok(())
 }

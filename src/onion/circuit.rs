@@ -4,7 +4,7 @@ use crate::onion::protocol::{
     TunnelProtocolError, TunnelRequest, TunnelTruncatedError,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::{Result, RsaPrivateKey};
+use crate::{Event, Result, RsaPrivateKey};
 use anyhow::anyhow;
 use anyhow::Context;
 use log::trace;
@@ -12,7 +12,7 @@ use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{mpsc, Mutex, MutexGuard};
 use tokio::time;
 use tokio::time::Duration;
 
@@ -47,6 +47,7 @@ pub(crate) struct CircuitHandler {
     in_circuit: Circuit,
     aes_keys: [SessionKey; 1],
     out_circuit: Option<Circuit>,
+    events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
 }
 
@@ -54,6 +55,7 @@ impl CircuitHandler {
     pub(crate) async fn init(
         mut socket: OnionSocket<TcpStream>,
         host_key: &RsaPrivateKey,
+        events: mpsc::Sender<Event>,
     ) -> Result<Self> {
         trace!("Accepting handshake from {:?}", socket.peer_addr());
         let (circuit_id, peer_key) = socket
@@ -74,6 +76,7 @@ impl CircuitHandler {
             in_circuit,
             aes_keys: [secret],
             out_circuit: None,
+            events,
             rng,
         })
     }
@@ -249,7 +252,9 @@ impl CircuitHandler {
             }
             TunnelRequest::Begin(tunnel_id) => todo!(),
             TunnelRequest::End(tunnel_id) => todo!(),
-            TunnelRequest::Data(tunnel_id, data) => unimplemented!(),
+            TunnelRequest::Data(tunnel_id, data) => {
+                Ok(self.events.send(Event::Data { tunnel_id, data }).await?)
+            }
         }
     }
 
