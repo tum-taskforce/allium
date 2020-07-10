@@ -119,7 +119,7 @@ impl SessionKey {
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let unbound = aead::UnboundKey::new(&aead::AES_128_GCM, bytes)
+        let unbound = aead::UnboundKey::new(&aead::AES_128_GCM, &bytes[..16])
             .context("Could not construct session key from keying material")?;
         Ok(SessionKey(aead::LessSafeKey::new(unbound)))
     }
