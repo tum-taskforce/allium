@@ -4,7 +4,7 @@ use crate::onion::protocol::{
     TunnelProtocolError, TunnelRequest, TunnelTruncatedError,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::{Event, Result, RsaPrivateKey};
+use crate::{Event, Result, RsaPrivateKey, Request};
 use anyhow::anyhow;
 use anyhow::Context;
 use log::trace;
@@ -12,9 +12,10 @@ use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex, MutexGuard};
+use tokio::sync::{mpsc, Mutex, MutexGuard, oneshot};
 use tokio::time;
 use tokio::time::Duration;
+use crate::onion::tunnel::TunnelId;
 
 pub(crate) type CircuitId = u16;
 
@@ -46,9 +47,21 @@ impl Circuit {
 pub(crate) struct CircuitHandler {
     in_circuit: Circuit,
     session_key: [SessionKey; 1],
-    out_circuit: Option<Circuit>,
     events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
+    tunnel_tx: oneshot::Sender<(TunnelId, mpsc::UnboundedSender<Request>)>,
+    state: CircuitHandlerState,
+}
+
+pub(crate) enum CircuitHandlerState {
+    Default,
+    Router {
+        out_circuit: Circuit,
+    },
+    Endpoint {
+        tunnel_id: TunnelId,
+        requests: mpsc::UnboundedReceiver<Request>,
+    },
 }
 
 impl CircuitHandler {
@@ -56,6 +69,7 @@ impl CircuitHandler {
         mut socket: OnionSocket<TcpStream>,
         host_key: &RsaPrivateKey,
         events: mpsc::Sender<Event>,
+        tunnel_tx: oneshot::Sender<(TunnelId, mpsc::UnboundedSender<Request>)>,
     ) -> Result<Self> {
         trace!("Accepting handshake from {:?}", socket.peer_addr());
         let (circuit_id, peer_key) = socket
@@ -75,10 +89,18 @@ impl CircuitHandler {
         Ok(Self {
             in_circuit,
             session_key: [secret],
-            out_circuit: None,
             events,
             rng,
+            tunnel_tx,
+            state: CircuitHandlerState::Default,
         })
+    }
+
+    fn is_default(&self) -> bool {
+        match self.state {
+            CircuitHandlerState::Default => true,
+            _ => false,
+        }
     }
 
     pub(crate) async fn handle(&mut self) -> Result<()> {
@@ -87,26 +109,68 @@ impl CircuitHandler {
             // TODO needs proper timeout definition
             let mut delay = time::delay_for(Duration::from_secs(10));
 
-            tokio::select! {
-                msg = self.accept_in_circuit() => self.handle_in_circuit(msg).await?,
-                msg = self.accept_out_circuit() => self.handle_out_circuit(msg).await?,
-                _ = &mut delay => {
-                    /* Depending on the implementation of next_message, the timeout may also be
-                       triggered if only a partial message has been collected so far from any of the
-                       sockets when the timeout triggers.
-                       Potentially, this case could be changed to improve robustness, since any
-                       unhandled TCP packet loss may cause this to happen.
-                       TCP can trigger a request for any dropped TCP packets, so a switch to UDP
-                       could cause problems here, if the incoming onion packets are highly fractured
-                       into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
-                     */
-                    warn!("Timeout triggered, terminating CircuitHandler");
-                    self.teardown_all().await;
-                    break;
-                },
+            match self.state {
+                CircuitHandlerState::Default => {
+                    tokio::select! {
+                        msg = self.accept_in_circuit() => self.handle_in_circuit(msg).await?,
+                        _ = &mut delay => {
+                            /* Depending on the implementation of next_message, the timeout may also be
+                               triggered if only a partial message has been collected so far from any of the
+                               sockets when the timeout triggers.
+                               Potentially, this case could be changed to improve robustness, since any
+                               unhandled TCP packet loss may cause this to happen.
+                               TCP can trigger a request for any dropped TCP packets, so a switch to UDP
+                               could cause problems here, if the incoming onion packets are highly fractured
+                               into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
+                             */
+                            warn!("Timeout triggered, terminating CircuitHandler");
+                            self.teardown_all().await;
+                            break;
+                        },
+                    }
+                }
+                CircuitHandlerState::Router { out_circuit } => {
+                    tokio::select! {
+                        msg = self.accept_in_circuit() => self.handle_in_circuit(msg).await?,
+                        msg = self.accept_out_circuit() => self.handle_out_circuit(msg).await?,
+                        _ = &mut delay => {
+                            /* Depending on the implementation of next_message, the timeout may also be
+                               triggered if only a partial message has been collected so far from any of the
+                               sockets when the timeout triggers.
+                               Potentially, this case could be changed to improve robustness, since any
+                               unhandled TCP packet loss may cause this to happen.
+                               TCP can trigger a request for any dropped TCP packets, so a switch to UDP
+                               could cause problems here, if the incoming onion packets are highly fractured
+                               into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
+                             */
+                            warn!("Timeout triggered, terminating CircuitHandler");
+                            self.teardown_all().await;
+                            break;
+                        },
+                    }
+                }
+                CircuitHandlerState::Endpoint { tunnel_id, requests } => {
+                    tokio::select! {
+                        msg = self.accept_in_circuit() => self.handle_in_circuit(msg).await?,
+                        req = requests.recv() => {},
+                        _ = &mut delay => {
+                            /* Depending on the implementation of next_message, the timeout may also be
+                               triggered if only a partial message has been collected so far from any of the
+                               sockets when the timeout triggers.
+                               Potentially, this case could be changed to improve robustness, since any
+                               unhandled TCP packet loss may cause this to happen.
+                               TCP can trigger a request for any dropped TCP packets, so a switch to UDP
+                               could cause problems here, if the incoming onion packets are highly fractured
+                               into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
+                             */
+                            warn!("Timeout triggered, terminating CircuitHandler");
+                            self.teardown_all().await;
+                            break;
+                        },
+                    }
+                }
             }
         }
-
         Ok(())
     }
 
@@ -181,7 +245,7 @@ impl CircuitHandler {
     async fn handle_tunnel_message(&mut self, tunnel_msg: TunnelRequest) -> Result<()> {
         match tunnel_msg {
             TunnelRequest::Extend(dest, key) => {
-                if self.out_circuit.is_some() {
+                if !self.is_default() {
                     /* reply to socket with EXTENDED
                        this is required to prevent any deadlocks and errors in the tunnel
                        since Alice in the tunnel waits for a EXTENDED packet
@@ -208,8 +272,8 @@ impl CircuitHandler {
                         .initiate_handshake(self.in_circuit.id, key, &self.rng)
                         .await?;
 
-                    self.out_circuit =
-                        Some(Circuit::new(Circuit::random_id(&self.rng), relay_socket));
+                    let out_circuit = Circuit::new(Circuit::random_id(&self.rng), relay_socket);
+                    self.state = CircuitHandlerState::Router { out_circuit };
 
                     self.in_circuit
                         .socket()
@@ -250,7 +314,17 @@ impl CircuitHandler {
                     Ok(())
                 }
             }
-            TunnelRequest::Begin(tunnel_id) => todo!(),
+            TunnelRequest::Begin(tunnel_id) => {
+                if !self.is_default() {
+                    // TODO fail here
+                }
+
+                self.tunnel_id = Some(tunnel_id);
+                let (tx, rx) = mpsc::unbounded_channel();
+                self.tunnel_tx.send((tunnel_id, tx));
+                self.state = CircuitHandlerState::Endpoint { tunnel_id, requests: rx };
+                Ok(())
+            },
             TunnelRequest::End(tunnel_id) => todo!(),
             TunnelRequest::Data(tunnel_id, data) => {
                 Ok(self.events.send(Event::Data { tunnel_id, data }).await?)

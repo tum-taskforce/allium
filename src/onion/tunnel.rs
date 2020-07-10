@@ -1,8 +1,8 @@
 use crate::onion::circuit::Circuit;
 use crate::onion::crypto::{self, EphemeralPrivateKey, SessionKey};
-use crate::onion::protocol::{TryFromBytesExt, TunnelRequest, VerifyKey};
-use crate::onion::socket::{OnionSocket, OnionSocketError};
-use crate::Result;
+use crate::onion::protocol::{TryFromBytesExt, TunnelRequest, VerifyKey, CircuitOpaque, CircuitOpaqueBytes};
+use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
+use crate::{Result, Request};
 use crate::{Event, Peer};
 use anyhow::Context;
 use futures::{Stream, StreamExt, TryFutureExt};
@@ -123,34 +123,63 @@ impl Tunnel {
         }
     }
 
-    pub(crate) async fn handle_tunnel_messages(
+    pub(crate) async fn handle(
         &self,
+        mut requests: mpsc::UnboundedReceiver<Request>,
         mut events: mpsc::Sender<Event>,
     ) -> Result<()> {
         loop {
-            // TODO apply timeout to handle tunnel rotation
-            // TODO send event in case of error
-            let mut msg = self.out_circuit.socket.lock().await.accept_opaque().await?;
-            // TODO send event in case of error
-            msg.decrypt(self.session_keys.iter().rev())?;
-            let tunnel_msg = TunnelRequest::read_with_digest_from(&mut msg.payload.bytes);
-            match tunnel_msg {
-                Ok(TunnelRequest::Data(tunnel_id, data)) => {
-                    let event = Event::Data { tunnel_id, data };
-                    // TODO send event in case of error
-                    events.send(event).await?
+            tokio::select! {
+                msg = self.out_circuit.socket.lock().await.accept_opaque() => {
+                    self.handle_tunnel_message(msg, &mut events).await?;
                 }
-                Ok(TunnelRequest::End(tunnel_id)) => {
-                    // TODO send event and deconstruct tunnel
-                    todo!()
-                }
-                _ => {
-                    // invalid request or broken digest
-                    // TODO teardown tunnel
-                    todo!()
+                req = requests.recv() => {
+                    self.handle_request(req, &mut events).await?;
                 }
             }
         }
+
+        // TODO cleanup
+    }
+
+    async fn handle_tunnel_message(
+        &self,
+        msg: SocketResult<CircuitOpaque<CircuitOpaqueBytes>>,
+        &mut events: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        // TODO apply timeout to handle tunnel rotation
+        // TODO send event in case of error
+        let mut msg = msg?;
+        // TODO send event in case of error
+        msg.decrypt(self.session_keys.iter().rev())?;
+        let tunnel_msg = TunnelRequest::read_with_digest_from(&mut msg.payload.bytes);
+        match tunnel_msg {
+            Ok(TunnelRequest::Data(tunnel_id, data)) => {
+                let event = Event::Data { tunnel_id, data };
+                // TODO send event in case of error
+                events.send(event).await?
+            }
+            Ok(TunnelRequest::End(tunnel_id)) => {
+                // TODO send event and deconstruct tunnel
+                todo!()
+            }
+            _ => {
+                // invalid request or broken digest
+                // TODO teardown tunnel
+                todo!()
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_request(&self, req: Request, &mut events: mpsc::Sender<Event>) -> Result<()> {
+        match req {
+            Request::Data { tunnel_id, data } => {
+                self.out_circuit.send_data(data).await?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Truncates the tunnel by `n` hops with one `TUNNEL TRUNCATE` message. If message returns with

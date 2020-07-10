@@ -4,7 +4,7 @@ use crate::onion::circuit::{CircuitHandler, CircuitId};
 use crate::onion::socket::OnionSocket;
 use crate::onion::tunnel::{Tunnel, TunnelId};
 use anyhow::anyhow;
-use bytes::Bytes;
+use bytes::{Bytes, Buf};
 use futures::stream::StreamExt;
 use log::{info, warn};
 use ring::rand;
@@ -12,9 +12,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::stream::Stream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
+use std::collections::HashMap;
 
 mod onion;
 mod utils;
@@ -39,6 +40,10 @@ enum Request {
         n_hops: usize,
         res: oneshot::Sender<Result<TunnelId>>,
     },
+    Data {
+        tunnel_id: TunnelId,
+        data: Bytes,
+    }
 }
 
 #[derive(Debug)]
@@ -99,41 +104,13 @@ impl Onion {
     }
 
     pub async fn send_data(&self, tunnel_id: TunnelId, data: &[u8]) -> Result<()> {
+        // big TODO don't allocate
+        self.requests
+            .send(Request::Data { tunnel_id, data: data.to_vec().into() })
+            .map_err(|_| anyhow!("Failed to send data request"))
+            .unwrap();
         Ok(())
     }
-}
-
-pub async fn listen(
-    addr: SocketAddr,
-    hostkey: RsaPrivateKey,
-    events: mpsc::Sender<Event>,
-) -> Result<()> {
-    let hostkey = Arc::new(hostkey);
-    let mut listener = TcpListener::bind(addr).await?;
-    info!(
-        "Listening for P2P connections on {:?}",
-        listener.local_addr()
-    );
-    let mut incoming = listener.incoming();
-    while let Some(stream) = incoming.next().await {
-        let socket = OnionSocket::new(stream?);
-        let hostkey = hostkey.clone();
-        let events = events.clone();
-        tokio::spawn(async move {
-            let mut handler = match CircuitHandler::init(socket, &hostkey, events).await {
-                Ok(handler) => handler,
-                Err(e) => {
-                    warn!("{}", e);
-                    return;
-                }
-            };
-
-            if let Err(e) = handler.handle().await {
-                warn!("{}", e);
-            }
-        });
-    }
-    Ok(())
 }
 
 struct RoundHandler<P> {
@@ -141,6 +118,7 @@ struct RoundHandler<P> {
     events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
     peer_provider: P,
+    tunnels: Mutex<HashMap<TunnelId, mpsc::UnboundedSender<Request>>>,
 }
 
 impl<P> RoundHandler<P>
@@ -158,6 +136,7 @@ where
             events,
             rng,
             peer_provider,
+            tunnels: Mutex::new(HashMap::new()),
         }
     }
 
@@ -174,6 +153,10 @@ where
                 Request::Build { dest, n_hops, res } => {
                     res.send(self.handle_build(dest, n_hops).await).unwrap();
                 }
+                Request::Data { tunnel_id, data} => {
+                    let req = Request::Data { tunnel_id, data };
+                    self.tunnels.lock().await.get(&tunnel_id).unwrap().send(req);
+                }
             }
         }
     }
@@ -189,12 +172,15 @@ where
             tunnel.extend(&peer, &self.rng).await?;
         }
         tunnel.extend(&dest, &self.rng).await?;
+
+        let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn({
             let events = self.events.clone();
             async move {
-                tunnel.handle_tunnel_messages(events).await.unwrap();
+                tunnel.handle(rx, events).await.unwrap();
             }
         });
+        self.tunnels.lock().await.insert(tunnel_id, tx);
         Ok(tunnel_id)
     }
 
@@ -203,5 +189,44 @@ where
             .next()
             .await
             .ok_or(anyhow!("Failed to get random peer"))
+    }
+
+    async fn listen(
+        &self,
+        addr: SocketAddr,
+        hostkey: RsaPrivateKey,
+        events: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        let hostkey = Arc::new(hostkey);
+        let mut listener = TcpListener::bind(addr).await?;
+        info!(
+            "Listening for P2P connections on {:?}",
+            listener.local_addr()
+        );
+        let mut incoming = listener.incoming();
+        while let Some(stream) = incoming.next().await {
+            let socket = OnionSocket::new(stream?);
+            let hostkey = hostkey.clone();
+            let events = events.clone();
+            let (tunnel_tx, tunnel_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                let mut handler = match CircuitHandler::init(socket, &hostkey, events, tunnel_tx).await {
+                    Ok(handler) => handler,
+                    Err(e) => {
+                        warn!("{}", e);
+                        return;
+                    }
+                };
+
+                if let Err(e) = handler.handle().await {
+                    warn!("{}", e);
+                }
+            });
+
+            let (tunnel_id, req_tx) = tunnel_rx.await;
+            self.tunnels.lock().await.insert(tunnel_id, req_tx);
+        }
+
+        Ok(())
     }
 }
