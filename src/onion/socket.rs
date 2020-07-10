@@ -40,12 +40,6 @@ pub(crate) enum OnionSocketError {
     // TODO argument: message
     #[error("received broken message that cannot be parsed and violates protocol")]
     BrokenMessage,
-    /// An error was triggered remotely and the operation returned with an error code
-    #[error(
-        "the operation could not be completed remotely returning error code {:?}",
-        error_code
-    )]
-    RemoteError { error_code: u8 },
 }
 
 pub(crate) type SocketResult<T> = std::result::Result<T, OnionSocketError>;
@@ -106,7 +100,7 @@ impl<S: AsyncRead + Unpin> OnionSocket<S> {
     ///
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
-    /// - `TeardownMessage` - A `TEARDOWN` message has been received instead of `CIRCUIT CREATE`
+    /// - `TeardownMessage` - A `TEARDOWN` message has been received instead of `CIRCUIT OPAQUE`
     /// - `BrokenMessage` - The received answer message could not be parsed
     pub(crate) async fn accept_opaque(
         &mut self,
@@ -203,8 +197,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        // TODO maybe think of better solution than implementing ToBytes for Unit?
-        let tunnel_res = TunnelResponseExtended::<()>::Error(error_code);
+        let tunnel_res = TunnelResponseExtended::<VerifyKey>::Error(error_code);
         self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
@@ -243,7 +236,6 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        // FIXME why do I have to define Key here?
         let tunnel_res = TunnelResponseTruncated::Error(error_code);
         self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
             .await
@@ -291,6 +283,28 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         self.write_buf_to_stream().await?;
         Ok(())
     }
+
+    /// Sends a `TUNNEL BEGIN` message via this stream with the given `tunnel_id` to indicate a
+    /// conversation begin to the final hop on this socket. This function does not block for
+    /// responses.
+    ///
+    /// If the targeted hop is not the final hop or forbids the connection, it may send a `TEARDOWN`
+    /// message that will not be read here, but listening on the connection for `TUNNEL DATA`
+    /// packets may reveal this.
+    /// If the connection is rejected, an `END` packet may be sent by the connected hop, which may
+    /// be evaluated when handling the incoming packets.
+    pub(crate) async fn begin(
+        &mut self,
+        circuit_id: CircuitId,
+        tunnel_id: TunnelId,
+        aes_keys: &[SessionKey],
+        rng: &rand::SystemRandom,
+    ) -> SocketResult<()> {
+        self.buf.clear();
+        let tunnel_res = TunnelRequest::Begin(tunnel_id);
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+            .await
+    }
 }
 
 impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
@@ -302,7 +316,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
     /// - `StreamTimeout` -  The stream operations timed out
-    /// - `TeardownMessage` - A `TEARDOWN`message has been received instead of `CIRCUIT CREATE`
+    /// - `TeardownMessage` - A `TEARDOWN`message has been received instead of `CIRCUIT CREATED`
     /// - `BrokenMessage` - The received answer message could not be parsed or has an unexpected
     ///   circuit_id
     pub(crate) async fn initiate_handshake(
@@ -326,10 +340,8 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         }
     }
 
-    /// aes_key are in encrypt order
     /// Initializes a tunnel handshake by forwarding the given `circuit_id` and `key` through a
-    /// tunnel with the connected peer as its first hop. The `tunnel_id` will be used in the
-    /// `OPAQUE` packets and will be saved by the remote peer to validate tunnel messages.
+    /// tunnel with the connected peer as its first hop.
     ///
     /// The last hop in the tunnel will try to extend the tunnel to the peer defined by its address
     /// in `peer_addr`.
@@ -342,18 +354,16 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
     /// - `StreamTimeout` -  The stream operations timed out
-    /// - `TeardownMessage` - A `TEARDOWN`message has been received instead of `CIRCUIT CREATE`
+    /// - `TeardownMessage` - A `TEARDOWN`message has been received instead of `CIRCUIT OPAQUE`
     /// - `BrokenMessage` - The received answer message could not be parsed
-    /// - `RemoteError` - The `EXTENDED` message returned with an error code
     pub(crate) async fn initiate_tunnel_handshake(
         &mut self,
         circuit_id: CircuitId,
-        tunnel_id: TunnelId,
         peer_addr: SocketAddr,
         key: Key,
         aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
-    ) -> SocketResult<VerifyKey> {
+    ) -> SocketResult<std::result::Result<VerifyKey, TunnelExtendedErrorCode>> {
         self.buf.clear();
         let tunnel_req = TunnelRequest::Extend(peer_addr, key);
         let req = CircuitOpaque {
@@ -367,6 +377,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         req.write_to(&mut self.buf);
         assert_eq!(self.buf.len(), MESSAGE_SIZE);
+        // TODO Fix timeout
         self.write_buf_to_stream().await?;
 
         self.read_buf_from_stream().await?;
@@ -387,17 +398,72 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         match tunnel_res {
             TunnelResponseExtended::Success(res_key) => {
-                Ok(res_key)
+                Ok(Ok(res_key))
             }
             TunnelResponseExtended::Error(error_code) => {
-                let code = error_code as u8;
-                if code != 0x00 { // TODO maybe not hardcoded
-                    // TODO Retry may be allowed
-                    Err(OnionSocketError::RemoteError { error_code: code })
-                    //return Err(anyhow!("Tunnel Extend returned an error"));
-                } else {
-                    Err(OnionSocketError::BrokenMessage)
-                }
+                Ok(Err(error_code))
+            }
+        }
+    }
+
+    /// Sends a `TUNNEL TRUNCATE` message to the socket. The receiving peer is determined by the
+    /// length of `aes_keys`. For example, if `aes_keys` consists of two elements, the hop at
+    /// index 1 (the second hop) will be able to read the packet and process the truncate.
+    ///
+    /// To encrypt the `OPAQUE` message, `aes_keys` will be used. The keys in `aes_keys` are
+    /// expected to be in encrypt order.
+    ///
+    /// The `rng` will be used for randomly generated message padding.
+    ///
+    /// # Errors:
+    /// - `StreamTerminated` - The stream is broken
+    /// - `StreamTimeout` -  The stream operations timed out
+    /// - `TeardownMessage` - A `TEARDOWN`message has been received instead of `CIRCUIT OPAQUE`
+    /// - `BrokenMessage` - The received answer message could not be parsed
+    pub(crate) async fn truncate_tunnel(
+        &mut self,
+        circuit_id: CircuitId,
+        aes_keys: &[SessionKey],
+        rng: &rand::SystemRandom,
+    ) -> SocketResult<Option<TunnelTruncatedErrorCode>> {
+        self.buf.clear();
+        let tunnel_req = TunnelRequest::Truncate;
+        let req = CircuitOpaque {
+            circuit_id,
+            payload: CircuitOpaquePayload {
+                msg: &tunnel_req,
+                rng,
+                encrypt_keys: aes_keys,
+            },
+        };
+
+        req.write_to(&mut self.buf);
+        assert_eq!(self.buf.len(), MESSAGE_SIZE);
+        // TODO Fix timeout
+        self.write_buf_to_stream().await?;
+
+        self.read_buf_from_stream().await?;
+        let mut res = CircuitOpaque::try_read_from(&mut self.buf)?;
+
+        if res.circuit_id != circuit_id {
+            return Err(OnionSocketError::BrokenMessage);
+            //return Err(anyhow!(
+            //    "Circuit ID in Opaque response does not match ID in request"
+            //));
+        }
+
+        res.decrypt(aes_keys.iter().rev())
+            .map_err(|_| OnionSocketError::BrokenMessage)?;
+        let tunnel_res = TunnelResponseTruncated::read_with_digest_from(&mut res.payload.bytes)
+            .map_err(|_| OnionSocketError::BrokenMessage)?;
+        //.context("Invalid TunnelResponse message")?;
+
+        match tunnel_res {
+            TunnelResponseTruncated::Success => {
+                Ok(None)
+            }
+            TunnelResponseTruncated::Error(error_code) => {
+                Ok(Some(error_code))
             }
         }
     }

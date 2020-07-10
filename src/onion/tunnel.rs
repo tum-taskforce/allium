@@ -1,11 +1,11 @@
 use crate::onion::circuit::Circuit;
-use crate::onion::crypto::{self, SessionKey};
-use crate::onion::protocol::{TryFromBytesExt, TunnelRequest};
+use crate::onion::crypto::{self, SessionKey, EphemeralPrivateKey};
+use crate::onion::protocol::{TryFromBytesExt, TunnelRequest, VerifyKey};
 use crate::onion::socket::{OnionSocket, OnionSocketError};
 use crate::Result;
 use crate::{Event, Peer};
 use anyhow::Context;
-use futures::Stream;
+use futures::{Stream, StreamExt, TryFutureExt};
 use log::trace;
 use ring::rand;
 use ring::rand::SecureRandom;
@@ -35,7 +35,6 @@ impl From<OnionSocketError> for TunnelError {
             OnionSocketError::StreamTimeout(_) => { TunnelError::Broken },
             OnionSocketError::TeardownMessage => { TunnelError::Broken },
             OnionSocketError::BrokenMessage => { TunnelError::Broken },
-            OnionSocketError::RemoteError { .. } => { TunnelError::Incomplete },
         }
     }
 }
@@ -60,15 +59,20 @@ impl Tunnel {
         let mut socket = OnionSocket::new(stream);
         let peer_key = socket.initiate_handshake(circuit_id, key, rng).await?;
 
-        let peer_key = peer_key
-            .verify(&peer.hostkey)
-            .context("Could not verify peer public key")?;
-        let secret = SessionKey::from_key_exchange(private_key, &peer_key)?;
+        let secret = Tunnel::derive_secret(&peer, private_key, peer_key)?;
         Ok(Self {
             id,
             out_circuit: Circuit::new(circuit_id, socket),
             aes_keys: vec![secret],
         })
+    }
+
+    fn derive_secret(peer: &&Peer, private_key: EphemeralPrivateKey, peer_key: VerifyKey) -> Result<SessionKey> {
+        let peer_key = peer_key
+            .verify(&peer.hostkey)
+            .context("Could not verify peer public key")?;
+        let secret = SessionKey::from_key_exchange(private_key, &peer_key)?;
+        Ok(secret)
     }
 
     /// Performs a key exchange with the given peer and extends the tunnel with a new hop
@@ -86,16 +90,15 @@ impl Tunnel {
             .await
             .initiate_tunnel_handshake(
                 self.out_circuit.id,
-                self.id,
                 peer.addr,
                 key,
                 &self.aes_keys,
                 rng,
             )
-            .await?;
+            .await?
+            .map_err(|_| TunnelError::Incomplete)?;
 
-        // Any failure because of any incorrect secret answer should not cause our tunnel to become corrupted
-        // TODO notify peer(s) upon failure
+        /*
         let peer_key = peer_key
             .verify(&peer.hostkey)
             // TODO introduce error indicating broken final hop
@@ -105,8 +108,19 @@ impl Tunnel {
         let secret = SessionKey::from_key_exchange(private_key, &peer_key)
             // TODO introduce error indicating broken final hop
             .map_err(|_| TunnelError::Broken)?;
-        self.aes_keys.insert(0, secret);
-        Ok(())
+         */
+
+        // Any failure because of any incorrect secret answer should not cause our tunnel to become corrupted
+        if let Ok(secret) = Tunnel::derive_secret(&peer, private_key, peer_key) {
+            self.aes_keys.insert(0, secret);
+            Ok(())
+        } else {
+            // key derivation failed, the final hop needs to be truncated
+            // if the truncate fails too, the tunnel is broken
+            // TODO do not remove a key
+            self.truncate(0, rng).map_err(|_| TunnelError::Broken);
+            Err(TunnelError::Incomplete)
+        }
     }
 
     pub(crate) async fn handle_tunnel_messages(
@@ -114,19 +128,55 @@ impl Tunnel {
         mut events: mpsc::Sender<Event>,
     ) -> Result<()> {
         loop {
+            // TODO apply timeout to handle tunnel rotation
+            // TODO send event in case of error
             let mut msg = self.out_circuit.socket.lock().await.accept_opaque().await?;
+            // TODO send event in case of error
             msg.decrypt(self.aes_keys.iter().rev())?;
             let tunnel_msg = TunnelRequest::read_with_digest_from(&mut msg.payload.bytes);
-            if let Ok(TunnelRequest::Data(tunnel_id, data)) = tunnel_msg {
-                let event = Event::Data { tunnel_id, data };
-                events.send(event).await?
+            match tunnel_msg {
+                Ok(TunnelRequest::Data(tunnel_id, data)) => {
+                    let event = Event::Data { tunnel_id, data };
+                    // TODO send event in case of error
+                    events.send(event).await?
+                }
+                Ok(TunnelRequest::End(tunnel_id)) => {
+                    // TODO send event and deconstruct tunnel
+                    todo!()
+                }
+                _ => {
+                    // invalid request or broken digest
+                    // TODO teardown tunnel
+                    todo!()
+                }
             }
         }
     }
 
-    /// Truncates the tunnel by one hop
-    pub(crate) async fn truncate(&mut self, rng: &rand::SystemRandom) -> TunnelResult<()> {
-        todo!()
+    /// Truncates the tunnel by `n` hops with one `TUNNEL TRUNCATE` message. If message returns with
+    /// an error code, `Incomplete` will be returned.
+    ///
+    /// Returns `Incomplete` if the resulting hop count would be less than one.
+    pub(crate) async fn truncate(&mut self, n: usize, rng: &rand::SystemRandom) -> TunnelResult<()> {
+        if n >= self.aes_keys.len() {
+            return Err(TunnelError::Incomplete);
+        }
+
+        let error_code = self.out_circuit
+            .socket()
+            .await
+            .truncate_tunnel(
+                self.out_circuit.id,
+                &self.aes_keys[n..],
+                rng,)
+            .await?;
+
+        if let Some(error_code) = error_code {
+            Err(TunnelError::Incomplete)
+        } else {
+            &self.aes_keys.remove(0);
+            Ok(())
+        }
     }
 
     /// Begins a data connection with the last hop in the tunnel
@@ -145,7 +195,16 @@ impl Tunnel {
     /// allowed to use the old tunnel indefinitely despite receiving a `TUNNEL END` packet. Any old
     /// tunnel that has been replaced should only have finite lifetime.
     pub(crate) async fn begin(&mut self, rng: &rand::SystemRandom) -> TunnelResult<()> {
-        todo!()
+        self.out_circuit
+            .socket()
+            .await
+            .begin(
+                self.out_circuit.id,
+                self.id,
+                &self.aes_keys,
+                rng,)
+            .await?;
+        Ok(())
     }
 
     /// Tries to build this tunnel to hop count `n` and final hop `final_peer`.
@@ -154,16 +213,52 @@ impl Tunnel {
     /// the final hop at index `n-1` will be `final_peer`. If the tunnel already has a length of at
     /// least `n`, the tunnel will be truncated to length `n-1` and then extended by `final_peer`.
     ///
-    /// # TODO
-    /// It is important for anonymity preservation that this function checks whether the tunnel does
-    /// not contain two equal consecutive hops
-    pub(crate) async fn try_build<P: Stream<Item = Peer> + Send + Sync + 'static>(
+    /// This function does not check whether the peers provided by `peer_provider` are particularity
+    /// secure. In order to preserve anonymity, there should never be two consecutive hops to the
+    /// same peer. Also, `peer_provider` should produce peers in a way that potentially malicious
+    /// peers with shared knowledge of circuits should be returned with a low probability (or with
+    /// equal probability to any other peer) to prevent the tunnel from becoming compromised.
+    ///
+    /// Even if there is a high failure-rate among peers, the `peer_provider` should be able to
+    /// generate a secure stream of peers.
+    pub(crate) async fn try_build<P: Stream<Item = Peer> + Send + Sync + Unpin + 'static>(
         &mut self,
         length: usize,
-        peer_provider: P,
-        final_peer: Peer,
+        mut peer_provider: P,
+        final_peer: &Peer,
+        rng: &rand::SystemRandom,
     ) -> TunnelResult<()> {
-        todo!()
+        while self.aes_keys.len() >= length {
+            match self.truncate(1, rng).await {
+                Err(TunnelError::Broken) => {
+                    return Err(TunnelError::Broken)
+                }
+                Err(TunnelError::Incomplete) => {
+                    // TODO implement a counter for failed Truncate calls
+                }
+                Ok(_) => {}
+            }
+        }
+
+        while self.aes_keys.len() < length {
+            if let Some(peer) = peer_provider.next().await {
+                match self.extend(&peer, &rng).await {
+                    Err(TunnelError::Broken) => {
+                        // do not try to fix this error to prevent endless looping
+                        return Err(TunnelError::Broken)
+                    }
+                    Err(TunnelError::Incomplete) => {
+                        // TODO implement a counter for failed Extend calls
+                    }
+                    Ok(_) => {}
+                }
+            } else {
+                return Err(TunnelError::Incomplete);
+            }
+        }
+
+        self.extend(final_peer, rng).await?;
+        Ok(())
     }
 
     pub(crate) fn random_id(rng: &rand::SystemRandom) -> TunnelId {
