@@ -27,7 +27,7 @@ const TUNNEL_EXTENDED: u8 = 0x20;
 const TUNNEL_TRUNCATED: u8 = 0x21;
 
 #[repr(u8)]
-#[derive(Primitive)]
+#[derive(Primitive, Clone, Debug, PartialEq)]
 pub(crate) enum TunnelExtendedErrorCode {
     /// The `EXTENDED` call is rejected, because there already is an outgoing circuit from the targeted
     /// hop and tunnel branching is not allowed.
@@ -37,7 +37,7 @@ pub(crate) enum TunnelExtendedErrorCode {
 }
 
 #[repr(u8)]
-#[derive(Primitive)]
+#[derive(Primitive, Clone, Debug, PartialEq)]
 pub(crate) enum TunnelTruncatedErrorCode {
     /// The `TRUNCATED` call is rejected, because there is no outgoing circuit from the targeted hop
     /// that could be truncated.
@@ -634,12 +634,12 @@ impl ToBytes for TunnelResponseTruncated {
         match self {
             TunnelResponseTruncated::Success => {
                 buf.put_u16(self.size() as u16);
-                buf.put_u8(TUNNEL_EXTENDED);
+                buf.put_u8(TUNNEL_TRUNCATED);
                 buf.put_u8(0x00); // TODO maybe not hardcoded
             }
             TunnelResponseTruncated::Error(error_code) => {
                 buf.put_u16(self.size() as u16);
-                buf.put_u8(TUNNEL_EXTENDED);
+                buf.put_u8(TUNNEL_TRUNCATED);
                 // This unwrap must never fail
                 buf.put_u8(error_code.to_u8().unwrap());
             }
@@ -829,9 +829,119 @@ mod tests {
                 let key2_bytes: &[u8] = &key2.bytes().as_ref();
                 assert_eq!(&key_bytes.as_ref(), &key2_bytes);
             }
-            _ => {
-                // FIXME ugly, but I suck at rust
-                Err(anyhow!("Expected EXTENDED, received unknown"))?;
+            TunnelResponseExtended::Error(error_code) => {
+                Err(anyhow!("Expected EXTENDED Success, received Error {:?}", error_code))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_tunnel_extended_error() -> Result<()> {
+        let rng = rand::SystemRandom::new();
+
+        let aes_keys = generate_aes_keys(&rng)?;
+
+        let error_code = TunnelExtendedErrorCode::PeerUnreachable;
+        let tunnel_msg = TunnelResponseExtended::<VerifyKey>::Error(error_code.clone());
+        let circuit_id = 0;
+        let msg = CircuitOpaque {
+            circuit_id,
+            payload: CircuitOpaquePayload {
+                msg: &tunnel_msg,
+                rng: &rng,
+                encrypt_keys: &aes_keys,
+            },
+        };
+
+        let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
+        //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        msg.write_to(&mut buf);
+        assert_eq!(buf.len(), MESSAGE_SIZE);
+        let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
+
+        assert_eq!(circuit_id, read_msg.circuit_id);
+        read_msg.decrypt(aes_keys.iter().rev())?;
+        let read_tunnel_msg = TunnelResponseExtended::<VerifyKey>::read_with_digest_from(&mut read_msg.payload.bytes)?;
+        match read_tunnel_msg {
+            TunnelResponseExtended::Error(error_code2) => {
+                assert_eq!(error_code, error_code2)
+            }
+            TunnelResponseExtended::Success(_) => {
+                Err(anyhow!("Expected EXTENDED Error, received Success"))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_tunnel_truncated_success() -> Result<()> {
+        let rng = rand::SystemRandom::new();
+
+        let aes_keys = generate_aes_keys(&rng)?;
+
+        let tunnel_msg = TunnelResponseTruncated::Success;
+        let circuit_id = 0;
+        let msg = CircuitOpaque {
+            circuit_id,
+            payload: CircuitOpaquePayload {
+                msg: &tunnel_msg,
+                rng: &rng,
+                encrypt_keys: &aes_keys,
+            },
+        };
+
+        let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
+        //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        msg.write_to(&mut buf);
+        assert_eq!(buf.len(), MESSAGE_SIZE);
+        let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
+
+        assert_eq!(circuit_id, read_msg.circuit_id);
+        read_msg.decrypt(aes_keys.iter().rev())?;
+        let read_tunnel_msg = TunnelResponseTruncated::read_with_digest_from(&mut read_msg.payload.bytes)?;
+        match read_tunnel_msg {
+            TunnelResponseTruncated::Success => { }
+            TunnelResponseTruncated::Error(error_code) => {
+                Err(anyhow!("Expected TRUNCATED Success, received Error {:?}", error_code))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_tunnel_truncated_error() -> Result<()> {
+        let rng = rand::SystemRandom::new();
+
+        let aes_keys = generate_aes_keys(&rng)?;
+
+        let error_code = TunnelTruncatedErrorCode::NoNextHop;
+        let tunnel_msg = TunnelResponseTruncated::Error(error_code.clone());
+        let circuit_id = 0;
+        let msg = CircuitOpaque {
+            circuit_id,
+            payload: CircuitOpaquePayload {
+                msg: &tunnel_msg,
+                rng: &rng,
+                encrypt_keys: &aes_keys,
+            },
+        };
+
+        let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
+        //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        msg.write_to(&mut buf);
+        assert_eq!(buf.len(), MESSAGE_SIZE);
+        let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
+
+        assert_eq!(circuit_id, read_msg.circuit_id);
+        read_msg.decrypt(aes_keys.iter().rev())?;
+        let read_tunnel_msg = TunnelResponseTruncated::read_with_digest_from(&mut read_msg.payload.bytes)?;
+        match read_tunnel_msg {
+            TunnelResponseTruncated::Error(error_code2) => {
+                assert_eq!(error_code, error_code2)
+            }
+            TunnelResponseTruncated::Success => {
+                Err(anyhow!("Expected TRUNCATED Error, received Success"))?;
             }
         }
         Ok(())
