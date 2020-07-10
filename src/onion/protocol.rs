@@ -8,6 +8,8 @@ use ring::rand::SecureRandom;
 use ring::{aead, digest, rand};
 use std::net::SocketAddr;
 use thiserror::Error;
+use num_traits::{FromPrimitive, ToPrimitive};
+use enum_primitive_derive::Primitive;
 
 const CIRCUIT_CREATE: u8 = 0x0;
 const CIRCUIT_CREATED: u8 = 0x1;
@@ -25,6 +27,7 @@ const TUNNEL_EXTENDED: u8 = 0x20;
 const TUNNEL_TRUNCATED: u8 = 0x21;
 
 #[repr(u8)]
+#[derive(Primitive)]
 pub(crate) enum TunnelExtendedErrorCode {
     /// The `EXTENDED` call is rejected, because there already is an outgoing circuit from the targeted
     /// hop and tunnel branching is not allowed.
@@ -34,6 +37,7 @@ pub(crate) enum TunnelExtendedErrorCode {
 }
 
 #[repr(u8)]
+#[derive(Primitive)]
 pub(crate) enum TunnelTruncatedErrorCode {
     /// The `TRUNCATED` call is rejected, because there is no outgoing circuit from the targeted hop
     /// that could be truncated.
@@ -534,20 +538,13 @@ impl FromBytes for TunnelProtocolResult<TunnelResponseExtended<VerifyKey>> {
                     let peer_key = VerifyKey::read_from(buf);
                     Ok(TunnelResponseExtended::Success(peer_key))
                 } else {
-                    // TODO implement from for TunnelExtendedErrorCode
-                    match error_code {
-                        i if i == TunnelExtendedErrorCode::BranchingDetected as u8 => {
-                            Ok(TunnelResponseExtended::Error(TunnelExtendedErrorCode::BranchingDetected))
-                        }
-                        i if i == TunnelExtendedErrorCode::PeerUnreachable as u8 => {
-                            Ok(TunnelResponseExtended::Error(TunnelExtendedErrorCode::PeerUnreachable))
-                        }
-                        _ => {
-                            // TODO this is also not ideal
-                            Err(TunnelProtocolError::Unknown {
-                                actual: message_type
-                            })
-                        }
+                    if let Some(error_code) = TunnelExtendedErrorCode::from_u8(error_code) {
+                        Ok(TunnelResponseExtended::Error(error_code))
+                    } else {
+                        // TODO this is also not ideal
+                        Err(TunnelProtocolError::Unknown {
+                            actual: message_type
+                        })
                     }
                 }
             }
@@ -583,7 +580,8 @@ impl<K: ToBytes> ToBytes for TunnelResponseExtended<K> {
             TunnelResponseExtended::Error(error_code) => {
                 buf.put_u16(self.size() as u16);
                 buf.put_u8(TUNNEL_EXTENDED);
-                buf.put_u8(*error_code as u8); // TODO maybe not hardcoded
+                // This unwrap must never fail
+                buf.put_u8(error_code.to_u8().unwrap());
             }
         }
     }
@@ -601,17 +599,13 @@ impl FromBytes for TunnelProtocolResult<TunnelResponseTruncated> {
                 if error_code == 0x00 { // TODO maybe not hardcoded
                     Ok(TunnelResponseTruncated::Success)
                 } else {
-                    // TODO implement from for TunnelTruncatedErrorCode
-                    match error_code {
-                        i if i == TunnelTruncatedErrorCode::NoNextHop as u8 => {
-                            Ok(TunnelResponseTruncated::Error(TunnelTruncatedErrorCode::NoNextHop))
-                        }
-                        _ => {
-                            // TODO this is also not ideal
-                            Err(TunnelProtocolError::Unknown {
-                                actual: message_type
-                            })
-                        }
+                    if let Some(error_code) = TunnelTruncatedErrorCode::from_u8(error_code) {
+                        Ok(TunnelResponseTruncated::Error(error_code))
+                    } else {
+                        // TODO this is also not ideal
+                        Err(TunnelProtocolError::Unknown {
+                            actual: message_type
+                        })
                     }
                 }
             }
@@ -646,7 +640,8 @@ impl ToBytes for TunnelResponseTruncated {
             TunnelResponseTruncated::Error(error_code) => {
                 buf.put_u16(self.size() as u16);
                 buf.put_u8(TUNNEL_EXTENDED);
-                buf.put_u8(*error_code as u8); // TODO maybe not hardcoded
+                // This unwrap must never fail
+                buf.put_u8(error_code.to_u8().unwrap());
             }
         }
     }
