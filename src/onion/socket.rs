@@ -177,7 +177,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        let tunnel_res = TunnelResponseExtended::Success(key);
+        let tunnel_res = TunnelResponseExtended { peer_key: key };
         self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
@@ -193,12 +193,11 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         aes_keys: &[SessionKey],
-        error_code: TunnelExtendedErrorCode,
+        error: TunnelExtendedError,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        let tunnel_res = TunnelResponseExtended::<VerifyKey>::Error(error_code);
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, error)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
@@ -216,7 +215,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     ) -> SocketResult<()> {
         self.buf.clear();
         // FIXME why do I have to define Key here?
-        let tunnel_res = TunnelResponseTruncated::Success;
+        let tunnel_res = TunnelResponseTruncated;
         self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Truncated>")?;
@@ -232,12 +231,11 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         aes_keys: &[SessionKey],
-        error_code: TunnelTruncatedErrorCode,
+        error: TunnelTruncatedError,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        let tunnel_res = TunnelResponseTruncated::Error(error_code);
-        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, tunnel_res)
+        self.encrypt_and_send_opaque(circuit_id, aes_keys, rng, error)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
@@ -363,7 +361,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         key: Key,
         aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
-    ) -> SocketResult<std::result::Result<VerifyKey, TunnelExtendedErrorCode>> {
+    ) -> SocketResult<VerifyKey> {
         self.buf.clear();
         let tunnel_req = TunnelRequest::Extend(peer_addr, key);
         let req = CircuitOpaque {
@@ -396,14 +394,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             .map_err(|_| OnionSocketError::BrokenMessage)?;
         //.context("Invalid TunnelResponse message")?;
 
-        match tunnel_res {
-            TunnelResponseExtended::Success(res_key) => {
-                Ok(Ok(res_key))
-            }
-            TunnelResponseExtended::Error(error_code) => {
-                Ok(Err(error_code))
-            }
-        }
+        Ok(tunnel_res.peer_key)
     }
 
     /// Sends a `TUNNEL TRUNCATE` message to the socket. The receiving peer is determined by the
@@ -425,7 +416,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         aes_keys: &[SessionKey],
         rng: &rand::SystemRandom,
-    ) -> SocketResult<Option<TunnelTruncatedErrorCode>> {
+    ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_req = TunnelRequest::Truncate;
         let req = CircuitOpaque {
@@ -458,14 +449,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             .map_err(|_| OnionSocketError::BrokenMessage)?;
         //.context("Invalid TunnelResponse message")?;
 
-        match tunnel_res {
-            TunnelResponseTruncated::Success => {
-                Ok(None)
-            }
-            TunnelResponseTruncated::Error(error_code) => {
-                Ok(Some(error_code))
-            }
-        }
+        Ok(())
     }
 }
 

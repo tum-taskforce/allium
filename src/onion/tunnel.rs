@@ -1,5 +1,5 @@
 use crate::onion::circuit::Circuit;
-use crate::onion::crypto::{self, SessionKey, EphemeralPrivateKey};
+use crate::onion::crypto::{self, EphemeralPrivateKey, SessionKey};
 use crate::onion::protocol::{TryFromBytesExt, TunnelRequest, VerifyKey};
 use crate::onion::socket::{OnionSocket, OnionSocketError};
 use crate::Result;
@@ -62,7 +62,11 @@ impl Tunnel {
         })
     }
 
-    fn derive_secret(peer: &&Peer, private_key: EphemeralPrivateKey, peer_key: VerifyKey) -> Result<SessionKey> {
+    fn derive_secret(
+        peer: &&Peer,
+        private_key: EphemeralPrivateKey,
+        peer_key: VerifyKey,
+    ) -> Result<SessionKey> {
         let peer_key = peer_key
             .verify(&peer.hostkey)
             .context("Could not verify peer public key")?;
@@ -72,7 +76,7 @@ impl Tunnel {
 
     /// Returns the length of a tunnel. The result of this function may be used with caution if the
     /// tunnel is in a broken state.
-    pub(crate) async fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.aes_keys.len()
     }
 
@@ -89,15 +93,9 @@ impl Tunnel {
             .out_circuit
             .socket()
             .await
-            .initiate_tunnel_handshake(
-                self.out_circuit.id,
-                peer.addr,
-                key,
-                &self.aes_keys,
-                rng,
-            )
-            .await?
-            .map_err(|_| TunnelError::Incomplete)?;
+            .initiate_tunnel_handshake(self.out_circuit.id, peer.addr, key, &self.aes_keys, rng)
+            .await?;
+        //.map_err(|_| TunnelError::Incomplete)?;
 
         /*
         let peer_key = peer_key
@@ -158,26 +156,23 @@ impl Tunnel {
     /// an error code, `Incomplete` will be returned.
     ///
     /// Returns `Incomplete` if the resulting hop count would be less than one.
-    pub(crate) async fn truncate(&mut self, n: usize, rng: &rand::SystemRandom) -> TunnelResult<()> {
+    pub(crate) async fn truncate(
+        &mut self,
+        n: usize,
+        rng: &rand::SystemRandom,
+    ) -> TunnelResult<()> {
         if n >= self.aes_keys.len() {
             return Err(TunnelError::Incomplete);
         }
 
-        let error_code = self.out_circuit
+        self.out_circuit
             .socket()
             .await
-            .truncate_tunnel(
-                self.out_circuit.id,
-                &self.aes_keys[n..],
-                rng,)
+            .truncate_tunnel(self.out_circuit.id, &self.aes_keys[n..], rng)
             .await?;
 
-        if let Some(error_code) = error_code {
-            Err(TunnelError::Incomplete)
-        } else {
-            &self.aes_keys.remove(0);
-            Ok(())
-        }
+        &self.aes_keys.remove(0);
+        Ok(())
     }
 
     /// Begins a data connection with the last hop in the tunnel
@@ -199,11 +194,7 @@ impl Tunnel {
         self.out_circuit
             .socket()
             .await
-            .begin(
-                self.out_circuit.id,
-                self.id,
-                &self.aes_keys,
-                rng,)
+            .begin(self.out_circuit.id, self.id, &self.aes_keys, rng)
             .await?;
         Ok(())
     }
@@ -233,7 +224,7 @@ impl Tunnel {
             match self.truncate(1, rng).await {
                 Err(TunnelError::Broken(e)) => {
                     // do not try to fix this error to prevent endless looping
-                    return Err(TunnelError::Broken(e))
+                    return Err(TunnelError::Broken(e));
                 }
                 Err(TunnelError::Incomplete) => {
                     // TODO implement a counter for failed Truncate calls
@@ -247,7 +238,7 @@ impl Tunnel {
                 match self.extend(&peer, &rng).await {
                     Err(TunnelError::Broken(e)) => {
                         // do not try to fix this error to prevent endless looping
-                        return Err(TunnelError::Broken(e))
+                        return Err(TunnelError::Broken(e));
                     }
                     Err(TunnelError::Incomplete) => {
                         // TODO implement a counter for failed Extend calls

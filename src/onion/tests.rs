@@ -47,22 +47,22 @@ async fn build_tunnel_n_peers(n: usize) -> Result<Tunnel> {
 
 #[tokio::test]
 async fn test_handshake_single_peer() -> Result<()> {
-    let mut tunnel = build_tunnel_n_peers(1).await?;
-    assert_eq!(tunnel.len().await, 1);
+    let tunnel = build_tunnel_n_peers(1).await?;
+    assert_eq!(tunnel.len(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn test_handshake_two_peers() -> Result<()> {
-    let mut tunnel = build_tunnel_n_peers(2).await?;
-    assert_eq!(tunnel.len().await, 2);
+    let tunnel = build_tunnel_n_peers(2).await?;
+    assert_eq!(tunnel.len(), 2);
     Ok(())
 }
 
 #[tokio::test]
 async fn test_handshake_three_peers() -> Result<()> {
-    let mut tunnel = build_tunnel_n_peers(3).await?;
-    assert_eq!(tunnel.len().await, 3);
+    let tunnel = build_tunnel_n_peers(3).await?;
+    assert_eq!(tunnel.len(), 3);
     Ok(())
 }
 
@@ -76,12 +76,12 @@ async fn test_truncate_zero_peers() -> Result<()> {
     }
     match tunnel.truncate(0, &rng).await {
         Err(TunnelError::Incomplete) => {
-            assert_eq!(tunnel.len().await, 2);
+            assert_eq!(tunnel.len(), 2);
             Ok(())
         }
-        _ => {
-            Err(anyhow!("Expected truncate to fail since it tries to truncate a non-existing tail"))
-        }
+        _ => Err(anyhow!(
+            "Expected truncate to fail since it tries to truncate a non-existing tail"
+        )),
     }
 }
 
@@ -94,7 +94,7 @@ async fn test_truncate_one_peer() -> Result<()> {
         tunnel.extend(&peers[i], &rng).await?;
     }
     tunnel.truncate(1, &rng).await?;
-    assert_eq!(tunnel.len().await, 1);
+    assert_eq!(tunnel.len(), 1);
     Ok(())
 }
 
@@ -106,8 +106,8 @@ async fn test_truncate_two_peers() -> Result<()> {
     for i in 1..3 {
         tunnel.extend(&peers[i], &rng).await?;
     }
-    assert_eq!(tunnel.len().await, 3);
+    assert_eq!(tunnel.len(), 3);
     tunnel.truncate(2, &rng).await?;
-    assert_eq!(tunnel.len().await, 1);
+    assert_eq!(tunnel.len(), 1);
     Ok(())
 }

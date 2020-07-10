@@ -16,11 +16,6 @@ use tokio::stream;
 use tokio::stream::Stream;
 use tokio::sync::Mutex;
 
-// used by onion/protocol.rs
-#[macro_use]
-extern crate enum_primitive_derive;
-extern crate num_traits;
-
 mod api;
 mod utils;
 

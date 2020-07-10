@@ -1,5 +1,8 @@
 use crate::onion::crypto::{self, SessionKey};
-use crate::onion::protocol::{CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelProtocolError, TunnelRequest, TunnelExtendedErrorCode, TunnelTruncatedErrorCode};
+use crate::onion::protocol::{
+    CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelExtendedError,
+    TunnelProtocolError, TunnelRequest, TunnelTruncatedError,
+};
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::{Result, RsaPrivateKey};
 use anyhow::anyhow;
@@ -147,6 +150,7 @@ impl CircuitHandler {
                         */
                         Err(anyhow!("Unsupported packet: {:?}", actual))
                     }
+                    Err(TunnelProtocolError::Peer(())) => unreachable!(),
                 }
             }
             Err(OnionSocketError::BrokenMessage) => {
@@ -185,7 +189,7 @@ impl CircuitHandler {
                         .reject_tunnel_handshake(
                             self.in_circuit.id,
                             &self.aes_keys,
-                            TunnelExtendedErrorCode::BranchingDetected,
+                            TunnelExtendedError::BranchingDetected,
                             &self.rng,
                         )
                         .await?;
@@ -225,7 +229,7 @@ impl CircuitHandler {
                         .reject_tunnel_truncate(
                             self.in_circuit.id,
                             &self.aes_keys,
-                            TunnelTruncatedErrorCode::NoNextHop,
+                            TunnelTruncatedError::NoNextHop,
                             &self.rng,
                         )
                         .await?;
@@ -238,11 +242,7 @@ impl CircuitHandler {
                     self.in_circuit
                         .socket()
                         .await
-                        .finalize_tunnel_truncate(
-                            self.in_circuit.id,
-                            &self.aes_keys,
-                            &self.rng,
-                        )
+                        .finalize_tunnel_truncate(self.in_circuit.id, &self.aes_keys, &self.rng)
                         .await?;
                     Ok(())
                 }
@@ -314,7 +314,8 @@ impl CircuitHandler {
 
     async fn teardown_in_circuit(&mut self) {
         // TODO make sure this is run in finite time
-        self.in_circuit
+        let _ = self
+            .in_circuit
             .socket()
             .await
             .teardown(self.in_circuit.id, &self.rng)
@@ -324,7 +325,7 @@ impl CircuitHandler {
     async fn teardown_out_circuit(&mut self) {
         // TODO make sure this is run in finite time
         if let Some(out_circuit) = &self.out_circuit {
-            out_circuit
+            let _ = out_circuit
                 .socket()
                 .await
                 .teardown(out_circuit.id, &self.rng)

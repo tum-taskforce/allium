@@ -8,8 +8,6 @@ use ring::rand::SecureRandom;
 use ring::{aead, digest, rand};
 use std::net::SocketAddr;
 use thiserror::Error;
-use num_traits::{FromPrimitive, ToPrimitive};
-use enum_primitive_derive::Primitive;
 
 const CIRCUIT_CREATE: u8 = 0x0;
 const CIRCUIT_CREATED: u8 = 0x1;
@@ -25,24 +23,7 @@ const TUNNEL_DATA: u8 = 0x30;
 
 const TUNNEL_EXTENDED: u8 = 0x20;
 const TUNNEL_TRUNCATED: u8 = 0x21;
-
-#[repr(u8)]
-#[derive(Primitive, Clone, Debug, PartialEq)]
-pub(crate) enum TunnelExtendedErrorCode {
-    /// The `EXTENDED` call is rejected, because there already is an outgoing circuit from the targeted
-    /// hop and tunnel branching is not allowed.
-    BranchingDetected = 0x01,
-    /// The `EXTENDED` call was unsuccessful since the new peer was unreachable.
-    PeerUnreachable = 0x02,
-}
-
-#[repr(u8)]
-#[derive(Primitive, Clone, Debug, PartialEq)]
-pub(crate) enum TunnelTruncatedErrorCode {
-    /// The `TRUNCATED` call is rejected, because there is no outgoing circuit from the targeted hop
-    /// that could be truncated.
-    NoNextHop = 0x01,
-}
+const TUNNEL_ERROR: u8 = 0x2f;
 
 /// Length in bytes of the digest included in relay messages.
 /// Must not be greater than `digest::SHA256_OUTPUT_LEN` (= 32)
@@ -63,14 +44,16 @@ pub(crate) enum CircuitProtocolError {
 pub(crate) type CircuitProtocolResult<T> = std::result::Result<T, CircuitProtocolError>;
 
 #[derive(Error, Debug)]
-pub(crate) enum TunnelProtocolError {
+pub(crate) enum TunnelProtocolError<E: std::fmt::Debug> {
+    #[error("Peer responded with an error code")]
+    Peer(E),
     #[error("Unknown tunnel message id: {actual}")]
     Unknown { actual: u8 },
     #[error("Computed hash did not match the message hash")]
     Digest,
 }
 
-pub(crate) type TunnelProtocolResult<T> = std::result::Result<T, TunnelProtocolError>;
+pub(crate) type TunnelProtocolResult<T, E> = std::result::Result<T, TunnelProtocolError<E>>;
 
 pub(crate) type Key = EphemeralPublicKey;
 
@@ -187,18 +170,41 @@ pub(crate) enum TunnelRequest {
     Data(TunnelId, /* data */ Bytes),
 }
 
-pub(crate) enum TunnelResponseExtended<K> {
-    Success( /* peer_key */ K),
-    Error(TunnelExtendedErrorCode),
+const ERR_BRANCHING: u8 = 0x01;
+const ERR_UNREACHABLE: u8 = 0x02;
+
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum TunnelExtendedError {
+    /// The `EXTENDED` call is rejected, because there already is an outgoing circuit from the targeted
+    /// hop and tunnel branching is not allowed.
+    BranchingDetected = ERR_BRANCHING,
+    /// The `EXTENDED` call was unsuccessful since the new peer was unreachable.
+    PeerUnreachable = ERR_UNREACHABLE,
+    Unknown,
 }
 
-pub(crate) enum TunnelResponseTruncated {
-    Success,
-    Error(TunnelTruncatedErrorCode)
+pub(crate) struct TunnelResponseExtended<K> {
+    pub(crate) peer_key: K,
 }
 
-pub(crate) trait TryFromBytesExt: TryFromBytes<TunnelProtocolError> {
-    fn read_with_digest_from(buf: &mut BytesMut) -> TunnelProtocolResult<Self>
+const ERR_NO_NEXT_HOP: u8 = 0x01;
+
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum TunnelTruncatedError {
+    /// The `TRUNCATED` call is rejected, because there is no outgoing circuit from the targeted hop
+    /// that could be truncated.
+    NoNextHop = ERR_NO_NEXT_HOP,
+    Unknown,
+}
+
+pub(crate) struct TunnelResponseTruncated;
+
+pub(crate) trait TryFromBytesExt<E: std::fmt::Debug>:
+    TryFromBytes<TunnelProtocolError<E>>
+{
+    fn read_with_digest_from(buf: &mut BytesMut) -> TunnelProtocolResult<Self, E>
     where
         Self: Sized,
     {
@@ -212,7 +218,7 @@ pub(crate) trait TryFromBytesExt: TryFromBytes<TunnelProtocolError> {
     }
 }
 
-impl<T> TryFromBytesExt for T where T: TryFromBytes<TunnelProtocolError> {}
+impl<T, E: std::fmt::Debug> TryFromBytesExt<E> for T where T: TryFromBytes<TunnelProtocolError<E>> {}
 
 pub(crate) trait ToBytesExt: ToBytes {
     fn write_with_digest_to(&self, buf: &mut BytesMut, rng: &rand::SystemRandom, pad_size: usize) {
@@ -434,7 +440,7 @@ impl ToBytes for CircuitTeardown {
 
 /* == TunnelRequest == */
 
-impl FromBytes for TunnelProtocolResult<TunnelRequest> {
+impl FromBytes for TunnelProtocolResult<TunnelRequest, ()> {
     fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u8();
@@ -448,9 +454,7 @@ impl FromBytes for TunnelProtocolResult<TunnelRequest> {
                 let key = Key::new(key_bytes);
                 Ok(TunnelRequest::Extend(dest, key))
             }
-            TUNNEL_TRUNCATE => {
-                Ok(TunnelRequest::Truncate)
-            }
+            TUNNEL_TRUNCATE => Ok(TunnelRequest::Truncate),
             TUNNEL_BEGIN => {
                 buf.get_u8();
                 let tunnel_id = buf.get_u32();
@@ -539,25 +543,25 @@ impl ToBytes for TunnelRequest {
 
 /* == TunnelResponseExtended == */
 
-impl FromBytes for TunnelProtocolResult<TunnelResponseExtended<VerifyKey>> {
+impl FromBytes for TunnelProtocolResult<TunnelResponseExtended<VerifyKey>, TunnelExtendedError> {
     fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u8();
         match message_type {
             TUNNEL_EXTENDED => {
+                let peer_key = VerifyKey::read_from(buf);
+                Ok(TunnelResponseExtended { peer_key })
+            }
+            TUNNEL_ERROR => {
                 let error_code = buf.get_u8();
-                if error_code == 0x00 { // TODO maybe not hardcoded
-                    let peer_key = VerifyKey::read_from(buf);
-                    Ok(TunnelResponseExtended::Success(peer_key))
-                } else {
-                    if let Some(error_code) = TunnelExtendedErrorCode::from_u8(error_code) {
-                        Ok(TunnelResponseExtended::Error(error_code))
-                    } else {
-                        // TODO this is also not ideal
-                        Err(TunnelProtocolError::Unknown {
-                            actual: message_type
-                        })
-                    }
+                match error_code {
+                    ERR_BRANCHING => Err(TunnelProtocolError::Peer(
+                        TunnelExtendedError::BranchingDetected,
+                    )),
+                    ERR_UNREACHABLE => Err(TunnelProtocolError::Peer(
+                        TunnelExtendedError::PeerUnreachable,
+                    )),
+                    _ => Err(TunnelProtocolError::Peer(TunnelExtendedError::Unknown)),
                 }
             }
             _ => Err(TunnelProtocolError::Unknown {
@@ -569,56 +573,45 @@ impl FromBytes for TunnelProtocolResult<TunnelResponseExtended<VerifyKey>> {
 
 impl<K: ToBytes> ToBytes for TunnelResponseExtended<K> {
     fn size(&self) -> usize {
-        match self {
-            TunnelResponseExtended::Success(peer_key) => {
-                // size (2), type (1), error_code (1), peer_key
-                2 + 1 + 1 + peer_key.size()
-            }
-            TunnelResponseExtended::Error(_) => {
-                // size (2), type (1), error_code (1)
-                2 + 1 + 1
-            }
-        }
+        // size (2), type (1), peer_key
+        2 + 1 + self.peer_key.size()
     }
 
     fn write_to(&self, buf: &mut BytesMut) {
-        match self {
-            TunnelResponseExtended::Success(peer_key) => {
-                buf.put_u16(self.size() as u16);
-                buf.put_u8(TUNNEL_EXTENDED);
-                buf.put_u8(0x00); // TODO maybe not hardcoded
-                peer_key.write_to(buf);
-            }
-            TunnelResponseExtended::Error(error_code) => {
-                buf.put_u16(self.size() as u16);
-                buf.put_u8(TUNNEL_EXTENDED);
-                // This unwrap must never fail
-                buf.put_u8(error_code.to_u8().unwrap());
-            }
-        }
+        buf.put_u16(self.size() as u16);
+        buf.put_u8(TUNNEL_EXTENDED);
+        self.peer_key.write_to(buf);
+    }
+}
+
+impl ToBytes for TunnelExtendedError {
+    fn size(&self) -> usize {
+        // size (2), type (1), error code (1)
+        2 + 1 + 1
+    }
+
+    fn write_to(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.size() as u16);
+        buf.put_u8(TUNNEL_ERROR);
+        buf.put_u8(*self as u8);
     }
 }
 
 /* == TunnelResponseTruncated == */
 
-impl FromBytes for TunnelProtocolResult<TunnelResponseTruncated> {
+impl FromBytes for TunnelProtocolResult<TunnelResponseTruncated, TunnelTruncatedError> {
     fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u8();
         match message_type {
-            TUNNEL_TRUNCATED => {
+            TUNNEL_TRUNCATED => Ok(TunnelResponseTruncated),
+            TUNNEL_ERROR => {
                 let error_code = buf.get_u8();
-                if error_code == 0x00 { // TODO maybe not hardcoded
-                    Ok(TunnelResponseTruncated::Success)
-                } else {
-                    if let Some(error_code) = TunnelTruncatedErrorCode::from_u8(error_code) {
-                        Ok(TunnelResponseTruncated::Error(error_code))
-                    } else {
-                        // TODO this is also not ideal
-                        Err(TunnelProtocolError::Unknown {
-                            actual: message_type
-                        })
+                match error_code {
+                    ERR_NO_NEXT_HOP => {
+                        Err(TunnelProtocolError::Peer(TunnelTruncatedError::NoNextHop))
                     }
+                    _ => Err(TunnelProtocolError::Peer(TunnelTruncatedError::Unknown)),
                 }
             }
             _ => Err(TunnelProtocolError::Unknown {
@@ -630,32 +623,26 @@ impl FromBytes for TunnelProtocolResult<TunnelResponseTruncated> {
 
 impl ToBytes for TunnelResponseTruncated {
     fn size(&self) -> usize {
-        match self {
-            TunnelResponseTruncated::Success => {
-                // size (2), type (1), error_code (1)
-                2 + 1 + 1
-            }
-            TunnelResponseTruncated::Error(_) => {
-                // size (2), type (1), error_code (1)
-                2 + 1 + 1
-            }
-        }
+        // size (2), type (1)
+        2 + 1
     }
 
     fn write_to(&self, buf: &mut BytesMut) {
-        match self {
-            TunnelResponseTruncated::Success => {
-                buf.put_u16(self.size() as u16);
-                buf.put_u8(TUNNEL_TRUNCATED);
-                buf.put_u8(0x00); // TODO maybe not hardcoded
-            }
-            TunnelResponseTruncated::Error(error_code) => {
-                buf.put_u16(self.size() as u16);
-                buf.put_u8(TUNNEL_TRUNCATED);
-                // This unwrap must never fail
-                buf.put_u8(error_code.to_u8().unwrap());
-            }
-        }
+        buf.put_u16(self.size() as u16);
+        buf.put_u8(TUNNEL_TRUNCATED);
+    }
+}
+
+impl ToBytes for TunnelTruncatedError {
+    fn size(&self) -> usize {
+        // size (2), type (1), error code (1)
+        2 + 1 + 1
+    }
+
+    fn write_to(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.size() as u16);
+        buf.put_u8(TUNNEL_ERROR);
+        buf.put_u8(*self as u8);
     }
 }
 
@@ -815,7 +802,7 @@ mod tests {
 
         let aes_keys = generate_aes_keys(&rng)?;
 
-        let tunnel_msg = TunnelResponseExtended::Success(key);
+        let tunnel_msg = TunnelResponseExtended { peer_key: key };
         let circuit_id = 0;
         let msg = CircuitOpaque {
             circuit_id,
@@ -834,28 +821,20 @@ mod tests {
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(aes_keys.iter().rev())?;
-        let read_tunnel_msg = TunnelResponseExtended::read_with_digest_from(&mut read_msg.payload.bytes)?;
-        match read_tunnel_msg {
-            TunnelResponseExtended::Success(key2) => {
-                let key2 = key2.verify(&rsa_public)?;
-                let key2_bytes: &[u8] = &key2.bytes().as_ref();
-                assert_eq!(&key_bytes.as_ref(), &key2_bytes);
-            }
-            TunnelResponseExtended::Error(error_code) => {
-                Err(anyhow!("Expected EXTENDED Success, received Error {:?}", error_code))?;
-            }
-        }
+        let read_tunnel_msg =
+            TunnelResponseExtended::read_with_digest_from(&mut read_msg.payload.bytes)?;
+        let key2 = read_tunnel_msg.peer_key.verify(&rsa_public)?;
+        let key2_bytes: &[u8] = &key2.bytes().as_ref();
+        assert_eq!(&key_bytes.as_ref(), &key2_bytes);
         Ok(())
     }
 
     #[test]
     fn test_tunnel_extended_error() -> Result<()> {
         let rng = rand::SystemRandom::new();
-
         let aes_keys = generate_aes_keys(&rng)?;
 
-        let error_code = TunnelExtendedErrorCode::PeerUnreachable;
-        let tunnel_msg = TunnelResponseExtended::<VerifyKey>::Error(error_code.clone());
+        let tunnel_msg = TunnelExtendedError::PeerUnreachable;
         let circuit_id = 0;
         let msg = CircuitOpaque {
             circuit_id,
@@ -874,15 +853,14 @@ mod tests {
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(aes_keys.iter().rev())?;
-        let read_tunnel_msg = TunnelResponseExtended::<VerifyKey>::read_with_digest_from(&mut read_msg.payload.bytes)?;
-        match read_tunnel_msg {
-            TunnelResponseExtended::Error(error_code2) => {
-                assert_eq!(error_code, error_code2)
-            }
-            TunnelResponseExtended::Success(_) => {
-                Err(anyhow!("Expected EXTENDED Error, received Success"))?;
-            }
-        }
+        let read_tunnel_msg =
+            TunnelResponseExtended::read_with_digest_from(&mut read_msg.payload.bytes);
+        assert!(matches!(
+            read_tunnel_msg,
+            Err(TunnelProtocolError::Peer(
+                TunnelExtendedError::PeerUnreachable
+            ))
+        ));
         Ok(())
     }
 
@@ -892,7 +870,7 @@ mod tests {
 
         let aes_keys = generate_aes_keys(&rng)?;
 
-        let tunnel_msg = TunnelResponseTruncated::Success;
+        let tunnel_msg = TunnelResponseTruncated;
         let circuit_id = 0;
         let msg = CircuitOpaque {
             circuit_id,
@@ -911,13 +889,7 @@ mod tests {
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(aes_keys.iter().rev())?;
-        let read_tunnel_msg = TunnelResponseTruncated::read_with_digest_from(&mut read_msg.payload.bytes)?;
-        match read_tunnel_msg {
-            TunnelResponseTruncated::Success => { }
-            TunnelResponseTruncated::Error(error_code) => {
-                Err(anyhow!("Expected TRUNCATED Success, received Error {:?}", error_code))?;
-            }
-        }
+        TunnelResponseTruncated::read_with_digest_from(&mut read_msg.payload.bytes)?;
         Ok(())
     }
 
@@ -927,8 +899,7 @@ mod tests {
 
         let aes_keys = generate_aes_keys(&rng)?;
 
-        let error_code = TunnelTruncatedErrorCode::NoNextHop;
-        let tunnel_msg = TunnelResponseTruncated::Error(error_code.clone());
+        let tunnel_msg = TunnelTruncatedError::NoNextHop;
         let circuit_id = 0;
         let msg = CircuitOpaque {
             circuit_id,
@@ -947,15 +918,12 @@ mod tests {
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(aes_keys.iter().rev())?;
-        let read_tunnel_msg = TunnelResponseTruncated::read_with_digest_from(&mut read_msg.payload.bytes)?;
-        match read_tunnel_msg {
-            TunnelResponseTruncated::Error(error_code2) => {
-                assert_eq!(error_code, error_code2)
-            }
-            TunnelResponseTruncated::Success => {
-                Err(anyhow!("Expected TRUNCATED Error, received Success"))?;
-            }
-        }
+        let read_tunnel_msg =
+            TunnelResponseTruncated::read_with_digest_from(&mut read_msg.payload.bytes);
+        assert!(matches!(
+            read_tunnel_msg,
+            Err(TunnelProtocolError::Peer(TunnelTruncatedError::NoNextHop))
+        ));
         Ok(())
     }
 
