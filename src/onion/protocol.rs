@@ -762,7 +762,6 @@ mod tests {
 
         let aes_keys = generate_aes_keys(&rng)?;
 
-        let tunnel_id = 123;
         let dest = "127.0.0.1:4201".parse().unwrap();
         let tunnel_msg = TunnelRequest::Extend(dest, key);
         let circuit_id = 0;
@@ -794,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tunnel_extended() -> Result<()> {
+    fn test_tunnel_extended_success() -> Result<()> {
         let rng = rand::SystemRandom::new();
         let key = EphemeralPrivateKey::generate(&rng).public_key();
         let key_bytes = key.bytes().clone();
@@ -804,9 +803,7 @@ mod tests {
 
         let aes_keys = generate_aes_keys(&rng)?;
 
-        let tunnel_id = 123;
-        let error_code = TUNNEL_EXTENDED_ERROR_NONE;
-        let tunnel_msg = TunnelResponse::Extended(tunnel_id, error_code, key);
+        let tunnel_msg = TunnelResponseExtended::Success(key);
         let circuit_id = 0;
         let msg = CircuitOpaque {
             circuit_id,
@@ -825,11 +822,9 @@ mod tests {
 
         assert_eq!(circuit_id, read_msg.circuit_id);
         read_msg.decrypt(aes_keys.iter().rev())?;
-        let read_tunnel_msg = TunnelResponse::read_with_digest_from(&mut read_msg.payload.bytes)?;
+        let read_tunnel_msg = TunnelResponseExtended::read_with_digest_from(&mut read_msg.payload.bytes)?;
         match read_tunnel_msg {
-            TunnelResponse::Extended(tunnel_id2, error_code2, key2) => {
-                assert_eq!(tunnel_id, tunnel_id2);
-                assert_eq!(error_code, error_code2);
+            TunnelResponseExtended::Success(key2) => {
                 let key2 = key2.verify(&rsa_public)?;
                 let key2_bytes: &[u8] = &key2.bytes().as_ref();
                 assert_eq!(&key_bytes.as_ref(), &key2_bytes);
