@@ -118,7 +118,6 @@ impl Tunnel {
         } else {
             // key derivation failed, the final hop needs to be truncated
             // if the truncate fails too, the tunnel is broken
-            // TODO do not remove a key
             self.truncate(0, rng).map_err(|_| TunnelError::Broken);
             Err(TunnelError::Incomplete)
         }
@@ -173,7 +172,9 @@ impl Tunnel {
             .truncate_tunnel(self.out_circuit.id, &self.aes_keys[n..], rng)
             .await?;
 
-        &self.aes_keys.remove(0);
+        for _ in 0..n {
+            &self.aes_keys.remove(0);
+        }
         Ok(())
     }
 

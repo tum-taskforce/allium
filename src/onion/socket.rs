@@ -40,6 +40,8 @@ pub(crate) enum OnionSocketError {
     // TODO argument: message
     #[error("received broken message that cannot be parsed and violates protocol")]
     BrokenMessage,
+    /// Indicates that the remote peer returned a tunnel request with an error code
+    #[error("tunnel request returned error")]
     Peer,
 }
 
@@ -54,7 +56,7 @@ impl From<CircuitProtocolError> for OnionSocketError {
     }
 }
 
-impl<E> From<TunnelProtocolError<E>> for OnionSocketError {
+impl<E: std::fmt::Debug> From<TunnelProtocolError<E>> for OnionSocketError {
     fn from(e: TunnelProtocolError<E>) -> Self {
         match e {
             TunnelProtocolError::Peer(_) => OnionSocketError::Peer,
