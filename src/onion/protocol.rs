@@ -448,6 +448,19 @@ impl FromBytes for TunnelProtocolResult<TunnelRequest> {
                 let key = Key::new(key_bytes);
                 Ok(TunnelRequest::Extend(dest, key))
             }
+            TUNNEL_TRUNCATE => {
+                Ok(TunnelRequest::Truncate)
+            }
+            TUNNEL_BEGIN => {
+                buf.get_u8();
+                let tunnel_id = buf.get_u32();
+                Ok(TunnelRequest::Begin(tunnel_id))
+            }
+            TUNNEL_END => {
+                buf.get_u8();
+                let tunnel_id = buf.get_u32();
+                Ok(TunnelRequest::End(tunnel_id))
+            }
             TUNNEL_DATA => {
                 buf.get_u8();
                 let tunnel_id = buf.get_u32();
@@ -469,8 +482,8 @@ impl ToBytes for TunnelRequest {
                 2 + 1 + 1 + dest.ip().size() + 2 + key.bytes().len()
             }
             TunnelRequest::Truncate => {
-                // size (2), type (1), padding (1)
-                2 + 1 + 1
+                // size (2), type (1)
+                2 + 1
             }
             TunnelRequest::Begin(_) => {
                 // size (2), type (1), padding (1), tunnel_id (4)
@@ -500,7 +513,6 @@ impl ToBytes for TunnelRequest {
             TunnelRequest::Truncate => {
                 buf.put_u16(self.size() as u16);
                 buf.put_u8(TUNNEL_TRUNCATE);
-                buf.put_u8(0);
             }
             TunnelRequest::Begin(tunnel_id) => {
                 buf.put_u16(self.size() as u16);

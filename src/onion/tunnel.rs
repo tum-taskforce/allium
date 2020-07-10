@@ -25,17 +25,12 @@ pub(crate) enum TunnelError {
     /// that needs to be cleaned up. This may be triggered by an undecryptable `OPAQUE` message,
     /// or a `TEARDOWN` message from the first hop.
     #[error("Tunnel operation caused the tunnel to break")]
-    Broken,
+    Broken(Option<OnionSocketError>),
 }
 
 impl From<OnionSocketError> for TunnelError {
     fn from(e: OnionSocketError) -> Self {
-        match e {
-            OnionSocketError::StreamTerminated(_) => { TunnelError::Broken },
-            OnionSocketError::StreamTimeout(_) => { TunnelError::Broken },
-            OnionSocketError::TeardownMessage => { TunnelError::Broken },
-            OnionSocketError::BrokenMessage => { TunnelError::Broken },
-        }
+        TunnelError::Broken(Some(e))
     }
 }
 
@@ -73,6 +68,12 @@ impl Tunnel {
             .context("Could not verify peer public key")?;
         let secret = SessionKey::from_key_exchange(private_key, &peer_key)?;
         Ok(secret)
+    }
+
+    /// Returns the length of a tunnel. The result of this function may be used with caution if the
+    /// tunnel is in a broken state.
+    pub(crate) async fn len(&self) -> usize {
+        self.aes_keys.len()
     }
 
     /// Performs a key exchange with the given peer and extends the tunnel with a new hop
@@ -230,8 +231,9 @@ impl Tunnel {
     ) -> TunnelResult<()> {
         while self.aes_keys.len() >= length {
             match self.truncate(1, rng).await {
-                Err(TunnelError::Broken) => {
-                    return Err(TunnelError::Broken)
+                Err(TunnelError::Broken(e)) => {
+                    // do not try to fix this error to prevent endless looping
+                    return Err(TunnelError::Broken(e))
                 }
                 Err(TunnelError::Incomplete) => {
                     // TODO implement a counter for failed Truncate calls
@@ -243,9 +245,9 @@ impl Tunnel {
         while self.aes_keys.len() < length {
             if let Some(peer) = peer_provider.next().await {
                 match self.extend(&peer, &rng).await {
-                    Err(TunnelError::Broken) => {
+                    Err(TunnelError::Broken(e)) => {
                         // do not try to fix this error to prevent endless looping
-                        return Err(TunnelError::Broken)
+                        return Err(TunnelError::Broken(e))
                     }
                     Err(TunnelError::Incomplete) => {
                         // TODO implement a counter for failed Extend calls

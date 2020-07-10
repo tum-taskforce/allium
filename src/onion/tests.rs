@@ -1,6 +1,6 @@
 use crate::onion::circuit::CircuitHandler;
 use crate::onion::crypto::{self, RsaPrivateKey};
-use crate::onion::tunnel::Tunnel;
+use crate::onion::tunnel::{Tunnel, TunnelError};
 use crate::*;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -35,30 +35,79 @@ async fn spawn_n_peers(n: usize) -> Vec<Peer> {
     peers
 }
 
-async fn build_tunnel_n_peers(n: usize) -> Result<()> {
+async fn build_tunnel_n_peers(n: usize) -> Result<Tunnel> {
     let rng = rand::SystemRandom::new();
     let peers = spawn_n_peers(n).await;
     let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
     for i in 1..n {
         tunnel.extend(&peers[i], &rng).await?;
     }
-    Ok(())
+    Ok(tunnel)
 }
 
 #[tokio::test]
 async fn test_handshake_single_peer() -> Result<()> {
-    build_tunnel_n_peers(1).await?;
+    let mut tunnel = build_tunnel_n_peers(1).await?;
+    assert_eq!(tunnel.len().await, 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn test_handshake_two_peers() -> Result<()> {
-    build_tunnel_n_peers(2).await?;
+    let mut tunnel = build_tunnel_n_peers(2).await?;
+    assert_eq!(tunnel.len().await, 2);
     Ok(())
 }
 
 #[tokio::test]
 async fn test_handshake_three_peers() -> Result<()> {
-    build_tunnel_n_peers(3).await?;
+    let mut tunnel = build_tunnel_n_peers(3).await?;
+    assert_eq!(tunnel.len().await, 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_truncate_zero_peers() -> Result<()> {
+    let rng = rand::SystemRandom::new();
+    let peers = spawn_n_peers(2).await;
+    let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
+    for i in 1..2 {
+        tunnel.extend(&peers[i], &rng).await?;
+    }
+    match tunnel.truncate(0, &rng).await {
+        Err(TunnelError::Incomplete) => {
+            assert_eq!(tunnel.len().await, 2);
+            Ok(())
+        }
+        _ => {
+            Err(anyhow!("Expected truncate to fail since it tries to truncate a non-existing tail"))
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_truncate_one_peer() -> Result<()> {
+    let rng = rand::SystemRandom::new();
+    let peers = spawn_n_peers(2).await;
+    let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
+    for i in 1..2 {
+        tunnel.extend(&peers[i], &rng).await?;
+    }
+    tunnel.truncate(1, &rng).await?;
+    assert_eq!(tunnel.len().await, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_truncate_two_peers() -> Result<()> {
+    let rng = rand::SystemRandom::new();
+    let peers = spawn_n_peers(3).await;
+    let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
+    for i in 1..3 {
+        tunnel.extend(&peers[i], &rng).await?;
+    }
+    assert_eq!(tunnel.len().await, 3);
+    tunnel.truncate(2, &rng).await?;
+    assert_eq!(tunnel.len().await, 1);
     Ok(())
 }
