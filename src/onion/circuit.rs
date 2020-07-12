@@ -100,30 +100,6 @@ impl CircuitHandler {
         })
     }
 
-    fn is_default(&self) -> bool {
-        match &self.state {
-            State::Default => true,
-            _ => false,
-        }
-    }
-
-    fn is_router(&self) -> bool {
-        match &self.state {
-            State::Router { out_circuit } => true,
-            _ => false,
-        }
-    }
-
-    fn is_endpoint(&self) -> bool {
-        match &self.state {
-            State::Endpoint {
-                tunnel_id,
-                requests,
-            } => true,
-            _ => false,
-        }
-    }
-
     pub(crate) async fn handle(&mut self) -> Result<()> {
         // main accept loop
         loop {
@@ -135,17 +111,7 @@ impl CircuitHandler {
                     tokio::select! {
                         msg = self.in_circuit.accept_opaque() => self.handle_in_circuit(msg).await?,
                         _ = &mut delay => {
-                            /* Depending on the implementation of next_message, the timeout may also be
-                               triggered if only a partial message has been collected so far from any of the
-                               sockets when the timeout triggers.
-                               Potentially, this case could be changed to improve robustness, since any
-                               unhandled TCP packet loss may cause this to happen.
-                               TCP can trigger a request for any dropped TCP packets, so a switch to UDP
-                               could cause problems here, if the incoming onion packets are highly fractured
-                               into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
-                             */
-                            warn!("Timeout triggered, terminating CircuitHandler");
-                            self.teardown_all().await;
+                            self.handle_timeout().await;
                             break;
                         },
                     }
@@ -155,17 +121,7 @@ impl CircuitHandler {
                         msg = self.in_circuit.accept_opaque() => self.handle_in_circuit(msg).await?,
                         msg = out_circuit.accept_opaque() => self.handle_out_circuit(msg).await?,
                         _ = &mut delay => {
-                            /* Depending on the implementation of next_message, the timeout may also be
-                               triggered if only a partial message has been collected so far from any of the
-                               sockets when the timeout triggers.
-                               Potentially, this case could be changed to improve robustness, since any
-                               unhandled TCP packet loss may cause this to happen.
-                               TCP can trigger a request for any dropped TCP packets, so a switch to UDP
-                               could cause problems here, if the incoming onion packets are highly fractured
-                               into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
-                             */
-                            warn!("Timeout triggered, terminating CircuitHandler");
-                            self.teardown_all().await;
+                            self.handle_timeout().await;
                             break;
                         },
                     }
@@ -176,19 +132,9 @@ impl CircuitHandler {
                 } => {
                     tokio::select! {
                         msg = self.in_circuit.accept_opaque() => self.handle_in_circuit(msg).await?,
-                        req = requests.recv() => {},
+                        Some(req) = requests.recv() => self.handle_request(req).await?,
                         _ = &mut delay => {
-                            /* Depending on the implementation of next_message, the timeout may also be
-                               triggered if only a partial message has been collected so far from any of the
-                               sockets when the timeout triggers.
-                               Potentially, this case could be changed to improve robustness, since any
-                               unhandled TCP packet loss may cause this to happen.
-                               TCP can trigger a request for any dropped TCP packets, so a switch to UDP
-                               could cause problems here, if the incoming onion packets are highly fractured
-                               into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
-                             */
-                            warn!("Timeout triggered, terminating CircuitHandler");
-                            self.teardown_all().await;
+                            self.handle_timeout().await;
                             break;
                         },
                     }
@@ -342,7 +288,7 @@ impl CircuitHandler {
             }
             (TunnelRequest::Begin(tunnel_id), State::Default) => {
                 let (tx, rx) = mpsc::unbounded_channel();
-                //self.tunnel_tx.send((tunnel_id, tx));
+                //self.tunnel_tx.send((tunnel_id, tx)); FIXME
 
                 State::Endpoint {
                     tunnel_id,
@@ -403,6 +349,35 @@ impl CircuitHandler {
                 panic!(e)
             }
         }
+    }
+
+    async fn handle_request(&mut self, req: Request) -> Result<()> {
+        match req {
+            Request::Data { tunnel_id, data } => {
+                let circuit_id = self.in_circuit.id;
+                self.in_circuit
+                    .socket()
+                    .await
+                    .send_data(circuit_id, tunnel_id, data, &self.session_key, &self.rng)
+                    .await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_timeout(&mut self) {
+        /* Depending on the implementation of next_message, the timeout may also be
+          triggered if only a partial message has been collected so far from any of the
+          sockets when the timeout triggers.
+          Potentially, this case could be changed to improve robustness, since any
+          unhandled TCP packet loss may cause this to happen.
+          TCP can trigger a request for any dropped TCP packets, so a switch to UDP
+          could cause problems here, if the incoming onion packets are highly fractured
+          into multiple UDP packets. The tunnel would fail if any UDP packet gets lost.
+        */
+        warn!("Timeout triggered, terminating CircuitHandler");
+        self.teardown_all().await;
     }
 
     async fn teardown_all(&mut self) {
