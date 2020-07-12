@@ -2,7 +2,7 @@ use crate::onion::crypto::SessionKey;
 use crate::onion::protocol::*;
 use crate::utils::{ToBytes, TryFromBytes};
 use crate::{CircuitId, Result, TunnelId};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use ring::rand;
 use std::net::SocketAddr;
 use thiserror::Error;
@@ -313,6 +313,20 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         self.buf.clear();
         let tunnel_res = TunnelRequest::Begin(tunnel_id);
         self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
+            .await
+    }
+
+    pub(crate) async fn send_data(
+        &mut self,
+        circuit_id: CircuitId,
+        tunnel_id: TunnelId,
+        data: Bytes,
+        session_keys: &[SessionKey],
+        rng: &rand::SystemRandom,
+    ) -> SocketResult<()> {
+        self.buf.clear();
+        let tunnel_req = TunnelRequest::Data(tunnel_id, data);
+        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_req)
             .await
     }
 }

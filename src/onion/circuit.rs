@@ -4,7 +4,8 @@ use crate::onion::protocol::{
     TunnelProtocolError, TunnelRequest, TunnelTruncatedError,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::{Event, Result, RsaPrivateKey, Request};
+use crate::onion::tunnel::TunnelId;
+use crate::{Event, Request, Result, RsaPrivateKey};
 use anyhow::anyhow;
 use anyhow::Context;
 use log::trace;
@@ -12,10 +13,9 @@ use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex, MutexGuard, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex, MutexGuard};
 use tokio::time;
 use tokio::time::Duration;
-use crate::onion::tunnel::TunnelId;
 
 pub(crate) type CircuitId = u16;
 
@@ -36,6 +36,10 @@ impl Circuit {
         self.socket.lock().await
     }
 
+    pub(crate) async fn accept_opaque(&self) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
+        self.socket().await.accept_opaque().await
+    }
+
     pub(crate) fn random_id(rng: &rand::SystemRandom) -> CircuitId {
         // FIXME an attacker may fill up all ids
         let mut id_buf = [0u8; 2];
@@ -50,10 +54,10 @@ pub(crate) struct CircuitHandler {
     events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
     tunnel_tx: oneshot::Sender<(TunnelId, mpsc::UnboundedSender<Request>)>,
-    state: CircuitHandlerState,
+    state: State,
 }
 
-pub(crate) enum CircuitHandlerState {
+pub(crate) enum State {
     Default,
     Router {
         out_circuit: Circuit,
@@ -92,13 +96,30 @@ impl CircuitHandler {
             events,
             rng,
             tunnel_tx,
-            state: CircuitHandlerState::Default,
+            state: State::Default,
         })
     }
 
     fn is_default(&self) -> bool {
-        match self.state {
-            CircuitHandlerState::Default => true,
+        match &self.state {
+            State::Default => true,
+            _ => false,
+        }
+    }
+
+    fn is_router(&self) -> bool {
+        match &self.state {
+            State::Router { out_circuit } => true,
+            _ => false,
+        }
+    }
+
+    fn is_endpoint(&self) -> bool {
+        match &self.state {
+            State::Endpoint {
+                tunnel_id,
+                requests,
+            } => true,
             _ => false,
         }
     }
@@ -109,10 +130,10 @@ impl CircuitHandler {
             // TODO needs proper timeout definition
             let mut delay = time::delay_for(Duration::from_secs(10));
 
-            match self.state {
-                CircuitHandlerState::Default => {
+            match &mut self.state {
+                State::Default => {
                     tokio::select! {
-                        msg = self.accept_in_circuit() => self.handle_in_circuit(msg).await?,
+                        msg = self.in_circuit.accept_opaque() => self.handle_in_circuit(msg).await?,
                         _ = &mut delay => {
                             /* Depending on the implementation of next_message, the timeout may also be
                                triggered if only a partial message has been collected so far from any of the
@@ -129,10 +150,10 @@ impl CircuitHandler {
                         },
                     }
                 }
-                CircuitHandlerState::Router { out_circuit } => {
+                State::Router { out_circuit } => {
                     tokio::select! {
-                        msg = self.accept_in_circuit() => self.handle_in_circuit(msg).await?,
-                        msg = self.accept_out_circuit() => self.handle_out_circuit(msg).await?,
+                        msg = self.in_circuit.accept_opaque() => self.handle_in_circuit(msg).await?,
+                        msg = out_circuit.accept_opaque() => self.handle_out_circuit(msg).await?,
                         _ = &mut delay => {
                             /* Depending on the implementation of next_message, the timeout may also be
                                triggered if only a partial message has been collected so far from any of the
@@ -149,9 +170,12 @@ impl CircuitHandler {
                         },
                     }
                 }
-                CircuitHandlerState::Endpoint { tunnel_id, requests } => {
+                State::Endpoint {
+                    tunnel_id,
+                    requests,
+                } => {
                     tokio::select! {
-                        msg = self.accept_in_circuit() => self.handle_in_circuit(msg).await?,
+                        msg = self.in_circuit.accept_opaque() => self.handle_in_circuit(msg).await?,
                         req = requests.recv() => {},
                         _ = &mut delay => {
                             /* Depending on the implementation of next_message, the timeout may also be
@@ -194,7 +218,7 @@ impl CircuitHandler {
                     }
                     Err(TunnelProtocolError::Digest) => {
                         // message not directed to us, forward to relay_socket
-                        if let Some(out_circuit) = &self.out_circuit {
+                        if let State::Router { out_circuit } = &self.state {
                             out_circuit
                                 .socket()
                                 .await
@@ -243,93 +267,99 @@ impl CircuitHandler {
     }
 
     async fn handle_tunnel_message(&mut self, tunnel_msg: TunnelRequest) -> Result<()> {
-        match tunnel_msg {
-            TunnelRequest::Extend(dest, key) => {
-                if !self.is_default() {
-                    /* reply to socket with EXTENDED
-                       this is required to prevent any deadlocks and errors in the tunnel
-                       since Alice in the tunnel waits for a EXTENDED packet
-                    */
-                    self.in_circuit
-                        .socket()
-                        .await
-                        .reject_tunnel_handshake(
-                            self.in_circuit.id,
-                            &self.session_key,
-                            TunnelExtendedError::BranchingDetected,
-                            &self.rng,
-                        )
-                        .await?;
-                    Ok(())
-                } else {
-                    /* TODO handle connect failure
-                       any error in here should never cause the entire loop to fail and we
-                       should always respond with EXTENDED (same reason as before)
-                       It may be preferable to capsulise this into another function
-                    */
-                    let mut relay_socket = OnionSocket::new(TcpStream::connect(dest).await?);
-                    let peer_key = relay_socket
-                        .initiate_handshake(self.in_circuit.id, key, &self.rng)
-                        .await?;
+        let mut state = State::Default;
+        std::mem::swap(&mut self.state, &mut state);
+        self.state = match (tunnel_msg, state) {
+            (TunnelRequest::Extend(dest, key), State::Default) => {
+                /* TODO handle connect failure
+                   any error in here should never cause the entire loop to fail and we
+                   should always respond with EXTENDED (same reason as before)
+                   It may be preferable to capsulise this into another function
+                */
+                let mut relay_socket = OnionSocket::new(TcpStream::connect(dest).await?);
+                let peer_key = relay_socket
+                    .initiate_handshake(self.in_circuit.id, key, &self.rng)
+                    .await?;
 
-                    let out_circuit = Circuit::new(Circuit::random_id(&self.rng), relay_socket);
-                    self.state = CircuitHandlerState::Router { out_circuit };
+                let out_circuit = Circuit::new(Circuit::random_id(&self.rng), relay_socket);
 
-                    self.in_circuit
-                        .socket()
-                        .await
-                        .finalize_tunnel_handshake(
-                            self.in_circuit.id,
-                            peer_key,
-                            &self.session_key,
-                            &self.rng,
-                        )
-                        .await?;
-                    Ok(())
-                }
+                self.in_circuit
+                    .socket()
+                    .await
+                    .finalize_tunnel_handshake(
+                        self.in_circuit.id,
+                        peer_key,
+                        &self.session_key,
+                        &self.rng,
+                    )
+                    .await?;
+
+                State::Router { out_circuit }
             }
-            TunnelRequest::Truncate => {
-                if self.out_circuit.is_none() {
-                    self.in_circuit
-                        .socket()
-                        .await
-                        .reject_tunnel_truncate(
-                            self.in_circuit.id,
-                            &self.session_key,
-                            TunnelTruncatedError::NoNextHop,
-                            &self.rng,
-                        )
-                        .await?;
-                    Ok(())
-                } else {
-                    // Teardown out circuit
-                    self.teardown_out_circuit().await;
-                    self.out_circuit = None;
+            (TunnelRequest::Extend(_, _), state) => {
+                /* reply to socket with EXTENDED
+                   this is required to prevent any deadlocks and errors in the tunnel
+                   since Alice in the tunnel waits for a EXTENDED packet
+                */
+                self.in_circuit
+                    .socket()
+                    .await
+                    .reject_tunnel_handshake(
+                        self.in_circuit.id,
+                        &self.session_key,
+                        TunnelExtendedError::BranchingDetected,
+                        &self.rng,
+                    )
+                    .await?;
 
-                    self.in_circuit
-                        .socket()
-                        .await
-                        .finalize_tunnel_truncate(self.in_circuit.id, &self.session_key, &self.rng)
-                        .await?;
-                    Ok(())
-                }
+                state
             }
-            TunnelRequest::Begin(tunnel_id) => {
-                if !self.is_default() {
-                    // TODO fail here
-                }
+            (TunnelRequest::Truncate, State::Router { out_circuit }) => {
+                // Teardown out circuit
+                self.teardown_out_circuit().await;
 
-                self.tunnel_id = Some(tunnel_id);
+                self.in_circuit
+                    .socket()
+                    .await
+                    .finalize_tunnel_truncate(self.in_circuit.id, &self.session_key, &self.rng)
+                    .await?;
+
+                State::Default
+            }
+            (TunnelRequest::Truncate, state) => {
+                self.in_circuit
+                    .socket()
+                    .await
+                    .reject_tunnel_truncate(
+                        self.in_circuit.id,
+                        &self.session_key,
+                        TunnelTruncatedError::NoNextHop,
+                        &self.rng,
+                    )
+                    .await?;
+
+                state
+            }
+            (TunnelRequest::Begin(tunnel_id), State::Default) => {
                 let (tx, rx) = mpsc::unbounded_channel();
-                self.tunnel_tx.send((tunnel_id, tx));
-                self.state = CircuitHandlerState::Endpoint { tunnel_id, requests: rx };
-                Ok(())
-            },
-            TunnelRequest::End(tunnel_id) => todo!(),
-            TunnelRequest::Data(tunnel_id, data) => {
-                Ok(self.events.send(Event::Data { tunnel_id, data }).await?)
+                //self.tunnel_tx.send((tunnel_id, tx));
+
+                State::Endpoint {
+                    tunnel_id,
+                    requests: rx,
+                }
             }
-        }
+            (TunnelRequest::Begin(_), state) => {
+                // TODO fail here
+                state
+            }
+            (TunnelRequest::End(tunnel_id), state) => state,
+            (TunnelRequest::Data(tunnel_id, data), state) => {
+                self.events.send(Event::Data { tunnel_id, data }).await?;
+                state
+            }
+        };
+        Ok(())
     }
 
     async fn handle_out_circuit(
@@ -375,17 +405,6 @@ impl CircuitHandler {
         }
     }
 
-    async fn accept_in_circuit(&self) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
-        self.in_circuit.socket().await.accept_opaque().await
-    }
-
-    async fn accept_out_circuit(&self) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
-        match &self.out_circuit {
-            Some(c) => c.socket().await.accept_opaque().await,
-            None => futures::future::pending().await,
-        }
-    }
-
     async fn teardown_all(&mut self) {
         self.teardown_in_circuit().await;
         self.teardown_out_circuit().await;
@@ -403,7 +422,7 @@ impl CircuitHandler {
 
     async fn teardown_out_circuit(&mut self) {
         // TODO make sure this is run in finite time
-        if let Some(out_circuit) = &self.out_circuit {
+        if let State::Router { out_circuit } = &self.state {
             let _ = out_circuit
                 .socket()
                 .await
