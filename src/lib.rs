@@ -48,7 +48,14 @@ enum Request {
 
 #[derive(Debug)]
 pub enum Event {
-    Data { tunnel_id: TunnelId, data: Bytes },
+    Incoming {
+        tunnel_id: TunnelId,
+        requests: mpsc::UnboundedSender<Request>,
+    },
+    Data {
+        tunnel_id: TunnelId,
+        data: Bytes,
+    },
 }
 
 #[derive(Clone)]
@@ -230,25 +237,29 @@ impl OnionListener {
         while let Some(stream) = incoming.next().await {
             let socket = OnionSocket::new(stream?);
             let hostkey = self.hostkey.clone();
-            let events = self.events.clone();
-            let (tunnel_tx, tunnel_rx) = oneshot::channel();
+            let (events_tx, mut events_rx) = mpsc::channel(100);
             tokio::spawn(async move {
-                let mut handler =
-                    match CircuitHandler::init(socket, &hostkey, events, tunnel_tx).await {
-                        Ok(handler) => handler,
-                        Err(e) => {
-                            warn!("{}", e);
-                            return;
-                        }
-                    };
+                let mut handler = match CircuitHandler::init(socket, &hostkey, events_tx).await {
+                    Ok(handler) => handler,
+                    Err(e) => {
+                        warn!("{}", e);
+                        return;
+                    }
+                };
 
                 if let Err(e) = handler.handle().await {
                     warn!("{}", e);
                 }
             });
 
-            let (tunnel_id, req_tx) = tunnel_rx.await?;
-            self.tunnels.lock().await.insert(tunnel_id, req_tx);
+            // FIXME don't block here
+            if let Some(Event::Incoming {
+                tunnel_id,
+                requests,
+            }) = events_rx.recv().await
+            {
+                self.tunnels.lock().await.insert(tunnel_id, requests);
+            }
         }
 
         Ok(())

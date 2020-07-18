@@ -53,7 +53,6 @@ pub(crate) struct CircuitHandler {
     session_key: [SessionKey; 1],
     events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
-    tunnel_tx: oneshot::Sender<(TunnelId, mpsc::UnboundedSender<Request>)>,
     state: State,
 }
 
@@ -73,7 +72,6 @@ impl CircuitHandler {
         mut socket: OnionSocket<TcpStream>,
         host_key: &RsaPrivateKey,
         events: mpsc::Sender<Event>,
-        tunnel_tx: oneshot::Sender<(TunnelId, mpsc::UnboundedSender<Request>)>,
     ) -> Result<Self> {
         trace!("Accepting handshake from {:?}", socket.peer_addr());
         let (circuit_id, peer_key) = socket
@@ -95,7 +93,6 @@ impl CircuitHandler {
             session_key: [secret],
             events,
             rng,
-            tunnel_tx,
             state: State::Default,
         })
     }
@@ -288,7 +285,12 @@ impl CircuitHandler {
             }
             (TunnelRequest::Begin(tunnel_id), State::Default) => {
                 let (tx, rx) = mpsc::unbounded_channel();
-                //self.tunnel_tx.send((tunnel_id, tx)); FIXME
+                self.events
+                    .send(Event::Incoming {
+                        tunnel_id,
+                        requests: tx,
+                    })
+                    .await?;
 
                 State::Endpoint {
                     tunnel_id,
