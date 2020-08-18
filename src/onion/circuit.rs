@@ -5,15 +5,16 @@ use crate::onion::protocol::{
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::onion::tunnel::TunnelId;
-use crate::{Event, Request, Result, RsaPrivateKey};
+use crate::{Request, Result, RsaPrivateKey};
 use anyhow::anyhow;
 use anyhow::Context;
+use bytes::Bytes;
 use log::trace;
 use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex, MutexGuard};
+use tokio::sync::{mpsc, Mutex, MutexGuard};
 use tokio::time;
 use tokio::time::Duration;
 
@@ -64,6 +65,17 @@ pub(crate) enum State {
     Endpoint {
         tunnel_id: TunnelId,
         requests: mpsc::UnboundedReceiver<Request>,
+    },
+}
+
+pub(crate) enum Event {
+    Incoming {
+        tunnel_id: TunnelId,
+        requests: mpsc::UnboundedSender<Request>,
+    },
+    Data {
+        tunnel_id: TunnelId,
+        data: Bytes,
     },
 }
 
@@ -285,12 +297,13 @@ impl CircuitHandler {
             }
             (TunnelRequest::Begin(tunnel_id), State::Default) => {
                 let (tx, rx) = mpsc::unbounded_channel();
-                self.events
+                let _ = self
+                    .events
                     .send(Event::Incoming {
                         tunnel_id,
                         requests: tx,
                     })
-                    .await?;
+                    .await;
 
                 State::Endpoint {
                     tunnel_id,
@@ -303,7 +316,7 @@ impl CircuitHandler {
             }
             (TunnelRequest::End(tunnel_id), state) => state,
             (TunnelRequest::Data(tunnel_id, data), state) => {
-                self.events.send(Event::Data { tunnel_id, data }).await?;
+                let _ = self.events.send(Event::Data { tunnel_id, data }).await;
                 state
             }
         };

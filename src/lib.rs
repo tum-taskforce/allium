@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
-use crate::onion::circuit::{CircuitHandler, CircuitId};
+use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::socket::OnionSocket;
 use crate::onion::tunnel::{Tunnel, TunnelHandler, TunnelId};
 use anyhow::anyhow;
@@ -10,7 +10,7 @@ use log::{info, warn};
 use ring::rand;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::Stream;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -48,14 +48,8 @@ enum Request {
 
 #[derive(Debug)]
 pub enum Event {
-    Incoming {
-        tunnel_id: TunnelId,
-        requests: mpsc::UnboundedSender<Request>,
-    },
-    Data {
-        tunnel_id: TunnelId,
-        data: Bytes,
-    },
+    Incoming { tunnel_id: TunnelId },
+    Data { tunnel_id: TunnelId, data: Bytes },
 }
 
 #[derive(Clone)]
@@ -88,7 +82,7 @@ impl Onion {
         tokio::spawn({
             let events = evt_tx.clone();
             let tunnels = tunnels.clone();
-            let listener = OnionListener::new(hostkey, events, tunnels);
+            let mut listener = OnionListener::new(hostkey, events, tunnels);
             async move { listener.listen(listen_addr).await }
         });
 
@@ -227,41 +221,54 @@ impl OnionListener {
         }
     }
 
-    async fn listen(&self, addr: SocketAddr) -> Result<()> {
+    async fn listen(&mut self, addr: SocketAddr) -> Result<()> {
         let mut listener = TcpListener::bind(addr).await?;
         info!(
             "Listening for P2P connections on {:?}",
             listener.local_addr()
         );
         let mut incoming = listener.incoming();
-        while let Some(stream) = incoming.next().await {
-            let socket = OnionSocket::new(stream?);
-            let hostkey = self.hostkey.clone();
-            let (events_tx, mut events_rx) = mpsc::channel(100);
-            tokio::spawn(async move {
-                let mut handler = match CircuitHandler::init(socket, &hostkey, events_tx).await {
-                    Ok(handler) => handler,
-                    Err(e) => {
-                        warn!("{}", e);
-                        return;
-                    }
-                };
+        let (events_tx, mut events_rx) = mpsc::channel(100);
 
-                if let Err(e) = handler.handle().await {
-                    warn!("{}", e);
-                }
-            });
-
-            // FIXME don't block here
-            if let Some(Event::Incoming {
-                tunnel_id,
-                requests,
-            }) = events_rx.recv().await
-            {
-                self.tunnels.lock().await.insert(tunnel_id, requests);
+        loop {
+            tokio::select! {
+                Some(stream) = incoming.next() => self.handle_connection(stream?, events_tx.clone()).await,
+                Some(event) = events_rx.recv() => self.handle_event(event).await,
+                else => break,
             }
         }
-
         Ok(())
+    }
+
+    async fn handle_connection(&self, stream: TcpStream, events_tx: mpsc::Sender<circuit::Event>) {
+        let socket = OnionSocket::new(stream);
+        let hostkey = self.hostkey.clone();
+
+        tokio::spawn(async move {
+            let mut handler = match CircuitHandler::init(socket, &hostkey, events_tx).await {
+                Ok(handler) => handler,
+                Err(e) => {
+                    warn!("{}", e);
+                    return;
+                }
+            };
+
+            if let Err(e) = handler.handle().await {
+                warn!("{}", e);
+            }
+        });
+    }
+
+    async fn handle_event(&mut self, event: circuit::Event) {
+        match event {
+            circuit::Event::Incoming {
+                tunnel_id,
+                requests,
+            } => {
+                self.tunnels.lock().await.insert(tunnel_id, requests);
+                self.events.send(Event::Incoming { tunnel_id }).await;
+            }
+            _ => unimplemented!(),
+        }
     }
 }

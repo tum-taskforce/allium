@@ -92,6 +92,7 @@ impl OnionModule {
                         conn.write(res).await?;
                     }
                 }
+                _ => unimplemented!(),
             }
         }
         Ok(())
