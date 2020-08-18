@@ -115,7 +115,7 @@ async fn test_truncate_two_peers() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_incoming() -> Result<()> {
+async fn test_data_unidirectional() -> Result<()> {
     let (host_key, peer_key) = crypto::read_rsa_keypair("testkey.pem").unwrap();
     let peer_addr = (TEST_IP, TEST_PORT).into();
     let peer = Peer::new(peer_addr, peer_key);
@@ -133,31 +133,9 @@ async fn test_incoming() -> Result<()> {
 
     let tunnel_id = round_handler.handle_build(peer, 0).await?;
     assert_eq!(evt_rx.recv().await, Some(Event::Incoming { tunnel_id }));
-    Ok(())
-}
 
-#[tokio::test]
-async fn test_data() -> Result<()> {
-    let (host_key, peer_key) = crypto::read_rsa_keypair("testkey.pem").unwrap();
-    let peer_addr = (TEST_IP, TEST_PORT).into();
-    let peer = Peer::new(peer_addr, peer_key);
-
-    let (evt_tx, mut evt_rx) = mpsc::channel(100);
-    tokio::spawn({
-        let mut listener = OnionListener::new(host_key, evt_tx, Default::default());
-        let tcp_listener = TcpListener::bind(peer_addr).await?;
-        async move { listener.listen(tcp_listener).await }
-    });
-
-    let (_, req_rx) = mpsc::unbounded_channel();
-    let (evt_tx, _) = mpsc::channel(100);
-    let mut round_handler = RoundHandler::new(req_rx, evt_tx, stream::empty(), Default::default());
-
-    let tunnel_id = round_handler.handle_build(peer, 0).await?;
     let data = Bytes::from_static(b"test");
     round_handler.handle_data(tunnel_id, data.clone()).await;
-
-    assert_eq!(evt_rx.recv().await, Some(Event::Incoming { tunnel_id }));
     assert_eq!(evt_rx.recv().await, Some(Event::Data { tunnel_id, data }));
     Ok(())
 }
