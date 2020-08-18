@@ -46,7 +46,7 @@ enum Request {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Event {
     Incoming { tunnel_id: TunnelId },
     Data { tunnel_id: TunnelId, data: Bytes },
@@ -234,7 +234,7 @@ impl OnionListener {
     }
 
     async fn listen_addr(&mut self, addr: SocketAddr) -> Result<()> {
-        let mut listener = TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind(addr).await?;
         self.listen(listener).await
     }
 
@@ -284,7 +284,11 @@ impl OnionListener {
                 self.tunnels.lock().await.insert(tunnel_id, requests);
                 self.events.send(Event::Incoming { tunnel_id }).await;
             }
-            _ => unimplemented!(),
+            circuit::Event::Data { tunnel_id, data } => {
+                if self.tunnels.lock().await.contains_key(&tunnel_id) {
+                    self.events.send(Event::Data { tunnel_id, data }).await;
+                }
+            }
         }
     }
 }
