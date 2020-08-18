@@ -4,8 +4,8 @@ use crate::onion::protocol::{
     TunnelProtocolError, TunnelRequest, TunnelTruncatedError,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::onion::tunnel::TunnelId;
-use crate::{Request, Result, RsaPrivateKey};
+use crate::onion::tunnel::{self, TunnelId};
+use crate::{Result, RsaPrivateKey};
 use anyhow::anyhow;
 use anyhow::Context;
 use bytes::Bytes;
@@ -64,14 +64,14 @@ pub(crate) enum State {
     },
     Endpoint {
         tunnel_id: TunnelId,
-        requests: mpsc::UnboundedReceiver<Request>,
+        requests: mpsc::UnboundedReceiver<tunnel::Request>,
     },
 }
 
 pub(crate) enum Event {
     Incoming {
         tunnel_id: TunnelId,
-        requests: mpsc::UnboundedSender<Request>,
+        requests: mpsc::UnboundedSender<tunnel::Request>,
     },
     Data {
         tunnel_id: TunnelId,
@@ -139,9 +139,10 @@ impl CircuitHandler {
                     tunnel_id,
                     requests,
                 } => {
+                    let tunnel_id = *tunnel_id;
                     tokio::select! {
                         msg = self.in_circuit.accept_opaque() => self.handle_in_circuit(msg).await?,
-                        Some(req) = requests.recv() => self.handle_request(req).await?,
+                        Some(req) = requests.recv() => self.handle_request(tunnel_id, req).await?,
                         _ = &mut delay => {
                             self.handle_timeout().await;
                             break;
@@ -366,9 +367,9 @@ impl CircuitHandler {
         }
     }
 
-    async fn handle_request(&mut self, req: Request) -> Result<()> {
+    async fn handle_request(&mut self, tunnel_id: TunnelId, req: tunnel::Request) -> Result<()> {
         match req {
-            Request::Data { tunnel_id, data } => {
+            tunnel::Request::Data { data } => {
                 let circuit_id = self.in_circuit.id;
                 self.in_circuit
                     .socket()
@@ -376,7 +377,6 @@ impl CircuitHandler {
                     .send_data(circuit_id, tunnel_id, data, &self.session_key, &self.rng)
                     .await?;
             }
-            _ => {}
         }
         Ok(())
     }

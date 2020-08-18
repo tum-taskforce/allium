@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel::{Tunnel, TunnelHandler, TunnelId};
+use crate::onion::tunnel::{self, Tunnel, TunnelHandler, TunnelId};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -126,7 +126,7 @@ struct RoundHandler<P> {
     events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
     peer_provider: P,
-    tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<Request>>>>,
+    tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
 }
 
 impl<P> RoundHandler<P>
@@ -137,7 +137,7 @@ where
         requests: mpsc::UnboundedReceiver<Request>,
         events: mpsc::Sender<Event>,
         peer_provider: P,
-        tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<Request>>>>,
+        tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
     ) -> Self {
         let rng = rand::SystemRandom::new();
         RoundHandler {
@@ -201,7 +201,7 @@ where
     }
 
     pub(crate) async fn handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) {
-        let req = Request::Data { tunnel_id, data };
+        let req = tunnel::Request::Data { data };
         // TODO handle errors
         let _ = self.tunnels.lock().await.get(&tunnel_id).unwrap().send(req);
     }
@@ -217,14 +217,14 @@ where
 struct OnionListener {
     hostkey: Arc<RsaPrivateKey>,
     events: mpsc::Sender<Event>,
-    tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<Request>>>>,
+    tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
 }
 
 impl OnionListener {
     fn new(
         hostkey: RsaPrivateKey,
         events: mpsc::Sender<Event>,
-        tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<Request>>>>,
+        tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
     ) -> Self {
         OnionListener {
             hostkey: Arc::new(hostkey),

@@ -139,3 +139,61 @@ async fn test_data_unidirectional() -> Result<()> {
     assert_eq!(evt_rx.recv().await, Some(Event::Data { tunnel_id, data }));
     Ok(())
 }
+
+#[tokio::test]
+async fn test_data_bidirectional() -> Result<()> {
+    let (host_key, peer_key) = crypto::read_rsa_keypair("testkey.pem").unwrap();
+    let peer_addr = (TEST_IP, TEST_PORT).into();
+    let peer = Peer::new(peer_addr, peer_key);
+
+    let data_ping = Bytes::from_static(b"ping");
+    let data_pong = Bytes::from_static(b"pong");
+
+    let (evt_tx, mut evt_rx) = mpsc::channel(100);
+    let tunnels = Arc::new(Mutex::new(HashMap::new()));
+    tokio::spawn({
+        let mut listener = OnionListener::new(host_key, evt_tx, tunnels.clone());
+        let tcp_listener = TcpListener::bind(peer_addr).await?;
+        async move { listener.listen(tcp_listener).await }
+    });
+
+    tokio::spawn({
+        let data_ping = data_ping.clone();
+        let data_pong = data_pong.clone();
+
+        async move {
+            while let Some(evt) = evt_rx.recv().await {
+                println!("{:?}", &evt);
+                match evt {
+                    Event::Data { tunnel_id, data } => {
+                        assert_eq!(&data[..], &data_ping[..]);
+                        tunnels
+                            .lock()
+                            .await
+                            .get(&tunnel_id)
+                            .unwrap()
+                            .send(tunnel::Request::Data {
+                                data: data_pong.clone(),
+                            });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let (_, req_rx) = mpsc::unbounded_channel();
+    let (evt_tx, mut evt_rx) = mpsc::channel(100);
+    let mut round_handler = RoundHandler::new(req_rx, evt_tx, stream::empty(), Default::default());
+
+    let tunnel_id = round_handler.handle_build(peer, 0).await?;
+    round_handler.handle_data(tunnel_id, data_ping).await;
+    assert_eq!(
+        evt_rx.recv().await,
+        Some(Event::Data {
+            tunnel_id,
+            data: data_pong
+        })
+    );
+    Ok(())
+}

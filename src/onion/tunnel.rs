@@ -4,9 +4,10 @@ use crate::onion::protocol::{
     CircuitOpaque, CircuitOpaqueBytes, TryFromBytesExt, TunnelRequest, VerifyKey,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
+use crate::Result;
 use crate::{Event, Peer};
-use crate::{Request, Result};
 use anyhow::Context;
+use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use log::trace;
 use ring::rand;
@@ -40,6 +41,10 @@ impl From<OnionSocketError> for TunnelError {
 }
 
 pub(crate) type TunnelResult<T> = std::result::Result<T, TunnelError>;
+
+pub(crate) enum Request {
+    Data { data: Bytes },
+}
 
 pub(crate) struct Tunnel {
     pub(crate) id: TunnelId,
@@ -306,8 +311,9 @@ impl TunnelHandler {
 
     async fn handle_request(&mut self, req: Request) -> Result<()> {
         match req {
-            Request::Data { tunnel_id, data } => {
+            Request::Data { data } => {
                 let circuit_id = self.tunnel.out_circuit.id;
+                let tunnel_id = self.tunnel.id;
                 self.tunnel
                     .out_circuit
                     .socket()
@@ -321,7 +327,6 @@ impl TunnelHandler {
                     )
                     .await?;
             }
-            _ => {}
         }
         Ok(())
     }
