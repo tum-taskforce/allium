@@ -83,7 +83,7 @@ impl Onion {
             let events = evt_tx.clone();
             let tunnels = tunnels.clone();
             let mut listener = OnionListener::new(hostkey, events, tunnels);
-            async move { listener.listen(listen_addr).await }
+            async move { listener.listen_addr(listen_addr).await }
         });
 
         let onion = Onion { requests: req_tx };
@@ -163,9 +163,7 @@ where
                     res.send(self.handle_build(dest, n_hops).await).unwrap();
                 }
                 Request::Data { tunnel_id, data } => {
-                    let req = Request::Data { tunnel_id, data };
-                    // TODO handle errors
-                    let _ = self.tunnels.lock().await.get(&tunnel_id).unwrap().send(req);
+                    self.handle_data(tunnel_id, data).await;
                 }
             }
         }
@@ -173,15 +171,23 @@ where
 
     /// Builds a new tunnel to `dest` over `n_hops` additional peers.
     /// Performs a handshake with each hop and then spawns a task for handling incoming messages.
-    async fn handle_build(&mut self, dest: Peer, n_hops: usize) -> Result<TunnelId> {
+    pub(crate) async fn handle_build(&mut self, dest: Peer, n_hops: usize) -> Result<TunnelId> {
         let tunnel_id = Tunnel::random_id(&self.rng);
-        let peer = self.random_peer().await?;
-        let mut tunnel = Tunnel::init(tunnel_id, &peer, &self.rng).await?;
-        for _ in 1..n_hops {
+
+        let mut tunnel = if n_hops > 0 {
             let peer = self.random_peer().await?;
-            tunnel.extend(&peer, &self.rng).await?;
-        }
-        tunnel.extend(&dest, &self.rng).await?;
+            let mut tunnel = Tunnel::init(tunnel_id, &peer, &self.rng).await?;
+            for _ in 1..n_hops {
+                let peer = self.random_peer().await?;
+                tunnel.extend(&peer, &self.rng).await?;
+            }
+            tunnel.extend(&dest, &self.rng).await?;
+            tunnel
+        } else {
+            Tunnel::init(tunnel_id, &dest, &self.rng).await?
+        };
+
+        tunnel.begin(&self.rng).await?; // TODO figure out right place (first data?)
 
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn({
@@ -192,6 +198,12 @@ where
         });
         self.tunnels.lock().await.insert(tunnel_id, tx);
         Ok(tunnel_id)
+    }
+
+    pub(crate) async fn handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) {
+        let req = Request::Data { tunnel_id, data };
+        // TODO handle errors
+        let _ = self.tunnels.lock().await.get(&tunnel_id).unwrap().send(req);
     }
 
     async fn random_peer(&mut self) -> Result<Peer> {
@@ -221,8 +233,12 @@ impl OnionListener {
         }
     }
 
-    async fn listen(&mut self, addr: SocketAddr) -> Result<()> {
+    async fn listen_addr(&mut self, addr: SocketAddr) -> Result<()> {
         let mut listener = TcpListener::bind(addr).await?;
+        self.listen(listener).await
+    }
+
+    async fn listen(&mut self, mut listener: TcpListener) -> Result<()> {
         info!(
             "Listening for P2P connections on {:?}",
             listener.local_addr()
