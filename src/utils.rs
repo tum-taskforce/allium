@@ -1,13 +1,13 @@
 use bytes::{Buf, BufMut, BytesMut};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-pub(crate) trait FromBytes {
+pub trait FromBytes {
     fn read_from(buf: &mut BytesMut) -> Self
     where
         Self: Sized;
 }
 
-pub(crate) trait TryFromBytes<E> {
+pub trait TryFromBytes<E> {
     fn try_read_from(buf: &mut BytesMut) -> std::result::Result<Self, E>
     where
         Self: Sized;
@@ -25,7 +25,7 @@ where
     }
 }
 
-pub(crate) trait ToBytes {
+pub trait ToBytes {
     fn size(&self) -> usize;
     fn write_to(&self, buf: &mut BytesMut);
 }
