@@ -6,15 +6,18 @@ use crate::onion::protocol::{
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::Result;
 use crate::{Event, Peer};
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use log::trace;
+use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+
+const MAX_PEER_FAILURES: usize = 10;
 
 pub type TunnelId = u32;
 
@@ -75,6 +78,28 @@ impl Tunnel {
             out_circuit: Circuit::new(circuit_id, socket),
             session_keys: vec![secret],
         })
+    }
+
+    pub(crate) async fn to_peer<P: Stream<Item = Peer> + Send + Sync + Unpin + 'static>(
+        final_peer: &Peer,
+        id: TunnelId,
+        n_hops: usize,
+        mut peer_provider: P,
+        rng: &rand::SystemRandom,
+    ) -> Result<Self> {
+        match n_hops {
+            0 => Tunnel::init(id, final_peer, &rng).await,
+            _ => {
+                for i in 0..MAX_PEER_FAILURES {
+                    let first_peer = peer_provider.next().await?;
+                    if let Ok(mut tunnel) = Tunnel::init(id, &first_peer, &rng).await {
+                        tunnel.extend_to_peer(n_hops + 1, peer_provider, final_peer, rng)?;
+                        return Ok(tunnel);
+                    }
+                }
+                Err(anyhow!("Could not reach any first hop"))
+            }
+        }
     }
 
     fn derive_secret(
@@ -174,11 +199,36 @@ impl Tunnel {
         Ok(())
     }
 
-    /// Tries to build this tunnel to hop count `n` and final hop `final_peer`.
+    pub(crate) async fn truncate_to_length(
+        &mut self,
+        n_hops: usize,
+        rng: &rand::SystemRandom,
+    ) -> TunnelResult<()> {
+        let mut num_fails = 0;
+
+        while self.session_keys.len() > n_hops + 1 {
+            match self.truncate(1, rng).await {
+                Err(TunnelError::Broken(e)) => {
+                    // do not try to fix this error to prevent endless looping
+                    return Err(TunnelError::Broken(e));
+                }
+                Err(TunnelError::Incomplete) => {
+                    num_fails += 1;
+                    if num_fails >= MAX_PEER_FAILURES {
+                        return Err(TunnelError::Incomplete);
+                    }
+                }
+                Ok(_) => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Tries to extend this tunnel to intermediate hop count `n_hops` and final hop `final_peer`.
     ///
     /// The peers provided by `peer_provider` will be used as a source for the intermediate hops,
-    /// the final hop at index `n-1` will be `final_peer`. If the tunnel already has a length of at
-    /// least `n`, the tunnel will be truncated to length `n-1` and then extended by `final_peer`.
+    /// the final hop at index `n` will be `final_peer`.
     ///
     /// This function does not check whether the peers provided by `peer_provider` are particularity
     /// secure. In order to preserve anonymity, there should never be two consecutive hops to the
@@ -188,25 +238,18 @@ impl Tunnel {
     ///
     /// Even if there is a high failure-rate among peers, the `peer_provider` should be able to
     /// generate a secure stream of peers.
-    pub(crate) async fn try_build<P: Stream<Item = Peer> + Send + Sync + Unpin + 'static>(
+    pub(crate) async fn extend_to_peer<P: Stream<Item = Peer> + Send + Sync + Unpin + 'static>(
         &mut self,
-        length: usize,
+        length: usize, // FIXME
         mut peer_provider: P,
         final_peer: &Peer,
         rng: &rand::SystemRandom,
     ) -> TunnelResult<()> {
-        while self.session_keys.len() >= length {
-            match self.truncate(1, rng).await {
-                Err(TunnelError::Broken(e)) => {
-                    // do not try to fix this error to prevent endless looping
-                    return Err(TunnelError::Broken(e));
-                }
-                Err(TunnelError::Incomplete) => {
-                    // TODO implement a counter for failed Truncate calls
-                }
-                Ok(_) => {}
-            }
+        if length < 1 {
+            return Err(TunnelError::Incomplete);
         }
+
+        let mut num_fails = 0;
 
         while self.session_keys.len() < length {
             if let Some(peer) = peer_provider.next().await {
@@ -216,7 +259,10 @@ impl Tunnel {
                         return Err(TunnelError::Broken(e));
                     }
                     Err(TunnelError::Incomplete) => {
-                        // TODO implement a counter for failed Extend calls
+                        num_fails += 1;
+                        if num_fails >= MAX_PEER_FAILURES {
+                            return Err(TunnelError::Incomplete);
+                        }
                     }
                     Ok(_) => {}
                 }
@@ -336,9 +382,27 @@ impl TunnelHandler {
 
                             tokio::spawn(async move {
                                 // build new tunnel to dest
+                                let new_tunnel = match Tunnel::to_peer(
+                                    todo!(),
+                                    todo!(),
+                                    todo!(),
+                                    todo!(),
+                                    &self.rng,
+                                )
+                                .await
+                                {
+                                    Ok(tunnel) => tunnel,
+                                    Err(e) => {
+                                        warn!("{}", e);
+                                        return;
+                                    }
+                                };
                                 // replace interims
+                                self.interim_tunnel.replace(new_tunnel);
                                 // deconstruct old_tunnel
-                            })
+                                // TODO
+                            });
+                            Ok(())
                         }
                         None => {
                             // send error
@@ -347,6 +411,7 @@ impl TunnelHandler {
                     }
                 } else {
                     // deconstruct both tunnel and interim tunnel
+                    // TODO
                     return Err(anyhow!("Tunnel was destroyed"));
                 }
             }
