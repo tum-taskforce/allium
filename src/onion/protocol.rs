@@ -20,6 +20,7 @@ const TUNNEL_BEGIN: u8 = 0x12;
 const TUNNEL_END: u8 = 0x13;
 
 const TUNNEL_DATA: u8 = 0x30;
+const TUNNEL_KEEPALIVE: u8 = 0x40;
 
 const TUNNEL_EXTENDED: u8 = 0x20;
 const TUNNEL_TRUNCATED: u8 = 0x21;
@@ -168,6 +169,7 @@ pub(crate) enum TunnelRequest {
     /// data
     /// ```
     Data(TunnelId, /* data */ Bytes),
+    KeepAlive,
 }
 
 const ERR_BRANCHING: u8 = 0x01;
@@ -471,6 +473,7 @@ impl FromBytes for TunnelProtocolResult<TunnelRequest, ()> {
                 let data = buf.split_to(size - 8).freeze();
                 Ok(TunnelRequest::Data(tunnel_id, data))
             }
+            TUNNEL_KEEPALIVE => Ok(TunnelRequest::KeepAlive),
             _ => Err(TunnelProtocolError::Unknown {
                 actual: message_type,
             }),
@@ -500,6 +503,10 @@ impl ToBytes for TunnelRequest {
             TunnelRequest::Data(_, data) => {
                 // size (2), type (1), padding (1), tunnel_id (4), data
                 2 + 1 + 1 + 4 + data.len()
+            }
+            TunnelRequest::KeepAlive => {
+                // size (2), type (1)
+                2 + 1
             }
         }
     }
@@ -536,6 +543,10 @@ impl ToBytes for TunnelRequest {
                 buf.put_u8(0);
                 buf.put_u32(*tunnel_id);
                 buf.put(data.as_ref());
+            }
+            TunnelRequest::KeepAlive => {
+                buf.put_u16(self.size() as u16);
+                buf.put_u8(TUNNEL_KEEPALIVE);
             }
         }
     }

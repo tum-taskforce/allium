@@ -10,6 +10,11 @@ use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::time::{timeout, Duration, Elapsed};
 
+/// timeout apllied during a read on the socket
+const TIMEOUT_READ: u64 = 5;
+/// timeout apllied during a write on the socket
+const TIMEOUT_WRITE: u64 = 2;
+
 #[derive(Error, Debug)]
 pub(crate) enum OnionSocketError {
     /// The stream of this `OnionSocket` has been terminated and is unavailable for communication.
@@ -86,7 +91,7 @@ impl<S> OnionSocket<S> {
 impl<S: AsyncRead + Unpin> OnionSocket<S> {
     async fn read_buf_from_stream(&mut self) -> SocketResult<usize> {
         Ok(timeout(
-            Duration::from_secs(5), // TODO don't hard code timeouts
+            Duration::from_secs(TIMEOUT_READ),
             self.stream.read_exact(&mut self.buf),
         )
         .await??)
@@ -133,7 +138,7 @@ impl<S: AsyncRead + Unpin> OnionSocket<S> {
 impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     async fn write_buf_to_stream(&mut self) -> SocketResult<()> {
         Ok(timeout(
-            Duration::from_secs(2), // TODO don't hard code timeouts
+            Duration::from_secs(TIMEOUT_WRITE),
             self.stream.write_all(self.buf.as_ref()),
         )
         .await??)
@@ -330,6 +335,18 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_req = TunnelRequest::Data(tunnel_id, data);
+        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_req)
+            .await
+    }
+
+    pub(crate) async fn send_keep_alive(
+        &mut self,
+        circuit_id: CircuitId,
+        session_keys: &[SessionKey],
+        rng: &rand::SystemRandom,
+    ) -> SocketResult<()> {
+        self.buf.clear();
+        let tunnel_req = TunnelRequest::KeepAlive;
         self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_req)
             .await
     }

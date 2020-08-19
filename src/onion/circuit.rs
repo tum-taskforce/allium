@@ -1,8 +1,5 @@
 use crate::onion::crypto::{self, EphemeralPublicKey, SessionKey};
-use crate::onion::protocol::{
-    CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelExtendedError,
-    TunnelProtocolError, TunnelRequest, TunnelTruncatedError,
-};
+use crate::onion::protocol::{CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelExtendedError, TunnelProtocolError, TunnelRequest, TunnelTruncatedError, VerifyKey};
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::onion::tunnel::{self, TunnelId};
 use crate::{Result, RsaPrivateKey};
@@ -267,7 +264,7 @@ impl CircuitHandler {
                    It may be preferable to capsulise this into another function
                 */
                 match self.handle_tunnel_message_extend(dest, key).await {
-                    Ok(out_circuit) => {
+                    Ok((out_circuit, peer_key)) => {
                         self.in_circuit
                             .socket()
                             .await
@@ -379,6 +376,10 @@ impl CircuitHandler {
             (TunnelRequest::Data(_, _), state) => {
                 return Err(anyhow!("Data request while not in Default state"));
             }
+            /*
+              KeepAlive messages are always valid and only cause a reset of the loop
+             */
+            (TunnelRequest::KeepAlive, state) => state,
         };
         Ok(())
     }
@@ -387,7 +388,7 @@ impl CircuitHandler {
         &mut self,
         dest: SocketAddr,
         key: EphemeralPublicKey,
-    ) -> std::result::Result<Circuit, TunnelExtendedError> {
+    ) -> std::result::Result<(Circuit, VerifyKey), TunnelExtendedError> {
         let stream = TcpStream::connect(dest)
             .await
             .map_err(|_| TunnelExtendedError::PeerUnreachable)?;
@@ -400,7 +401,7 @@ impl CircuitHandler {
 
         let out_circuit = Circuit::new(Circuit::random_id(&self.rng), relay_socket);
 
-        Ok(out_circuit)
+        Ok((out_circuit, peer_key))
     }
 
     /// Handles a message received on the outgoing circuit in the router state.
