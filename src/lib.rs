@@ -34,11 +34,12 @@ impl Peer {
     }
 }
 
+/// Handled by the RoundHandler
 enum Request {
     Build {
         dest: Peer,
         n_hops: usize,
-        res: oneshot::Sender<Result<TunnelId>>,
+        res: oneshot::Sender<Result<TunnelId>>, // FIXME remove
     },
     Data {
         tunnel_id: TunnelId,
@@ -46,12 +47,14 @@ enum Request {
     },
 }
 
+/// Events destined for the API
 #[derive(Debug, PartialEq)]
 pub enum Event {
     Incoming { tunnel_id: TunnelId },
     Data { tunnel_id: TunnelId, data: Bytes },
 }
 
+/// TODO general documentation
 #[derive(Clone)]
 pub struct Onion {
     requests: mpsc::UnboundedSender<Request>,
@@ -68,10 +71,14 @@ impl Onion {
     where
         P: Stream<Item = Peer> + Unpin + Send + Sync + 'static,
     {
+        // create request channel for interaction from the API to the round handler
         let (req_tx, req_rx) = mpsc::unbounded_channel();
+        // create event channel for propagating events back to the API
         let (evt_tx, evt_rx) = mpsc::channel(100);
+        // shared map of all tunnels (incoming and outgoing)
         let tunnels = Arc::new(Mutex::new(HashMap::new()));
 
+        // creates round handler task which receives requests on req_rx and sends events on evt_tx
         tokio::spawn({
             let events = evt_tx.clone();
             let tunnels = tunnels.clone();
@@ -79,6 +86,8 @@ impl Onion {
             async move { round_handler.next_round().await }
         });
 
+        // create task listening on p2p connections
+        // also sends events on evt_tx
         tokio::spawn({
             let events = evt_tx.clone();
             let tunnels = tunnels.clone();
@@ -127,6 +136,7 @@ struct RoundHandler<P> {
     rng: rand::SystemRandom,
     peer_provider: P,
     tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
+    // more info about outgoing tunnels
 }
 
 impl<P> RoundHandler<P>

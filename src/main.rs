@@ -48,6 +48,7 @@ impl OnionModule {
         Ok(())
     }
 
+    /// Translates API request to the corresponding methods on the onion handle.
     async fn handle_api(&self, stream: TcpStream, onion: Onion) -> Result<()> {
         trace!("Accepted API connection from: {:?}", stream.peer_addr());
         let (read_stream, write_stream) = stream.into_split();
@@ -79,6 +80,7 @@ impl OnionModule {
         Ok(())
     }
 
+    /// Handles P2P protocol events and notifies interested API clients
     async fn handle_events<E>(&self, mut events: E) -> Result<()>
     where
         E: Stream<Item = Event> + Unpin,
@@ -99,8 +101,11 @@ impl OnionModule {
     }
 }
 
+/// Command line arguments:
+/// * config file path (default: config.ini)
 #[tokio::main]
 async fn main() -> Result<()> {
+    // setup logging
     pretty_env_logger::init();
     info!(
         "{} version {}",
@@ -108,9 +113,11 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
+    // read config file
     let config_path = env::args().nth(1).unwrap_or("config.ini".to_string());
     let config = Config::from_file(config_path)?;
 
+    // connect to RPS (random peer sampling) module
     let rps = RpsModule::new(&config.rps)
         .await
         .context("Failed to connect to RPS module")?;
@@ -119,12 +126,16 @@ async fn main() -> Result<()> {
     let peer_provider = stream::empty();
 
     let onion_addr = SocketAddr::new(config.onion.p2p_hostname, config.onion.p2p_port);
+    // read hostkey (RSA private key)
     let hostkey =
         RsaPrivateKey::from_pem_file(&config.onion.hostkey).context("Could not read hostkey")?;
 
+    // initialize onion, start listening on p2p port
+    // events is a stream of events from the p2p protocol which should notify API clients
     let (onion, events) = Onion::new(onion_addr, hostkey, peer_provider)?;
-    let onion_module = Arc::new(OnionModule::new());
 
+    // initialize onion module listening on API connections
+    let onion_module = Arc::new(OnionModule::new());
     let api_listen_task = tokio::spawn({
         let api_handler = onion_module.clone();
         let api_addr = config.onion.api_address.clone();

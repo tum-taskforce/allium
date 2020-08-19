@@ -65,6 +65,10 @@ impl<E: std::fmt::Debug> From<TunnelProtocolError<E>> for OnionSocketError {
     }
 }
 
+/// Wraps an underlying network primitive (eg. TCP or TLS stream) and provides methods implementing the protocol.
+/// Utilizes an internal buffer for (de-)serialization.
+///
+/// The socket layer serves as glue between the onion protocol and higher layers.
 pub(crate) struct OnionSocket<S> {
     stream: S,
     buf: BytesMut,

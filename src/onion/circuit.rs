@@ -20,6 +20,8 @@ use tokio::time::Duration;
 
 pub(crate) type CircuitId = u16;
 
+/// A Circuit is a direct connection between two peers.
+/// The struct stores its unique ID and a socket.
 pub(crate) struct Circuit {
     pub(crate) id: CircuitId,
     pub(crate) socket: Mutex<OnionSocket<TcpStream>>,
@@ -41,6 +43,7 @@ impl Circuit {
         self.socket().await.accept_opaque().await
     }
 
+    /// Generates a random circuit ID which is assumed to be unique.
     pub(crate) fn random_id(rng: &rand::SystemRandom) -> CircuitId {
         // FIXME an attacker may fill up all ids
         let mut id_buf = [0u8; 2];
@@ -49,6 +52,13 @@ impl Circuit {
     }
 }
 
+/// A CircuitHandler is created for each incoming circuit connection (in_circuit), after negotiating a session key.
+/// It implements the circuit layer logic.
+/// The events channel is used to communicate with the layer above.
+/// It can be in one of three states:
+///   * Default: Final hop of a tunnel. Waiting to be either extended or designated as tunnel endpoint.
+///   * Router: Intermediate hop of a tunnel.
+///   * Endpoint: Destination and final hop of a tunnel.
 pub(crate) struct CircuitHandler {
     in_circuit: Circuit,
     session_key: [SessionKey; 1],
@@ -62,6 +72,7 @@ pub(crate) enum State {
     Router {
         out_circuit: Circuit,
     },
+    /// Stores the receiving end of a channel which is used by higher layers to control the tunnel.
     Endpoint {
         tunnel_id: TunnelId,
         requests: mpsc::UnboundedReceiver<tunnel::Request>,
@@ -69,6 +80,7 @@ pub(crate) enum State {
 }
 
 pub(crate) enum Event {
+    /// Sent when a Begin message is received
     Incoming {
         tunnel_id: TunnelId,
         requests: mpsc::UnboundedSender<tunnel::Request>,
@@ -80,6 +92,8 @@ pub(crate) enum Event {
 }
 
 impl CircuitHandler {
+    /// Performs the reacting part of a circuit handshake.
+    /// If successful a session key with the tunnel controller (tunnel-building peer) is agreed on.
     pub(crate) async fn init(
         mut socket: OnionSocket<TcpStream>,
         host_key: &RsaPrivateKey,
@@ -109,6 +123,7 @@ impl CircuitHandler {
         })
     }
 
+    /// Handles messages and requests depending on the current state in a loop.
     pub(crate) async fn handle(&mut self) -> Result<()> {
         // main accept loop
         loop {
@@ -154,6 +169,8 @@ impl CircuitHandler {
         Ok(())
     }
 
+    /// Performs protocol logic on the incoming circuit.
+    /// Checks if a message contains errors and checks whether a valid opaque circuit message is addressed to us.
     async fn handle_in_circuit(
         &mut self,
         msg: SocketResult<CircuitOpaque<CircuitOpaqueBytes>>,
@@ -215,13 +232,14 @@ impl CircuitHandler {
                 Ok(())
             }
             Err(e) => {
-                // Panicing stub
-                warn!("An unexpected error occured during handling of the in_socket");
+                // Panicking stub
+                warn!("An unexpected error occurred during handling of the in_socket");
                 panic!(e)
             }
         }
     }
 
+    /// Handles a valid TunnelRequest addressed to us.
     async fn handle_tunnel_message(&mut self, tunnel_msg: TunnelRequest) -> Result<()> {
         let mut state = State::Default;
         std::mem::swap(&mut self.state, &mut state);
@@ -317,6 +335,7 @@ impl CircuitHandler {
             }
             (TunnelRequest::End(tunnel_id), state) => state,
             (TunnelRequest::Data(tunnel_id, data), state) => {
+                // TODO check state
                 let _ = self.events.send(Event::Data { tunnel_id, data }).await;
                 state
             }
@@ -324,6 +343,8 @@ impl CircuitHandler {
         Ok(())
     }
 
+    /// Handles a message received on the outgoing circuit in the router state.
+    /// Forwards the message on the incoming circuit if valid.
     async fn handle_out_circuit(
         &mut self,
         msg: SocketResult<CircuitOpaque<CircuitOpaqueBytes>>,
@@ -367,6 +388,7 @@ impl CircuitHandler {
         }
     }
 
+    /// Handles a request from a higher layer in the endpoint state.
     async fn handle_request(&mut self, tunnel_id: TunnelId, req: tunnel::Request) -> Result<()> {
         match req {
             tunnel::Request::Data { data } => {

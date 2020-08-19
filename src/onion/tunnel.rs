@@ -46,6 +46,8 @@ pub(crate) enum Request {
     Data { data: Bytes },
 }
 
+/// Represents the tunnel controller view of a tunnel.
+/// Manages the first circuit and stores all session keys in encryption order.
 pub(crate) struct Tunnel {
     pub(crate) id: TunnelId,
     out_circuit: Circuit,
@@ -53,6 +55,7 @@ pub(crate) struct Tunnel {
 }
 
 impl Tunnel {
+    /// Performs a circuit handshake with the first hop (peer).
     pub(crate) async fn init(id: TunnelId, peer: &Peer, rng: &rand::SystemRandom) -> Result<Self> {
         trace!("Creating tunnel {} to peer {}", id, &peer.addr);
         let (private_key, key) = crypto::generate_ephemeral_keypair(rng);
@@ -105,18 +108,6 @@ impl Tunnel {
             .await
             .initiate_tunnel_handshake(self.out_circuit.id, peer.addr, key, &self.session_keys, rng)
             .await?;
-
-        /*
-        let peer_key = peer_key
-            .verify(&peer.hostkey)
-            // TODO introduce error indicating broken final hop
-            .map_err(|_| TunnelError::Broken)?;
-            //.context("Could not verify peer public key")?;
-
-        let secret = SessionKey::from_key_exchange(private_key, &peer_key)
-            // TODO introduce error indicating broken final hop
-            .map_err(|_| TunnelError::Broken)?;
-         */
 
         // Any failure because of any incorrect secret answer should not cause our tunnel to become corrupted
         if let Ok(secret) = Tunnel::derive_secret(&peer, private_key, peer_key) {
@@ -244,6 +235,8 @@ impl Tunnel {
     }
 }
 
+/// Manages a tunnel after its creation.
+/// Associates a requests channel with a concrete tunnel (enabling switch-over??)
 pub(crate) struct TunnelHandler {
     tunnel: Tunnel,
     requests: mpsc::UnboundedReceiver<Request>,
