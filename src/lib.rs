@@ -194,23 +194,21 @@ where
         dest: Peer,
         n_hops: usize,
     ) -> Result<()> {
-        let mut tunnel = if n_hops > 0 {
-            let peer = self.random_peer().await?;
-            let mut tunnel = Tunnel::init(tunnel_id, &peer, &self.rng).await?;
-            for _ in 1..n_hops {
-                let peer = self.random_peer().await?;
-                tunnel.extend(&peer, &self.rng).await?;
-            }
-            tunnel.extend(&dest, &self.rng).await?;
-            tunnel
-        } else {
-            Tunnel::init(tunnel_id, &dest, &self.rng).await?
-        };
-
-        tunnel.begin(&self.rng).await?; // TODO figure out right place (first data?)
-
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn({
+            let mut tunnel = if n_hops > 0 {
+                let peer = self.random_peer().await?;
+                let mut tunnel = Tunnel::init(tunnel_id, &peer, &self.rng).await?;
+                for _ in 1..n_hops {
+                    let peer = self.random_peer().await?;
+                    tunnel.extend(&peer, &self.rng).await?;
+                }
+                tunnel.extend(&dest, &self.rng).await?;
+                tunnel
+            } else {
+                Tunnel::init(tunnel_id, &dest, &self.rng).await?
+            };
+
             let mut handler = TunnelHandler::new(tunnel, rx, self.events.clone());
             async move {
                 handler.handle().await.unwrap();
@@ -221,9 +219,25 @@ where
     }
 
     pub(crate) async fn handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) {
-        let req = tunnel::Request::Data { data };
         // TODO handle errors
-        let _ = self.tunnels.lock().await.get(&tunnel_id).unwrap().send(req);
+        let _ = self
+            .tunnels
+            .lock()
+            .await
+            .get(&tunnel_id)
+            .unwrap()
+            .send(tunnel::Request::Data { data });
+    }
+
+    pub(crate) async fn handle_destroy(&mut self, tunnel_id: TunnelId) {
+        // TODO handle errors
+        let _ = self
+            .tunnels
+            .lock()
+            .await
+            .get(&tunnel_id)
+            .unwrap()
+            .send(tunnel::Request::Destroy);
     }
 
     async fn random_peer(&mut self) -> Result<Peer> {

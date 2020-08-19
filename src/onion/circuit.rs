@@ -1,5 +1,8 @@
 use crate::onion::crypto::{self, EphemeralPublicKey, SessionKey};
-use crate::onion::protocol::{CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelExtendedError, TunnelProtocolError, TunnelRequest, TunnelTruncatedError, VerifyKey};
+use crate::onion::protocol::{
+    CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelExtendedError,
+    TunnelProtocolError, TunnelRequest, TunnelTruncatedError, VerifyKey,
+};
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::onion::tunnel::{self, TunnelId};
 use crate::{Result, RsaPrivateKey};
@@ -377,8 +380,8 @@ impl CircuitHandler {
                 return Err(anyhow!("Data request while not in Default state"));
             }
             /*
-              KeepAlive messages are always valid and only cause a reset of the loop
-             */
+             KeepAlive messages are always valid and only cause a reset of the loop
+            */
             (TunnelRequest::KeepAlive, state) => state,
         };
         Ok(())

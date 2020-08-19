@@ -44,6 +44,8 @@ pub(crate) type TunnelResult<T> = std::result::Result<T, TunnelError>;
 
 pub(crate) enum Request {
     Data { data: Bytes },
+    Switchover,
+    Destroy,
 }
 
 /// Represents the tunnel controller view of a tunnel.
@@ -238,7 +240,9 @@ impl Tunnel {
 /// Manages a tunnel after its creation.
 /// Associates a requests channel with a concrete tunnel (enabling switch-over??)
 pub(crate) struct TunnelHandler {
-    tunnel: Tunnel,
+    tunnel: Option<Tunnel>,
+    interim_tunnel: Option<Tunnel>,
+    destroyed: bool,
     requests: mpsc::UnboundedReceiver<Request>,
     events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
@@ -251,7 +255,9 @@ impl TunnelHandler {
         events: mpsc::Sender<Event>,
     ) -> Self {
         TunnelHandler {
-            tunnel,
+            tunnel: None,
+            interim_tunnel: Some(tunnel),
+            destroyed: false,
             requests,
             events,
             rng: rand::SystemRandom::new(),
@@ -304,23 +310,50 @@ impl TunnelHandler {
 
     async fn handle_request(&mut self, req: Request) -> Result<()> {
         match req {
-            Request::Data { data } => {
-                let circuit_id = self.tunnel.out_circuit.id;
-                let tunnel_id = self.tunnel.id;
-                self.tunnel
-                    .out_circuit
-                    .socket()
-                    .await
-                    .send_data(
-                        circuit_id,
-                        tunnel_id,
-                        data,
-                        &self.tunnel.session_keys,
-                        &self.rng,
-                    )
-                    .await?;
+            Request::Data { data } => match &self.tunnel {
+                Some(tunnel) => {
+                    let circuit_id = tunnel.out_circuit.id;
+                    let tunnel_id = tunnel.id;
+                    tunnel
+                        .out_circuit
+                        .socket()
+                        .await
+                        .send_data(circuit_id, tunnel_id, data, &tunnel.session_keys, &self.rng)
+                        .await?;
+                    Ok(())
+                }
+                None => Err(anyhow!("Tunnel not ready.")),
+            },
+            (Request::Switchover) => {
+                if !self.destroyed {
+                    match self.interim_tunnel.take() {
+                        Some(mut t) => {
+                            t.begin(&self.rng).await?;
+                            let old_tunnel = self.tunnel.replace(t);
+                            if old_tunnel.is_none() {
+                                // self.events.send(Event::Ready)
+                            }
+
+                            tokio::spawn(async move {
+                                // build new tunnel to dest
+                                // replace interims
+                                // deconstruct old_tunnel
+                            })
+                        }
+                        None => {
+                            // send error
+                            return Err(anyhow!("Switchover failed"));
+                        }
+                    }
+                } else {
+                    // deconstruct both tunnel and interim tunnel
+                    return Err(anyhow!("Tunnel was destroyed"));
+                }
+            }
+            Request::Destroy => {
+                self.destroyed = true;
+                Ok(())
             }
         }
-        Ok(())
     }
 }
