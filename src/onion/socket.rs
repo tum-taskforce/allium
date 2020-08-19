@@ -98,7 +98,7 @@ impl<S: AsyncRead + Unpin> OnionSocket<S> {
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
     /// - `StreamTimeout` -  The stream operations timed out
-    /// - `TeardownMessage` - A `TEARDOWN`message has been received instead of `CIRCUIT CREATE`
+    /// - `TeardownMessage` - A `TEARDOWN` message has been received instead of `CIRCUIT CREATE`
     /// - `BrokenMessage` - The received answer message could not be parsed
     pub(crate) async fn accept_handshake(&mut self) -> SocketResult<(CircuitId, Key)> {
         self.buf.resize(MESSAGE_SIZE, 0);
@@ -199,7 +199,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
 
-    /// Replies on this `OnionSocket` with an `EXTENDED` message to a unsuccessful `EXTEND` call
+    /// Replies on this `OnionSocket` with an `EXTENDED` message to an unsuccessful `EXTEND` call
     /// with error code `error_code`.
     ///
     /// # Errors:

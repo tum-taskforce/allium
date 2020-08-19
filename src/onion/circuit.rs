@@ -1,4 +1,4 @@
-use crate::onion::crypto::{self, SessionKey};
+use crate::onion::crypto::{self, EphemeralPublicKey, SessionKey};
 use crate::onion::protocol::{
     CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelExtendedError,
     TunnelProtocolError, TunnelRequest, TunnelTruncatedError,
@@ -13,10 +13,16 @@ use log::trace;
 use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
+use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex, MutexGuard};
 use tokio::time;
 use tokio::time::Duration;
+
+/// timeout apllied if there is no traffic on a circuit
+const TIMEOUT_IDLE: u64 = 120;
+/// timeout applied for a teardown operation
+const TIMEOUT_TEARDOWN: u64 = 5;
 
 pub(crate) type CircuitId = u16;
 
@@ -106,29 +112,48 @@ impl CircuitHandler {
             .context("Handshake with new connection failed")?;
 
         let rng = rand::SystemRandom::new();
-        // TODO handle errors
         let (private_key, key) = crypto::generate_ephemeral_keypair(&rng);
         let key = SignKey::sign(&key, host_key, &rng);
 
         socket.finalize_handshake(circuit_id, key, &rng).await?;
 
-        let secret = SessionKey::from_key_exchange(private_key, &peer_key).unwrap();
-        let in_circuit = Circuit::new(circuit_id, socket);
-        Ok(Self {
-            in_circuit,
-            session_key: [secret],
-            events,
-            rng,
-            state: State::Default,
-        })
+        if let Ok(secret) = SessionKey::from_key_exchange(private_key, &peer_key) {
+            let in_circuit = Circuit::new(circuit_id, socket);
+            Ok(Self {
+                in_circuit,
+                session_key: [secret],
+                events,
+                rng,
+                state: State::Default,
+            })
+        } else {
+            trace!("Incoming handshake failed post-handshake: unable to derive key");
+            time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
+                socket.teardown(circuit_id, &rng)
+            })
+            .await;
+            Err(anyhow!(
+                "Incoming handshake failed post-handshake: unable to derive key"
+            ))
+        }
     }
 
     /// Handles messages and requests depending on the current state in a loop.
     pub(crate) async fn handle(&mut self) -> Result<()> {
         // main accept loop
+        match self.respond_loop().await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // finally tear down the circuits
+                self.teardown_all();
+                Err(e)
+            }
+        }
+    }
+
+    async fn respond_loop(&mut self) -> Result<()> {
         loop {
-            // TODO needs proper timeout definition
-            let mut delay = time::delay_for(Duration::from_secs(10));
+            let mut delay = time::delay_for(Duration::from_secs(TIMEOUT_IDLE));
 
             match &mut self.state {
                 State::Default => {
@@ -171,6 +196,7 @@ impl CircuitHandler {
 
     /// Performs protocol logic on the incoming circuit.
     /// Checks if a message contains errors and checks whether a valid opaque circuit message is addressed to us.
+    /// This function takes care of handling errors and tearing down the sockets if necessary
     async fn handle_in_circuit(
         &mut self,
         msg: SocketResult<CircuitOpaque<CircuitOpaqueBytes>>,
@@ -179,7 +205,6 @@ impl CircuitHandler {
         // match whether a message has been received or if an error occurred
         match msg {
             Ok(mut msg) => {
-                // TODO final teardown after errors here
                 // decrypt message
                 msg.decrypt(self.session_key.iter().rev())?;
                 // test if this message is directed to us or is broken
@@ -217,20 +242,11 @@ impl CircuitHandler {
                     Err(TunnelProtocolError::Peer(())) => unreachable!(),
                 }
             }
-            Err(OnionSocketError::BrokenMessage) => {
-                self.teardown_all().await;
-                Err(anyhow!(
-                    "In Circuit breached protocol by sending unexpected message"
-                ))
-            }
-            Err(OnionSocketError::StreamTerminated(e)) => {
-                self.teardown_out_circuit().await;
-                Err(anyhow!("In Stream terminated"))
-            }
-            Err(OnionSocketError::TeardownMessage) => {
-                self.teardown_out_circuit().await;
-                Ok(())
-            }
+            Err(OnionSocketError::BrokenMessage) => Err(anyhow!(
+                "In Circuit breached protocol by sending unexpected message"
+            )),
+            Err(OnionSocketError::StreamTerminated(e)) => Err(anyhow!("In Stream terminated")),
+            Err(OnionSocketError::TeardownMessage) => Err(anyhow!("In Stream torn down")),
             Err(e) => {
                 // Panicking stub
                 warn!("An unexpected error occurred during handling of the in_socket");
@@ -245,30 +261,39 @@ impl CircuitHandler {
         std::mem::swap(&mut self.state, &mut state);
         self.state = match (tunnel_msg, state) {
             (TunnelRequest::Extend(dest, key), State::Default) => {
-                /* TODO handle connect failure
+                /*
                    any error in here should never cause the entire loop to fail and we
                    should always respond with EXTENDED (same reason as before)
                    It may be preferable to capsulise this into another function
                 */
-                let mut relay_socket = OnionSocket::new(TcpStream::connect(dest).await?);
-                let peer_key = relay_socket
-                    .initiate_handshake(self.in_circuit.id, key, &self.rng)
-                    .await?;
-
-                let out_circuit = Circuit::new(Circuit::random_id(&self.rng), relay_socket);
-
-                self.in_circuit
-                    .socket()
-                    .await
-                    .finalize_tunnel_handshake(
-                        self.in_circuit.id,
-                        peer_key,
-                        &self.session_key,
-                        &self.rng,
-                    )
-                    .await?;
-
-                State::Router { out_circuit }
+                match self.handle_tunnel_message_extend(dest, key).await {
+                    Ok(out_circuit) => {
+                        self.in_circuit
+                            .socket()
+                            .await
+                            .finalize_tunnel_handshake(
+                                self.in_circuit.id,
+                                peer_key,
+                                &self.session_key,
+                                &self.rng,
+                            )
+                            .await?;
+                        State::Router { out_circuit }
+                    }
+                    Err(e) => {
+                        self.in_circuit
+                            .socket()
+                            .await
+                            .reject_tunnel_handshake(
+                                self.in_circuit.id,
+                                &self.session_key,
+                                e,
+                                &self.rng,
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                }
             }
             (TunnelRequest::Extend(_, _), state) => {
                 /* reply to socket with EXTENDED
@@ -330,17 +355,52 @@ impl CircuitHandler {
                 }
             }
             (TunnelRequest::Begin(_), state) => {
-                // TODO fail here
-                state
+                return Err(anyhow!("Begin request while not in Default state"));
             }
-            (TunnelRequest::End(tunnel_id), state) => state,
-            (TunnelRequest::Data(tunnel_id, data), state) => {
-                // TODO check state
+            (TunnelRequest::End(tunnel_id), state) => state, // TODO End
+            (
+                TunnelRequest::Data(req_tunnel_id, data),
+                State::Endpoint {
+                    tunnel_id,
+                    requests,
+                },
+            ) => {
+                if req_tunnel_id != tunnel_id {
+                    return Err(anyhow!("Unknown tunnel id in Data message"));
+                }
+
                 let _ = self.events.send(Event::Data { tunnel_id, data }).await;
-                state
+
+                State::Endpoint {
+                    tunnel_id,
+                    requests,
+                }
+            }
+            (TunnelRequest::Data(_, _), state) => {
+                return Err(anyhow!("Data request while not in Default state"));
             }
         };
         Ok(())
+    }
+
+    async fn handle_tunnel_message_extend(
+        &mut self,
+        dest: SocketAddr,
+        key: EphemeralPublicKey,
+    ) -> std::result::Result<Circuit, TunnelExtendedError> {
+        let stream = TcpStream::connect(dest)
+            .await
+            .map_err(|_| TunnelExtendedError::PeerUnreachable)?;
+
+        let mut relay_socket = OnionSocket::new(stream);
+        let peer_key = relay_socket
+            .initiate_handshake(self.in_circuit.id, key, &self.rng)
+            .await
+            .map_err(|_| TunnelExtendedError::PeerUnreachable)?;
+
+        let out_circuit = Circuit::new(Circuit::random_id(&self.rng), relay_socket);
+
+        Ok(out_circuit)
     }
 
     /// Handles a message received on the outgoing circuit in the router state.
@@ -354,7 +414,6 @@ impl CircuitHandler {
         match msg {
             Ok(mut msg) => {
                 // encrypt message and try to send it to socket
-                // TODO final teardown after errors here
                 msg.encrypt(self.session_key.iter())?;
                 self.in_circuit
                     .socket()
@@ -365,30 +424,28 @@ impl CircuitHandler {
             }
             Err(OnionSocketError::BrokenMessage) => {
                 // NOTE: error handling will just be propagated, robustness could be improved here
-                self.teardown_all().await;
                 Err(anyhow!(
                     "Out Circuit breached protocol by sending unexpected message"
                 ))
             }
             Err(OnionSocketError::StreamTerminated(e)) => {
                 // NOTE: error handling will just be propagated, robustness could be improved here
-                self.teardown_in_circuit().await;
                 Err(anyhow!("Out Stream terminated"))
             }
             Err(OnionSocketError::TeardownMessage) => {
                 // NOTE: error handling will just be propagated, robustness could be improved here
-                self.teardown_in_circuit().await;
-                Ok(())
+                Err(anyhow!("Out Stream torn down"))
             }
             Err(e) => {
-                // Panicing stub
-                warn!("An unexpected error occured during handling of the in_socket");
+                // Panicking stub
+                warn!("An unexpected error occurred during handling of the in_socket");
                 panic!(e)
             }
         }
     }
 
     /// Handles a request from a higher layer in the endpoint state.
+    /// This function takes care of handling errors and tearing down the sockets if necessary
     async fn handle_request(&mut self, tunnel_id: TunnelId, req: tunnel::Request) -> Result<()> {
         match req {
             tunnel::Request::Data { data } => {
@@ -418,28 +475,31 @@ impl CircuitHandler {
     }
 
     async fn teardown_all(&mut self) {
-        self.teardown_in_circuit().await;
-        self.teardown_out_circuit().await;
+        self.teardown_in_circuit();
+        self.teardown_out_circuit();
     }
 
     async fn teardown_in_circuit(&mut self) {
-        // TODO make sure this is run in finite time
-        let _ = self
-            .in_circuit
-            .socket()
-            .await
-            .teardown(self.in_circuit.id, &self.rng)
-            .await; // NOTE: Ignore any errors
+        time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
+            // NOTE: Ignore any errors
+            self.in_circuit
+                .socket()
+                .await
+                .teardown(self.in_circuit.id, &self.rng)
+        })
+        .await;
     }
 
     async fn teardown_out_circuit(&mut self) {
-        // TODO make sure this is run in finite time
         if let State::Router { out_circuit } = &self.state {
-            let _ = out_circuit
-                .socket()
-                .await
-                .teardown(out_circuit.id, &self.rng)
-                .await; // NOTE: Ignore any errors
+            time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
+                // NOTE: Ignore any errors
+                out_circuit
+                    .socket()
+                    .await
+                    .teardown(out_circuit.id, &self.rng)
+            })
+            .await;
         }
     }
 }
