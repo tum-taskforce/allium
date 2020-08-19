@@ -131,7 +131,8 @@ async fn test_data_unidirectional() -> Result<()> {
     let (evt_tx, _) = mpsc::channel(100);
     let mut round_handler = RoundHandler::new(req_rx, evt_tx, stream::empty(), Default::default());
 
-    let tunnel_id = round_handler.handle_build(peer, 0).await?;
+    let tunnel_id = 3;
+    round_handler.handle_build(tunnel_id, peer, 0).await?;
     assert_eq!(evt_rx.recv().await, Some(Event::Incoming { tunnel_id }));
 
     let data = Bytes::from_static(b"test");
@@ -186,7 +187,8 @@ async fn test_data_bidirectional() -> Result<()> {
     let (evt_tx, mut evt_rx) = mpsc::channel(100);
     let mut round_handler = RoundHandler::new(req_rx, evt_tx, stream::empty(), Default::default());
 
-    let tunnel_id = round_handler.handle_build(peer, 0).await?;
+    let tunnel_id = 3;
+    round_handler.handle_build(tunnel_id, peer, 0).await?;
     round_handler.handle_data(tunnel_id, data_ping).await;
     assert_eq!(
         evt_rx.recv().await,

@@ -1,6 +1,7 @@
 use crate::api::config::Config;
 use crate::api::rps::RpsModule;
 use crate::api::socket::ApiSocket;
+use crate::utils::ToBytes;
 use anyhow::Context;
 use api::protocol::*;
 use futures::stream::StreamExt;
@@ -69,7 +70,7 @@ impl OnionModule {
             match msg {
                 OnionRequest::Build(dst_addr, dst_hostkey) => {
                     let dest = Peer::new(dst_addr, RsaPublicKey::new(dst_hostkey.to_vec()));
-                    let tunnel_id = onion.build_tunnel(dest, 3).await?;
+                    let tunnel_id = onion.build_tunnel(dest, 3);
 
                     self.tunnels
                         .lock()
@@ -77,15 +78,13 @@ impl OnionModule {
                         .entry(tunnel_id)
                         .or_default()
                         .push(client_addr);
-
-                    // TODO send Ready message (on event?)
                 }
                 OnionRequest::Destroy(tunnel_id) => {
                     let mut tunnels = self.tunnels.lock().await;
                     if let Some(clients) = tunnels.get_mut(&tunnel_id) {
                         clients.retain(|x| x != &client_addr);
                         if clients.is_empty() {
-                            onion.destroy_tunnel(tunnel_id).await?;
+                            onion.destroy_tunnel(tunnel_id);
                         }
                     } else {
                         // TODO send error message
@@ -93,7 +92,7 @@ impl OnionModule {
                 }
                 OnionRequest::Data(tunnel_id, tunnel_data) => {
                     if self.tunnels.lock().await.contains_key(&tunnel_id) {
-                        onion.send_data(tunnel_id, &tunnel_data).await?;
+                        onion.send_data(tunnel_id, &tunnel_data);
                     } else {
                         // TODO send error message
                     }
@@ -113,34 +112,55 @@ impl OnionModule {
     {
         while let Some(event) = events.next().await {
             match event {
+                Event::Ready { tunnel_id } => {
+                    for client in self.clients_for_tunnel(&tunnel_id).await {
+                        self.write_to_client(&client, OnionResponse::Ready(tunnel_id, todo!()))
+                            .await?;
+                    }
+                }
                 Event::Incoming { tunnel_id } => {
                     let all_conns = self.connections.lock().await.keys().cloned().collect();
                     self.tunnels.lock().await.insert(tunnel_id, all_conns);
                 }
                 Event::Data { tunnel_id, data } => {
-                    let clients = self
-                        .tunnels
-                        .lock()
-                        .await
-                        .get(&tunnel_id)
-                        .iter()
-                        .flat_map(|x| x.iter().cloned())
-                        .collect::<Vec<SocketAddr>>();
-
-                    for client in clients {
-                        let res = OnionResponse::Data(tunnel_id, data.as_ref());
-                        self.connections
-                            .lock()
-                            .await
-                            .get_mut(&client)
-                            .unwrap()
-                            .write(res)
+                    for client in self.clients_for_tunnel(&tunnel_id).await {
+                        self.write_to_client(
+                            &client,
+                            OnionResponse::Data(tunnel_id, data.as_ref()),
+                        )
+                        .await?;
+                    }
+                }
+                Event::Error { tunnel_id } => {
+                    for client in self.clients_for_tunnel(&tunnel_id).await {
+                        self.write_to_client(&client, OnionResponse::Error(todo!(), tunnel_id))
                             .await?;
+                        // TODO remove tunnel from tunnel if build failed
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    async fn clients_for_tunnel(&self, tunnel_id: &TunnelId) -> Vec<SocketAddr> {
+        self.tunnels
+            .lock()
+            .await
+            .get(tunnel_id)
+            .iter()
+            .flat_map(|x| x.iter().cloned())
+            .collect::<Vec<SocketAddr>>()
+    }
+
+    async fn write_to_client<M: ToBytes>(&self, client: &SocketAddr, msg: M) -> Result<()> {
+        self.connections
+            .lock()
+            .await
+            .get_mut(client)
+            .unwrap()
+            .write(msg)
+            .await
     }
 }
 
@@ -187,6 +207,7 @@ async fn main() -> Result<()> {
         }
     });
 
+    // TODO maybe one task for incoming and events (select), no mutex on connections required?
     let event_task = tokio::spawn({
         let event_handler = onion_module.clone();
         async move {

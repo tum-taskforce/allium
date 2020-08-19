@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::Stream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
 pub use crate::onion::tunnel::TunnelId;
@@ -38,9 +38,9 @@ impl Peer {
 /// Handled by the RoundHandler
 enum Request {
     Build {
+        tunnel_id: TunnelId,
         dest: Peer,
         n_hops: usize,
-        res: oneshot::Sender<Result<TunnelId>>, // FIXME remove
     },
     Data {
         tunnel_id: TunnelId,
@@ -51,8 +51,10 @@ enum Request {
 /// Events destined for the API
 #[derive(Debug, PartialEq)]
 pub enum Event {
+    Ready { tunnel_id: TunnelId },
     Incoming { tunnel_id: TunnelId },
     Data { tunnel_id: TunnelId, data: Bytes },
+    Error { tunnel_id: TunnelId },
 }
 
 /// TODO general documentation
@@ -100,25 +102,22 @@ impl Onion {
         Ok((onion, evt_rx))
     }
 
-    pub async fn build_tunnel(&self, dest: Peer, n_hops: usize) -> Result<TunnelId> {
-        let (tx, rx) = oneshot::channel();
-        let req = Request::Build {
-            dest,
-            n_hops,
-            res: tx,
-        };
+    pub fn build_tunnel(&self, dest: Peer, n_hops: usize) -> TunnelId {
+        let tunnel_id = Tunnel::random_id(todo!());
         self.requests
-            .send(req)
+            .send(Request::Build {
+                tunnel_id,
+                dest,
+                n_hops,
+            })
             .map_err(|_| anyhow!("Failed to send build request"))
             .unwrap();
-        rx.await?
+        tunnel_id
     }
 
-    pub async fn destroy_tunnel(&self, tunnel_id: TunnelId) -> Result<()> {
-        Ok(())
-    }
+    pub fn destroy_tunnel(&self, tunnel_id: TunnelId) {}
 
-    pub async fn send_data(&self, tunnel_id: TunnelId, data: &[u8]) -> Result<()> {
+    pub fn send_data(&self, tunnel_id: TunnelId, data: &[u8]) {
         // big TODO don't allocate
         self.requests
             .send(Request::Data {
@@ -127,7 +126,6 @@ impl Onion {
             })
             .map_err(|_| anyhow!("Failed to send data request"))
             .unwrap();
-        Ok(())
     }
 }
 
@@ -170,8 +168,16 @@ where
         // TODO proper scheduling
         while let Some(req) = self.requests.recv().await {
             match req {
-                Request::Build { dest, n_hops, res } => {
-                    res.send(self.handle_build(dest, n_hops).await).unwrap();
+                Request::Build {
+                    tunnel_id,
+                    dest,
+                    n_hops,
+                } => {
+                    let evt = match self.handle_build(tunnel_id, dest, n_hops).await {
+                        Ok(()) => Event::Ready { tunnel_id },
+                        Err(_) => Event::Error { tunnel_id },
+                    };
+                    self.events.send(evt).await.unwrap();
                 }
                 Request::Data { tunnel_id, data } => {
                     self.handle_data(tunnel_id, data).await;
@@ -182,9 +188,12 @@ where
 
     /// Builds a new tunnel to `dest` over `n_hops` additional peers.
     /// Performs a handshake with each hop and then spawns a task for handling incoming messages.
-    pub(crate) async fn handle_build(&mut self, dest: Peer, n_hops: usize) -> Result<TunnelId> {
-        let tunnel_id = Tunnel::random_id(&self.rng);
-
+    pub(crate) async fn handle_build(
+        &mut self,
+        tunnel_id: TunnelId,
+        dest: Peer,
+        n_hops: usize,
+    ) -> Result<()> {
         let mut tunnel = if n_hops > 0 {
             let peer = self.random_peer().await?;
             let mut tunnel = Tunnel::init(tunnel_id, &peer, &self.rng).await?;
@@ -208,7 +217,7 @@ where
             }
         });
         self.tunnels.lock().await.insert(tunnel_id, tx);
-        Ok(tunnel_id)
+        Ok(())
     }
 
     pub(crate) async fn handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) {
