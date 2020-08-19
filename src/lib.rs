@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel::{self, Tunnel, TunnelHandler, TunnelId};
+use crate::onion::tunnel::{self, Tunnel, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -15,6 +15,7 @@ use tokio::stream::Stream;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
+pub use crate::onion::tunnel::TunnelId;
 use std::collections::HashMap;
 
 mod onion;

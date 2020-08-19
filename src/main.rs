@@ -6,6 +6,7 @@ use api::protocol::*;
 use futures::stream::StreamExt;
 use log::{info, trace};
 use onion::*;
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,13 +21,15 @@ mod api;
 mod utils;
 
 struct OnionModule {
-    connections: Mutex<Vec<ApiSocket<OwnedWriteHalf>>>,
+    connections: Mutex<HashMap<SocketAddr, ApiSocket<OwnedWriteHalf>>>,
+    tunnels: Mutex<HashMap<TunnelId, Vec<SocketAddr>>>,
 }
 
 impl OnionModule {
     pub fn new() -> Self {
         OnionModule {
-            connections: Mutex::new(Vec::new()),
+            connections: Default::default(),
+            tunnels: Default::default(),
         }
     }
 
@@ -45,17 +48,19 @@ impl OnionModule {
                 handler.handle_api(stream, onion).await.unwrap();
             });
         }
+
         Ok(())
     }
 
     /// Translates API request to the corresponding methods on the onion handle.
     async fn handle_api(&self, stream: TcpStream, onion: Onion) -> Result<()> {
-        trace!("Accepted API connection from: {:?}", stream.peer_addr());
+        let client_addr = stream.peer_addr()?;
+        trace!("Accepted API connection from: {}", client_addr);
         let (read_stream, write_stream) = stream.into_split();
         self.connections
             .lock()
             .await
-            .push(ApiSocket::new(write_stream));
+            .insert(client_addr.clone(), ApiSocket::new(write_stream));
         let mut socket = ApiSocket::new(read_stream);
 
         while let Some(msg) = socket.read_next::<OnionRequest>().await? {
@@ -64,16 +69,37 @@ impl OnionModule {
             match msg {
                 OnionRequest::Build(dst_addr, dst_hostkey) => {
                     let dest = Peer::new(dst_addr, RsaPublicKey::new(dst_hostkey.to_vec()));
-                    let _tunnel = onion.build_tunnel(dest, 3).await?;
+                    let tunnel_id = onion.build_tunnel(dest, 3).await?;
+
+                    self.tunnels
+                        .lock()
+                        .await
+                        .entry(tunnel_id)
+                        .or_default()
+                        .push(client_addr);
+
+                    // TODO send Ready message (on event?)
                 }
                 OnionRequest::Destroy(tunnel_id) => {
-                    onion.destroy_tunnel(tunnel_id).await?;
+                    let mut tunnels = self.tunnels.lock().await;
+                    if let Some(clients) = tunnels.get_mut(&tunnel_id) {
+                        clients.retain(|x| x != &client_addr);
+                        if clients.is_empty() {
+                            onion.destroy_tunnel(tunnel_id).await?;
+                        }
+                    } else {
+                        // TODO send error message
+                    }
                 }
                 OnionRequest::Data(tunnel_id, tunnel_data) => {
-                    onion.send_data(tunnel_id, &tunnel_data).await?;
+                    if self.tunnels.lock().await.contains_key(&tunnel_id) {
+                        onion.send_data(tunnel_id, &tunnel_data).await?;
+                    } else {
+                        // TODO send error message
+                    }
                 }
                 OnionRequest::Cover(_cover_size) => {
-                    // unimplemented!();
+                    // TODO unimplemented!();
                 }
             }
         }
@@ -87,14 +113,31 @@ impl OnionModule {
     {
         while let Some(event) = events.next().await {
             match event {
+                Event::Incoming { tunnel_id } => {
+                    let all_conns = self.connections.lock().await.keys().cloned().collect();
+                    self.tunnels.lock().await.insert(tunnel_id, all_conns);
+                }
                 Event::Data { tunnel_id, data } => {
-                    // TODO only send messages to clients which have subscribed to this tunnel
-                    for conn in self.connections.lock().await.iter_mut() {
+                    let clients = self
+                        .tunnels
+                        .lock()
+                        .await
+                        .get(&tunnel_id)
+                        .iter()
+                        .flat_map(|x| x.iter().cloned())
+                        .collect::<Vec<SocketAddr>>();
+
+                    for client in clients {
                         let res = OnionResponse::Data(tunnel_id, data.as_ref());
-                        conn.write(res).await?;
+                        self.connections
+                            .lock()
+                            .await
+                            .get_mut(&client)
+                            .unwrap()
+                            .write(res)
+                            .await?;
                     }
                 }
-                _ => unimplemented!(),
             }
         }
         Ok(())

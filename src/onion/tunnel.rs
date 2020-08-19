@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-pub(crate) type TunnelId = u32;
+pub type TunnelId = u32;
 
 #[derive(Error, Debug)]
 pub(crate) enum TunnelError {
