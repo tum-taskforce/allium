@@ -13,9 +13,11 @@ use log::trace;
 use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
+use std::mem;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 const MAX_PEER_FAILURES: usize = 10;
 
@@ -91,9 +93,11 @@ impl Tunnel {
             0 => Tunnel::init(id, final_peer, &rng).await,
             _ => {
                 for i in 0..MAX_PEER_FAILURES {
-                    let first_peer = peer_provider.next().await?;
+                    let first_peer = peer_provider.next().await.unwrap();
                     if let Ok(mut tunnel) = Tunnel::init(id, &first_peer, &rng).await {
-                        tunnel.extend_to_peer(n_hops + 1, peer_provider, final_peer, rng)?;
+                        tunnel
+                            .extend_to_peer(n_hops + 1, peer_provider, final_peer, rng)
+                            .await?;
                         return Ok(tunnel);
                     }
                 }
@@ -286,12 +290,20 @@ impl Tunnel {
 /// Manages a tunnel after its creation.
 /// Associates a requests channel with a concrete tunnel (enabling switch-over??)
 pub(crate) struct TunnelHandler {
-    tunnel: Option<Tunnel>,
-    interim_tunnel: Option<Tunnel>,
-    destroyed: bool,
+    tunnel: Tunnel,
+    next_tunnel: Arc<Mutex<Option<Tunnel>>>,
+    state: State,
     requests: mpsc::UnboundedReceiver<Request>,
     events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
+}
+
+#[derive(Copy, Clone)]
+pub(crate) enum State {
+    Building,
+    Ready,
+    Destroying,
+    Destroyed,
 }
 
 impl TunnelHandler {
@@ -301,9 +313,9 @@ impl TunnelHandler {
         events: mpsc::Sender<Event>,
     ) -> Self {
         TunnelHandler {
-            tunnel: None,
-            interim_tunnel: Some(tunnel),
-            destroyed: false,
+            tunnel,
+            next_tunnel: Arc::new(Mutex::new(None)),
+            state: State::Building,
             requests,
             events,
             rng: rand::SystemRandom::new(),
@@ -312,17 +324,29 @@ impl TunnelHandler {
 
     pub(crate) async fn handle(&mut self) -> Result<()> {
         loop {
-            tokio::select! {
-                msg = self.tunnel.out_circuit.accept_opaque() => {
-                    self.handle_tunnel_message(msg).await?;
+            match self.state {
+                State::Building => {
+                    tokio::select! {
+                        Some(req) = self.requests.recv() => {
+                            self.handle_request(req).await?;
+                        }
+                    }
                 }
-                Some(req) = self.requests.recv() => {
-                    self.handle_request(req).await?;
+                State::Ready | State::Destroying => {
+                    tokio::select! {
+                        msg = self.tunnel.out_circuit.accept_opaque() => {
+                            self.handle_tunnel_message(msg).await?;
+                        }
+                        Some(req) = self.requests.recv() => {
+                            self.handle_request(req).await?;
+                        }
+                    }
                 }
+                State::Destroyed => break,
             }
         }
-
         // TODO cleanup
+        Ok(())
     }
 
     async fn handle_tunnel_message(
@@ -355,70 +379,63 @@ impl TunnelHandler {
     }
 
     async fn handle_request(&mut self, req: Request) -> Result<()> {
-        match req {
-            Request::Data { data } => match &self.tunnel {
-                Some(tunnel) => {
-                    let circuit_id = tunnel.out_circuit.id;
-                    let tunnel_id = tunnel.id;
-                    tunnel
-                        .out_circuit
-                        .socket()
-                        .await
-                        .send_data(circuit_id, tunnel_id, data, &tunnel.session_keys, &self.rng)
-                        .await?;
-                    Ok(())
-                }
-                None => Err(anyhow!("Tunnel not ready.")),
-            },
-            (Request::Switchover) => {
-                if !self.destroyed {
-                    match self.interim_tunnel.take() {
-                        Some(mut t) => {
-                            t.begin(&self.rng).await?;
-                            let old_tunnel = self.tunnel.replace(t);
-                            if old_tunnel.is_none() {
-                                // self.events.send(Event::Ready)
-                            }
+        match (req, self.state) {
+            (Request::Data { data }, State::Ready) => {
+                let circuit_id = self.tunnel.out_circuit.id;
+                let tunnel_id = self.tunnel.id;
+                self.tunnel
+                    .out_circuit
+                    .socket()
+                    .await
+                    .send_data(
+                        circuit_id,
+                        tunnel_id,
+                        data,
+                        &self.tunnel.session_keys,
+                        &self.rng,
+                    )
+                    .await?;
+            }
+            (Request::Switchover, State::Building) => {
+                self.state = State::Ready;
+                self.events
+                    .send(Event::Ready {
+                        tunnel_id: self.tunnel.id,
+                    })
+                    .await?;
+                // TODO spawn building task
+            }
+            (Request::Switchover, State::Ready) => {
+                let mut new_tunnel = self
+                    .next_tunnel
+                    .lock()
+                    .await
+                    .take()
+                    .ok_or(anyhow!("Switchover failed"))?;
 
-                            tokio::spawn(async move {
-                                // build new tunnel to dest
-                                let new_tunnel = match Tunnel::to_peer(
-                                    todo!(),
-                                    todo!(),
-                                    todo!(),
-                                    todo!(),
-                                    &self.rng,
-                                )
-                                .await
-                                {
-                                    Ok(tunnel) => tunnel,
-                                    Err(e) => {
-                                        warn!("{}", e);
-                                        return;
-                                    }
-                                };
-                                // replace interims
-                                self.interim_tunnel.replace(new_tunnel);
-                                // deconstruct old_tunnel
-                                // TODO
-                            });
-                            Ok(())
-                        }
-                        None => {
-                            // send error
-                            return Err(anyhow!("Switchover failed"));
-                        }
+                mem::swap(&mut self.tunnel, &mut new_tunnel);
+                let old_tunnel = new_tunnel;
+                self.tunnel.begin(&self.rng).await?;
+
+                tokio::spawn({
+                    let next_tunnel = self.next_tunnel.clone();
+                    async move {
+                        // build new tunnel to dest
+                        let new_tunnel = todo!();
+                        // replace interims
+                        next_tunnel.lock().await.replace(new_tunnel);
+                        // deconstruct old_tunnel
+                        // TODO
                     }
-                } else {
-                    // deconstruct both tunnel and interim tunnel
-                    // TODO
-                    return Err(anyhow!("Tunnel was destroyed"));
-                }
+                });
             }
-            Request::Destroy => {
-                self.destroyed = true;
-                Ok(())
+            (Request::Switchover, State::Destroying) => {
+                self.state = State::Destroyed
+                // TODO destroy old tunnel
             }
+            (Request::Destroy, State::Ready) => self.state = State::Destroying,
+            _ => return Err(anyhow!("Illegal TunnelHandler state")),
         }
+        Ok(())
     }
 }

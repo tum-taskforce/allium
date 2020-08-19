@@ -460,6 +460,7 @@ impl CircuitHandler {
                     .send_data(circuit_id, tunnel_id, data, &self.session_key, &self.rng)
                     .await?;
             }
+            _ => unimplemented!(), // TODO
         }
         Ok(())
     }

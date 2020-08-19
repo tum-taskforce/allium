@@ -196,7 +196,6 @@ where
     ) -> Result<()> {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn({
-            /* TODO cleanup if to_peer proves capability in tests
             let mut tunnel = if n_hops > 0 {
                 let peer = self.random_peer().await?;
                 let mut tunnel = Tunnel::init(tunnel_id, &peer, &self.rng).await?;
@@ -209,9 +208,6 @@ where
             } else {
                 Tunnel::init(tunnel_id, &dest, &self.rng).await?
             };
-             */
-            let mut tunnel =
-                Tunnel::to_peer(&dest, tunnel_id, n_hops, &self.peer_provider, &self.rng).await?;
 
             let mut handler = TunnelHandler::new(tunnel, rx, self.events.clone());
             async move {
