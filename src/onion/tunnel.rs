@@ -17,7 +17,6 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use futures::TryFutureExt;
 
 const MAX_PEER_FAILURES: usize = 10;
 
@@ -467,7 +466,7 @@ impl TunnelHandler {
                     .ok_or(anyhow!("Switchover failed: no next tunnel"))?;
 
                 mem::swap(&mut self.tunnel, &mut new_tunnel);
-                let mut old_tunnel = new_tunnel;
+                let old_tunnel = new_tunnel;
                 self.tunnel.begin(&self.builder.rng).await?;
                 old_tunnel.end(&self.builder.rng).await?;
 

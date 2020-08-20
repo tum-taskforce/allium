@@ -16,7 +16,6 @@ use std::sync::Arc;
 use tokio::join;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::stream;
 use tokio::stream::Stream;
 use tokio::sync::Mutex;
 
@@ -226,9 +225,6 @@ async fn main() -> Result<()> {
     let rps = RpsModule::new(&config.rps)
         .await
         .context("Failed to connect to RPS module")?;
-    let rps = Mutex::new(rps);
-    // TODO construct peer provider from rps (use buffering)
-    let peer_provider = stream::empty();
 
     let onion_addr = SocketAddr::new(config.onion.p2p_hostname, config.onion.p2p_port);
     // read hostkey (RSA private key)
@@ -237,7 +233,7 @@ async fn main() -> Result<()> {
 
     // initialize onion, start listening on p2p port
     // events is a stream of events from the p2p protocol which should notify API clients
-    let (onion, events) = Onion::new(onion_addr, hostkey, peer_provider)?;
+    let (onion, events) = Onion::new(onion_addr, hostkey, rps.into_stream())?;
 
     // initialize onion module listening on API connections
     let onion_module = Arc::new(OnionModule::new());

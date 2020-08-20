@@ -3,6 +3,8 @@ use crate::api::protocol::{Module, RpsRequest, RpsResponse};
 use crate::api::socket::ApiSocket;
 use crate::Result;
 use anyhow::anyhow;
+use async_stream::stream;
+use futures::Stream;
 use log::info;
 use onion::{Peer, RsaPrivateKey, RsaPublicKey};
 use std::net::SocketAddr;
@@ -36,6 +38,14 @@ impl RpsModule {
                 Ok(peer)
             }
         }
+    }
+
+    pub fn into_stream(mut self) -> impl Stream<Item = Peer> {
+        Box::pin(stream! {
+            while let Ok(peer) = self.query().await {
+                yield peer
+            }
+        })
     }
 }
 
