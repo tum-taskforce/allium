@@ -17,6 +17,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex};
+use futures::TryFutureExt;
 
 const MAX_PEER_FAILURES: usize = 10;
 
@@ -50,6 +51,7 @@ pub(crate) enum Request {
     Data { data: Bytes },
     Switchover,
     Destroy,
+    KeepAlive,
 }
 
 /// Represents the tunnel controller view of a tunnel.
@@ -169,7 +171,7 @@ impl Tunnel {
     /// before tearing down the old tunnel. Be aware that the other endpoint peer should not be
     /// allowed to use the old tunnel indefinitely despite receiving a `TUNNEL END` packet. Any old
     /// tunnel that has been replaced should only have finite lifetime.
-    pub(crate) async fn begin(&mut self, rng: &rand::SystemRandom) -> TunnelResult<()> {
+    pub(crate) async fn begin(&self, rng: &rand::SystemRandom) -> TunnelResult<()> {
         self.out_circuit
             .socket()
             .await
@@ -179,11 +181,26 @@ impl Tunnel {
     }
 
     /// Ends a data connection with the last hop in the tunnel
-    pub(crate) async fn end(&mut self, rng: &rand::SystemRandom) -> TunnelResult<()> {
+    pub(crate) async fn end(&self, rng: &rand::SystemRandom) -> TunnelResult<()> {
         self.out_circuit
             .socket()
             .await
             .end(self.out_circuit.id, self.id, &self.session_keys, rng)
+            .await?;
+        Ok(())
+    }
+
+    /// Sends a `TUNNEL KEEPALIVE` packet on this tunnel to the last hop, affecting every single
+    /// hop
+    ///
+    /// This can be used to prevent a tunnel from timing out or to send cover traffic to the final
+    /// hop. This may also be used to check the integrity, since any failure would cause the hops
+    /// to initiate a teardown on the tunnel.
+    pub(crate) async fn keep_alive(&self, rng: &rand::SystemRandom) -> TunnelResult<()> {
+        self.out_circuit
+            .socket()
+            .await
+            .send_keep_alive(self.out_circuit.id, &self.session_keys, rng)
             .await?;
         Ok(())
     }
@@ -471,6 +488,13 @@ impl TunnelHandler {
                 }
             }
             (Request::Destroy, State::Ready) => self.state = State::Destroying,
+            (Request::KeepAlive, State::Destroyed) => {} // ignore this request,
+            (Request::KeepAlive, _) => {
+                self.tunnel.keep_alive(&self.builder.rng).await;
+                if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
+                    next_tunnel.keep_alive(&self.builder.rng).await;
+                }
+            } // ignore this request
             _ => return Err(anyhow!("Illegal TunnelHandler state")),
         }
         Ok(())

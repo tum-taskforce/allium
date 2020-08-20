@@ -504,6 +504,7 @@ impl CircuitHandler {
                 self.state = State::Default;
             }
             tunnel::Request::Switchover => {} // nothing to do here
+            tunnel::Request::KeepAlive => {} // nothing to do here since we don't care about other peer's tunnels
         }
         Ok(())
     }
