@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel::{self, Tunnel, TunnelHandler};
+use crate::onion::tunnel::{self, Tunnel, TunnelBuilder, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -215,21 +215,18 @@ where
     ) -> Result<()> {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn({
-            let tunnel = if n_hops > 0 {
-                let peer = self.random_peer().await?;
-                let mut tunnel = Tunnel::init(tunnel_id, &peer, &self.rng).await?;
-                for _ in 1..n_hops {
-                    let peer = self.random_peer().await?;
-                    tunnel.extend(&peer, &self.rng).await?;
-                }
-                tunnel.extend(&dest, &self.rng).await?;
-                tunnel
-            } else {
-                Tunnel::init(tunnel_id, &dest, &self.rng).await?
-            };
-
-            let mut handler = TunnelHandler::new(tunnel, rx, self.events.clone());
+            let mut builder =
+                TunnelBuilder::new(tunnel_id, dest, n_hops, todo!(), self.rng.clone());
+            let mut events = self.events.clone();
             async move {
+                let first_tunnel = match builder.build().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = events.send(Event::Error { tunnel_id });
+                        return;
+                    }
+                };
+                let mut handler = TunnelHandler::new(first_tunnel, builder, rx, events);
                 handler.handle().await.unwrap();
             }
         });

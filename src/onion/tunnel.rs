@@ -14,10 +14,11 @@ use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
 use std::mem;
+use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 const MAX_PEER_FAILURES: usize = 10;
 
@@ -287,6 +288,57 @@ impl Tunnel {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct TunnelBuilder {
+    tunnel_id: TunnelId,
+    dest: Peer,
+    n_hops: usize,
+    peer_provider: mpsc::Sender<oneshot::Sender<Peer>>,
+    rng: rand::SystemRandom,
+}
+
+impl TunnelBuilder {
+    pub(crate) fn new(
+        tunnel_id: TunnelId,
+        dest: Peer,
+        n_hops: usize,
+        peer_provider: mpsc::Sender<oneshot::Sender<Peer>>,
+        rng: rand::SystemRandom,
+    ) -> Self {
+        TunnelBuilder {
+            tunnel_id,
+            dest,
+            n_hops,
+            peer_provider,
+            rng,
+        }
+    }
+
+    pub(crate) async fn build(&mut self) -> Result<Tunnel> {
+        if self.n_hops > 0 {
+            let peer = self.random_peer().await?;
+            let mut tunnel = Tunnel::init(self.tunnel_id, &peer, &self.rng).await?;
+            for _ in 1..self.n_hops {
+                let peer = self
+                    .random_peer()
+                    .await
+                    .context(anyhow!("Failed to get random peer"))?;
+                tunnel.extend(&peer, &self.rng).await?;
+            }
+            tunnel.extend(&self.dest, &self.rng).await?;
+            Ok(tunnel)
+        } else {
+            Tunnel::init(self.tunnel_id, &self.dest, &self.rng).await
+        }
+    }
+
+    async fn random_peer(&mut self) -> Result<Peer> {
+        let (peer_tx, peer_rx) = oneshot::channel();
+        let _ = self.peer_provider.send(peer_tx).await;
+        Ok(peer_rx.await?)
+    }
+}
+
 /// Manages a tunnel after its creation.
 /// Associates a requests channel with a concrete tunnel (enabling switch-over??)
 pub(crate) struct TunnelHandler {
@@ -295,7 +347,7 @@ pub(crate) struct TunnelHandler {
     state: State,
     requests: mpsc::UnboundedReceiver<Request>,
     events: mpsc::Sender<Event>,
-    rng: rand::SystemRandom,
+    builder: TunnelBuilder,
 }
 
 #[derive(Copy, Clone)]
@@ -308,17 +360,18 @@ pub(crate) enum State {
 
 impl TunnelHandler {
     pub(crate) fn new(
-        tunnel: Tunnel,
+        first_tunnel: Tunnel,
+        tunnel_builder: TunnelBuilder,
         requests: mpsc::UnboundedReceiver<Request>,
         events: mpsc::Sender<Event>,
     ) -> Self {
         TunnelHandler {
-            tunnel,
+            tunnel: first_tunnel,
             next_tunnel: Arc::new(Mutex::new(None)),
             state: State::Building,
             requests,
             events,
-            rng: rand::SystemRandom::new(),
+            builder: tunnel_builder,
         }
     }
 
@@ -392,7 +445,7 @@ impl TunnelHandler {
                         tunnel_id,
                         data,
                         &self.tunnel.session_keys,
-                        &self.rng,
+                        &self.builder.rng,
                     )
                     .await?;
             }
@@ -403,7 +456,8 @@ impl TunnelHandler {
                         tunnel_id: self.tunnel.id,
                     })
                     .await?;
-                // TODO spawn building task
+
+                self.spawn_next_tunnel_task();
             }
             (Request::Switchover, State::Ready) => {
                 let mut new_tunnel = self
@@ -411,31 +465,39 @@ impl TunnelHandler {
                     .lock()
                     .await
                     .take()
-                    .ok_or(anyhow!("Switchover failed"))?;
+                    .ok_or(anyhow!("Switchover failed: no next tunnel"))?;
 
                 mem::swap(&mut self.tunnel, &mut new_tunnel);
                 let old_tunnel = new_tunnel;
-                self.tunnel.begin(&self.rng).await?;
+                self.tunnel.begin(&self.builder.rng).await?;
 
-                tokio::spawn({
-                    let next_tunnel = self.next_tunnel.clone();
-                    async move {
-                        // build new tunnel to dest
-                        let new_tunnel = todo!();
-                        // replace interims
-                        next_tunnel.lock().await.replace(new_tunnel);
-                        // deconstruct old_tunnel
-                        // TODO
-                    }
+                self.spawn_next_tunnel_task();
+                tokio::spawn(async move {
+                    //old_tunnel.unbuild();
                 });
             }
             (Request::Switchover, State::Destroying) => {
-                self.state = State::Destroyed
-                // TODO destroy old tunnel
+                self.state = State::Destroyed;
+
+                //self.tunnel.unbuild();
+                if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
+                    //next_tunnel.unbuild();
+                }
             }
             (Request::Destroy, State::Ready) => self.state = State::Destroying,
             _ => return Err(anyhow!("Illegal TunnelHandler state")),
         }
         Ok(())
+    }
+
+    fn spawn_next_tunnel_task(&self) {
+        tokio::spawn({
+            let next_tunnel = self.next_tunnel.clone();
+            let mut builder = self.builder.clone();
+            async move {
+                let new_tunnel = builder.build().await.unwrap();
+                next_tunnel.lock().await.replace(new_tunnel);
+            }
+        });
     }
 }
