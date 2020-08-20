@@ -49,6 +49,19 @@ impl Circuit {
         self.socket().await.accept_opaque().await
     }
 
+    pub(crate) async fn teardown_with_timeout(&self, rng: &rand::SystemRandom) {
+        match time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
+            // NOTE: Ignore any errors
+            self.socket().await.teardown(self.id, rng)
+        })
+        .await
+        {
+            Err(e) => warn!("{}", e),
+            Ok(Err(e)) => warn!("{}", e),
+            _ => {}
+        };
+    }
+
     /// Generates a random circuit ID which is assumed to be unique.
     pub(crate) fn random_id(rng: &rand::SystemRandom) -> CircuitId {
         // FIXME an attacker may fill up all ids
@@ -486,26 +499,12 @@ impl CircuitHandler {
     }
 
     async fn teardown_in_circuit(&mut self) {
-        time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
-            // NOTE: Ignore any errors
-            self.in_circuit
-                .socket()
-                .await
-                .teardown(self.in_circuit.id, &self.rng)
-        })
-        .await;
+        self.in_circuit.teardown_with_timeout(&self.rng).await;
     }
 
     async fn teardown_out_circuit(&mut self) {
         if let State::Router { out_circuit } = &self.state {
-            time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
-                // NOTE: Ignore any errors
-                out_circuit
-                    .socket()
-                    .await
-                    .teardown(out_circuit.id, &self.rng)
-            })
-            .await;
+            out_circuit.teardown_with_timeout(&self.rng).await;
         }
     }
 }

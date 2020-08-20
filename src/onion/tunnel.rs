@@ -13,6 +13,7 @@ use log::trace;
 use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
+use std::convert::TryInto;
 use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -81,30 +82,6 @@ impl Tunnel {
             out_circuit: Circuit::new(circuit_id, socket),
             session_keys: vec![secret],
         })
-    }
-
-    pub(crate) async fn to_peer<P: Stream<Item = Peer> + Send + Sync + Unpin + 'static>(
-        final_peer: &Peer,
-        id: TunnelId,
-        n_hops: usize,
-        mut peer_provider: P,
-        rng: &rand::SystemRandom,
-    ) -> Result<Self> {
-        match n_hops {
-            0 => Tunnel::init(id, final_peer, &rng).await,
-            _ => {
-                for i in 0..MAX_PEER_FAILURES {
-                    let first_peer = peer_provider.next().await.unwrap();
-                    if let Ok(mut tunnel) = Tunnel::init(id, &first_peer, &rng).await {
-                        tunnel
-                            .extend_to_peer(n_hops + 1, peer_provider, final_peer, rng)
-                            .await?;
-                        return Ok(tunnel);
-                    }
-                }
-                Err(anyhow!("Could not reach any first hop"))
-            }
-        }
     }
 
     fn derive_secret(
@@ -230,61 +207,20 @@ impl Tunnel {
         Ok(())
     }
 
-    /// Tries to extend this tunnel to intermediate hop count `n_hops` and final hop `final_peer`.
-    ///
-    /// The peers provided by `peer_provider` will be used as a source for the intermediate hops,
-    /// the final hop at index `n` will be `final_peer`.
-    ///
-    /// This function does not check whether the peers provided by `peer_provider` are particularity
-    /// secure. In order to preserve anonymity, there should never be two consecutive hops to the
-    /// same peer. Also, `peer_provider` should produce peers in a way that potentially malicious
-    /// peers with shared knowledge of circuits should be returned with a low probability (or with
-    /// equal probability to any other peer) to prevent the tunnel from becoming compromised.
-    ///
-    /// Even if there is a high failure-rate among peers, the `peer_provider` should be able to
-    /// generate a secure stream of peers.
-    pub(crate) async fn extend_to_peer<P: Stream<Item = Peer> + Send + Sync + Unpin + 'static>(
-        &mut self,
-        length: usize, // FIXME
-        mut peer_provider: P,
-        final_peer: &Peer,
-        rng: &rand::SystemRandom,
-    ) -> TunnelResult<()> {
-        if length < 1 {
-            return Err(TunnelError::Incomplete);
-        }
-
-        let mut num_fails = 0;
-
-        while self.session_keys.len() < length {
-            if let Some(peer) = peer_provider.next().await {
-                match self.extend(&peer, &rng).await {
-                    Err(TunnelError::Broken(e)) => {
-                        // do not try to fix this error to prevent endless looping
-                        return Err(TunnelError::Broken(e));
-                    }
-                    Err(TunnelError::Incomplete) => {
-                        num_fails += 1;
-                        if num_fails >= MAX_PEER_FAILURES {
-                            return Err(TunnelError::Incomplete);
-                        }
-                    }
-                    Ok(_) => {}
-                }
-            } else {
-                return Err(TunnelError::Incomplete);
-            }
-        }
-
-        self.extend(final_peer, rng).await?;
-        Ok(())
-    }
-
     pub(crate) fn random_id(rng: &rand::SystemRandom) -> TunnelId {
         // FIXME an attacker may fill up all ids
         let mut id_buf = [0u8; 4];
         rng.fill(&mut id_buf).unwrap();
         u32::from_le_bytes(id_buf)
+    }
+
+    async fn unbuild(&self, rng: &rand::SystemRandom) {
+        // TODO graceful deconstruction
+        self.teardown(rng).await;
+    }
+
+    async fn teardown(&self, rng: &rand::SystemRandom) {
+        self.out_circuit.teardown_with_timeout(rng).await;
     }
 }
 
@@ -314,22 +250,52 @@ impl TunnelBuilder {
         }
     }
 
+    /// Tries to extend this tunnel to intermediate hop count `n_hops` and final hop `final_peer`.
+    ///
+    /// The peers provided by `peer_provider` will be used as a source for the intermediate hops,
+    /// the final hop at index `n` will be `final_peer`.
+    ///
+    /// This function does not check whether the peers provided by `peer_provider` are particularity
+    /// secure. In order to preserve anonymity, there should never be two consecutive hops to the
+    /// same peer. Also, `peer_provider` should produce peers in a way that potentially malicious
+    /// peers with shared knowledge of circuits should be returned with a low probability (or with
+    /// equal probability to any other peer) to prevent the tunnel from becoming compromised.
+    ///
+    /// Even if there is a high failure-rate among peers, the `peer_provider` should be able to
+    /// generate a secure stream of peers.
     pub(crate) async fn build(&mut self) -> Result<Tunnel> {
-        if self.n_hops > 0 {
-            let peer = self.random_peer().await?;
-            let mut tunnel = Tunnel::init(self.tunnel_id, &peer, &self.rng).await?;
-            for _ in 1..self.n_hops {
-                let peer = self
-                    .random_peer()
+        let mut tunnel = None;
+        for i in 0..MAX_PEER_FAILURES {
+            tunnel = match tunnel.take() {
+                None if self.n_hops == 0 => Tunnel::init(self.tunnel_id, &self.dest, &self.rng)
                     .await
-                    .context(anyhow!("Failed to get random peer"))?;
-                tunnel.extend(&peer, &self.rng).await?;
+                    .ok(),
+                None => {
+                    let peer = self
+                        .random_peer()
+                        .await
+                        .context(anyhow!("Failed to get random peer"))?;
+                    Tunnel::init(self.tunnel_id, &peer, &self.rng).await.ok()
+                }
+                Some(mut tunnel) if tunnel.len() - 1 < self.n_hops => {
+                    let peer = self
+                        .random_peer()
+                        .await
+                        .context(anyhow!("Failed to get random peer"))?;
+
+                    match tunnel.extend(&peer, &self.rng).await {
+                        Err(TunnelError::Broken(e)) => {
+                            tunnel.teardown(&self.rng).await;
+                            None
+                        }
+                        Err(TunnelError::Incomplete) => Some(tunnel),
+                        Ok(_) => Some(tunnel),
+                    }
+                }
+                Some(tunnel) => return Ok(tunnel),
             }
-            tunnel.extend(&self.dest, &self.rng).await?;
-            Ok(tunnel)
-        } else {
-            Tunnel::init(self.tunnel_id, &self.dest, &self.rng).await
         }
+        Err(anyhow!("failed to build tunnel"))
     }
 
     async fn random_peer(&mut self) -> Result<Peer> {
@@ -395,10 +361,11 @@ impl TunnelHandler {
                         }
                     }
                 }
-                State::Destroyed => break,
+                State::Destroyed => return Ok(()),
             }
         }
-        // TODO cleanup
+        self.tunnel.teardown(&self.builder.rng).await;
+        // TODO cleanup next tunnel
         Ok(())
     }
 
@@ -470,18 +437,22 @@ impl TunnelHandler {
                 mem::swap(&mut self.tunnel, &mut new_tunnel);
                 let old_tunnel = new_tunnel;
                 self.tunnel.begin(&self.builder.rng).await?;
+                // TODO send end on old_tunnel
 
                 self.spawn_next_tunnel_task();
-                tokio::spawn(async move {
-                    //old_tunnel.unbuild();
+                tokio::spawn({
+                    let rng = self.builder.rng.clone();
+                    async move {
+                        old_tunnel.unbuild(&rng).await;
+                    }
                 });
             }
             (Request::Switchover, State::Destroying) => {
                 self.state = State::Destroyed;
 
-                //self.tunnel.unbuild();
+                self.tunnel.unbuild(&self.builder.rng).await;
                 if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
-                    //next_tunnel.unbuild();
+                    next_tunnel.unbuild(&self.builder.rng).await;
                 }
             }
             (Request::Destroy, State::Ready) => self.state = State::Destroying,
