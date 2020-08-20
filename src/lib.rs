@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::Stream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{self, Duration};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
@@ -92,7 +92,7 @@ impl Onion {
     pub fn new<P>(
         listen_addr: SocketAddr,
         hostkey: RsaPrivateKey,
-        peer_provider: P,
+        mut peer_provider: P,
     ) -> Result<(Self, impl Stream<Item = Event>)>
     where
         P: Stream<Item = Peer> + Unpin + Send + Sync + 'static,
@@ -103,12 +103,14 @@ impl Onion {
         let (evt_tx, evt_rx) = mpsc::channel(100);
         // shared map of all tunnels (incoming and outgoing)
         let tunnels = Arc::new(Mutex::new(HashMap::new()));
+        // create peer_provider channel
+        let (peer_tx, mut peer_rx) = mpsc::channel(100);
 
         // creates round handler task which receives requests on req_rx and sends events on evt_tx
         tokio::spawn({
             let events = evt_tx.clone();
             let tunnels = tunnels.clone();
-            let mut round_handler = RoundHandler::new(req_rx, events, peer_provider, tunnels);
+            let mut round_handler = RoundHandler::new(req_rx, events, peer_tx, tunnels);
             async move { round_handler.next_round().await }
         });
 
@@ -119,6 +121,12 @@ impl Onion {
             let tunnels = tunnels.clone();
             let mut listener = OnionListener::new(hostkey, events, tunnels);
             async move { listener.listen_addr(listen_addr).await }
+        });
+
+        tokio::spawn(async move {
+            while let Some(req) = peer_rx.recv().await {
+                let _ = req.send(peer_provider.next().await.unwrap());
+            }
         });
 
         let onion = Onion { requests: req_tx };
@@ -156,23 +164,20 @@ impl Onion {
     }
 }
 
-struct RoundHandler<P> {
+struct RoundHandler {
     requests: mpsc::UnboundedReceiver<Request>,
     events: mpsc::Sender<Event>,
     rng: rand::SystemRandom,
-    peer_provider: P,
+    peer_provider: mpsc::Sender<oneshot::Sender<Peer>>,
     tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
     // more info about outgoing tunnels
 }
 
-impl<P> RoundHandler<P>
-where
-    P: Stream<Item = Peer> + Unpin + Send + Sync + 'static,
-{
+impl RoundHandler {
     pub(crate) fn new(
         requests: mpsc::UnboundedReceiver<Request>,
         events: mpsc::Sender<Event>,
-        peer_provider: P,
+        peer_provider: mpsc::Sender<oneshot::Sender<Peer>>,
         tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
     ) -> Self {
         let rng = rand::SystemRandom::new();
@@ -222,8 +227,13 @@ where
     pub(crate) async fn handle_build(&mut self, tunnel_id: TunnelId, dest: Peer, n_hops: usize) {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn({
-            let mut builder =
-                TunnelBuilder::new(tunnel_id, dest, n_hops, todo!(), self.rng.clone());
+            let mut builder = TunnelBuilder::new(
+                tunnel_id,
+                dest,
+                n_hops,
+                self.peer_provider.clone(),
+                self.rng.clone(),
+            );
             let mut events = self.events.clone();
             async move {
                 let first_tunnel = match builder.build().await {
@@ -273,13 +283,6 @@ where
         for tunnel in self.tunnels.lock().await.values_mut() {
             let _ = tunnel.send(tunnel::Request::Switchover);
         }
-    }
-
-    async fn random_peer(&mut self) -> Result<Peer> {
-        self.peer_provider
-            .next()
-            .await
-            .ok_or(anyhow!("Failed to get random peer"))
     }
 }
 

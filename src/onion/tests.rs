@@ -3,7 +3,6 @@ use crate::onion::crypto::{self, RsaPrivateKey};
 use crate::onion::tunnel::{Tunnel, TunnelError};
 use crate::*;
 use std::net::{IpAddr, Ipv4Addr};
-use tokio::stream;
 
 const TEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const TEST_PORT: u16 = 4200;
@@ -129,7 +128,8 @@ async fn test_data_unidirectional() -> Result<()> {
 
     let (_, req_rx) = mpsc::unbounded_channel();
     let (evt_tx, _) = mpsc::channel(100);
-    let mut round_handler = RoundHandler::new(req_rx, evt_tx, stream::empty(), Default::default());
+    let (peer_tx, _) = mpsc::channel(100);
+    let mut round_handler = RoundHandler::new(req_rx, evt_tx, peer_tx, Default::default());
 
     let tunnel_id = 3;
     round_handler.handle_build(tunnel_id, peer, 0).await;
@@ -185,7 +185,8 @@ async fn test_data_bidirectional() -> Result<()> {
 
     let (_, req_rx) = mpsc::unbounded_channel();
     let (evt_tx, mut evt_rx) = mpsc::channel(100);
-    let mut round_handler = RoundHandler::new(req_rx, evt_tx, stream::empty(), Default::default());
+    let (peer_tx, _) = mpsc::channel(100);
+    let mut round_handler = RoundHandler::new(req_rx, evt_tx, peer_tx, Default::default());
 
     let tunnel_id = 3;
     round_handler.handle_build(tunnel_id, peer, 0).await;
