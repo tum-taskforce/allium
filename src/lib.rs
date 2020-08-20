@@ -46,6 +46,9 @@ enum Request {
         tunnel_id: TunnelId,
         data: Bytes,
     },
+    Destroy {
+        tunnel_id: TunnelId,
+    },
 }
 
 /// Events destined for the API
@@ -115,7 +118,12 @@ impl Onion {
         tunnel_id
     }
 
-    pub fn destroy_tunnel(&self, tunnel_id: TunnelId) {}
+    pub fn destroy_tunnel(&self, tunnel_id: TunnelId) {
+        self.requests
+            .send(Request::Destroy { tunnel_id })
+            .map_err(|_| anyhow!("Failed to send destroy request"))
+            .unwrap();
+    }
 
     pub fn send_data(&self, tunnel_id: TunnelId, data: &[u8]) {
         // big TODO don't allocate
@@ -182,6 +190,9 @@ where
                 Request::Data { tunnel_id, data } => {
                     self.handle_data(tunnel_id, data).await;
                 }
+                Request::Destroy { tunnel_id } => {
+                    self.handle_destroy(tunnel_id).await;
+                }
             }
         }
     }
@@ -196,7 +207,7 @@ where
     ) -> Result<()> {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn({
-            let mut tunnel = if n_hops > 0 {
+            let tunnel = if n_hops > 0 {
                 let peer = self.random_peer().await?;
                 let mut tunnel = Tunnel::init(tunnel_id, &peer, &self.rng).await?;
                 for _ in 1..n_hops {

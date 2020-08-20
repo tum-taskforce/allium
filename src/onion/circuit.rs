@@ -145,7 +145,7 @@ impl CircuitHandler {
             Ok(_) => Ok(()),
             Err(e) => {
                 // finally tear down the circuits
-                self.teardown_all();
+                self.teardown_all().await;
                 Err(e)
             }
         }
@@ -460,7 +460,8 @@ impl CircuitHandler {
                     .send_data(circuit_id, tunnel_id, data, &self.session_key, &self.rng)
                     .await?;
             }
-            _ => unimplemented!(), // TODO
+            tunnel::Request::Destroy => unimplemented!(), // TODO handle tunnel destroy in CircuitHandler
+            tunnel::Request::Switchover => {}             // nothing to do here
         }
         Ok(())
     }
@@ -480,8 +481,8 @@ impl CircuitHandler {
     }
 
     async fn teardown_all(&mut self) {
-        self.teardown_in_circuit();
-        self.teardown_out_circuit();
+        self.teardown_in_circuit().await;
+        self.teardown_out_circuit().await;
     }
 
     async fn teardown_in_circuit(&mut self) {
