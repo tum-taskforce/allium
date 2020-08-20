@@ -6,7 +6,7 @@ use crate::onion::tunnel::{self, TunnelBuilder, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
-use log::{info, warn};
+use log::{info, trace, warn};
 use ring::rand;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -239,6 +239,7 @@ impl RoundHandler {
                 let first_tunnel = match builder.build().await {
                     Ok(t) => t,
                     Err(e) => {
+                        warn!("Failed to build tunnel: {}", e);
                         let _ = events.send(Event::Error {
                             tunnel_id,
                             reason: ErrorReason::Build,

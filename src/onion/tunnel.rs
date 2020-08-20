@@ -365,17 +365,14 @@ impl TunnelHandler {
     }
 
     pub(crate) async fn handle(&mut self) {
-        match self.request_loop().await {
-            Ok(_) => {}
-            Err(e) => {
-                warn!("{}", e);
-                self.tunnel.teardown(&self.builder.rng).await;
-                // TODO cleanup next tunnel
-            }
+        if let Err(e) = self.try_handle().await {
+            warn!("Error in TunnelHandler: {}", e);
+            self.tunnel.teardown(&self.builder.rng).await;
+            // TODO cleanup next tunnel
         }
     }
 
-    async fn request_loop(&mut self) -> Result<()> {
+    async fn try_handle(&mut self) -> Result<()> {
         loop {
             match self.state {
                 State::Building => {
@@ -449,11 +446,12 @@ impl TunnelHandler {
             }
             (Request::Switchover, State::Building) => {
                 self.state = State::Ready;
+                self.tunnel.begin(&self.builder.rng).await?;
                 self.events
                     .send(Event::Ready {
                         tunnel_id: self.tunnel.id,
                     })
-                    .await?;
+                    .await;
 
                 self.spawn_next_tunnel_task();
             }

@@ -133,6 +133,7 @@ async fn test_data_unidirectional() -> Result<()> {
 
     let tunnel_id = 3;
     round_handler.handle_build(tunnel_id, peer, 0).await;
+    round_handler.next_round().await;
     assert_eq!(evt_rx.recv().await, Some(Event::Incoming { tunnel_id }));
 
     let data = Bytes::from_static(b"test");
@@ -190,6 +191,9 @@ async fn test_data_bidirectional() -> Result<()> {
 
     let tunnel_id = 3;
     round_handler.handle_build(tunnel_id, peer, 0).await;
+    round_handler.next_round().await;
+    assert_eq!(evt_rx.recv().await, Some(Event::Ready { tunnel_id }));
+
     round_handler.handle_data(tunnel_id, data_ping).await;
     assert_eq!(
         evt_rx.recv().await,
