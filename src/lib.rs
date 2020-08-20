@@ -8,20 +8,23 @@ use bytes::Bytes;
 use futures::stream::StreamExt;
 use log::{info, warn};
 use ring::rand;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::Stream;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::{self, Duration};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
 pub use crate::onion::tunnel::TunnelId;
-use std::collections::HashMap;
 
 mod onion;
 mod utils;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
+
+const ROUND_DURATION: Duration = Duration::from_secs(30); // TODO read from config
 
 #[derive(Clone)]
 pub struct Peer {
@@ -166,33 +169,38 @@ where
         }
     }
 
-    /// Tunnels created in one period should be torn down and rebuilt for the next period.
-    /// However, Onion should ensure that this is done transparently to the modules, using these
-    /// tunnels. This could be achieved by creating a new tunnel before the end of a period and
-    /// seamlessly switching over the data stream to the new tunnel once at the end of the current
-    /// period. Since the destination peer of both old and new tunnel remains the same, the seamless
-    /// switch over is possible.
-    pub async fn next_round(&mut self) {
-        // TODO proper scheduling
-        while let Some(req) = self.requests.recv().await {
-            match req {
-                Request::Build {
-                    tunnel_id,
-                    dest,
-                    n_hops,
-                } => {
-                    let evt = match self.handle_build(tunnel_id, dest, n_hops).await {
-                        Ok(()) => Event::Ready { tunnel_id },
-                        Err(_) => Event::Error { tunnel_id },
-                    };
-                    self.events.send(evt).await.unwrap();
+    pub(crate) async fn handle(&mut self) {
+        let mut round_timer = time::interval(ROUND_DURATION);
+        loop {
+            tokio::select! {
+                Some(req) = self.requests.recv() => {
+                    self.handle_request(req).await;
                 }
-                Request::Data { tunnel_id, data } => {
-                    self.handle_data(tunnel_id, data).await;
+                _ = round_timer.tick() => {
+                    self.next_round().await;
                 }
-                Request::Destroy { tunnel_id } => {
-                    self.handle_destroy(tunnel_id).await;
-                }
+            }
+        }
+    }
+
+    async fn handle_request(&mut self, req: Request) {
+        match req {
+            Request::Build {
+                tunnel_id,
+                dest,
+                n_hops,
+            } => {
+                let evt = match self.handle_build(tunnel_id, dest, n_hops).await {
+                    Ok(()) => Event::Ready { tunnel_id },
+                    Err(_) => Event::Error { tunnel_id },
+                };
+                self.events.send(evt).await.unwrap();
+            }
+            Request::Data { tunnel_id, data } => {
+                self.handle_data(tunnel_id, data).await;
+            }
+            Request::Destroy { tunnel_id } => {
+                self.handle_destroy(tunnel_id).await;
             }
         }
     }
@@ -249,6 +257,18 @@ where
             .get(&tunnel_id)
             .unwrap()
             .send(tunnel::Request::Destroy);
+    }
+
+    /// Tunnels created in one period should be torn down and rebuilt for the next period.
+    /// However, Onion should ensure that this is done transparently to the modules, using these
+    /// tunnels. This could be achieved by creating a new tunnel before the end of a period and
+    /// seamlessly switching over the data stream to the new tunnel once at the end of the current
+    /// period. Since the destination peer of both old and new tunnel remains the same, the seamless
+    /// switch over is possible.
+    async fn next_round(&mut self) {
+        for tunnel in self.tunnels.lock().await.values_mut() {
+            let _ = tunnel.send(tunnel::Request::Switchover);
+        }
     }
 
     async fn random_peer(&mut self) -> Result<Peer> {
