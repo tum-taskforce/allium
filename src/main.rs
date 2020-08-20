@@ -4,9 +4,11 @@ use crate::api::socket::ApiSocket;
 use crate::utils::ToBytes;
 use anyhow::Context;
 use api::protocol::*;
+use bytes::Bytes;
 use futures::stream::StreamExt;
 use log::{info, trace};
 use onion::*;
+use ring::rand;
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
@@ -24,6 +26,8 @@ mod utils;
 struct OnionModule {
     connections: Mutex<HashMap<SocketAddr, ApiSocket<OwnedWriteHalf>>>,
     tunnels: Mutex<HashMap<TunnelId, Vec<SocketAddr>>>,
+    hostkeys: Mutex<HashMap<TunnelId, Bytes>>,
+    rng: rand::SystemRandom,
 }
 
 impl OnionModule {
@@ -31,6 +35,8 @@ impl OnionModule {
         OnionModule {
             connections: Default::default(),
             tunnels: Default::default(),
+            hostkeys: Default::default(),
+            rng: rand::SystemRandom::new(),
         }
     }
 
@@ -70,14 +76,22 @@ impl OnionModule {
             match msg {
                 OnionRequest::Build(dst_addr, dst_hostkey) => {
                     let dest = Peer::new(dst_addr, RsaPublicKey::new(dst_hostkey.to_vec()));
-                    let tunnel_id = onion.build_tunnel(dest, 3);
+
+                    let tunnel_id = loop {
+                        let tunnel_id = random_id(&self.rng);
+                        if !self.tunnels.lock().await.contains_key(&tunnel_id) {
+                            break tunnel_id;
+                        }
+                    };
+
+                    onion.build_tunnel(tunnel_id, dest, 3);
 
                     self.tunnels
                         .lock()
                         .await
-                        .entry(tunnel_id)
-                        .or_default()
-                        .push(client_addr);
+                        .insert(tunnel_id, vec![client_addr]);
+
+                    self.hostkeys.lock().await.insert(tunnel_id, dst_hostkey);
                 }
                 OnionRequest::Destroy(tunnel_id) => {
                     let mut tunnels = self.tunnels.lock().await;
@@ -87,14 +101,22 @@ impl OnionModule {
                             onion.destroy_tunnel(tunnel_id);
                         }
                     } else {
-                        // TODO send error message
+                        self.write_to_client(
+                            &client_addr,
+                            OnionResponse::Error(ErrorReason::Destroy, tunnel_id),
+                        )
+                        .await;
                     }
                 }
                 OnionRequest::Data(tunnel_id, tunnel_data) => {
                     if self.tunnels.lock().await.contains_key(&tunnel_id) {
                         onion.send_data(tunnel_id, &tunnel_data);
                     } else {
-                        // TODO send error message
+                        self.write_to_client(
+                            &client_addr,
+                            OnionResponse::Error(ErrorReason::Data, tunnel_id),
+                        )
+                        .await;
                     }
                 }
                 OnionRequest::Cover(_cover_size) => {
@@ -114,13 +136,29 @@ impl OnionModule {
             match event {
                 Event::Ready { tunnel_id } => {
                     for client in self.clients_for_tunnel(&tunnel_id).await {
-                        self.write_to_client(&client, OnionResponse::Ready(tunnel_id, todo!()))
-                            .await?;
+                        self.write_to_client(
+                            &client,
+                            OnionResponse::Ready(
+                                tunnel_id,
+                                self.hostkeys
+                                    .lock()
+                                    .await
+                                    .remove(&tunnel_id)
+                                    .unwrap()
+                                    .as_ref(),
+                            ),
+                        )
+                        .await?;
                     }
                 }
                 Event::Incoming { tunnel_id } => {
                     let all_conns = self.connections.lock().await.keys().cloned().collect();
                     self.tunnels.lock().await.insert(tunnel_id, all_conns);
+
+                    for client in self.clients_for_tunnel(&tunnel_id).await {
+                        self.write_to_client(&client, OnionResponse::Incoming(tunnel_id))
+                            .await?;
+                    }
                 }
                 Event::Data { tunnel_id, data } => {
                     for client in self.clients_for_tunnel(&tunnel_id).await {
@@ -131,11 +169,15 @@ impl OnionModule {
                         .await?;
                     }
                 }
-                Event::Error { tunnel_id } => {
+                Event::Error { tunnel_id, reason } => {
                     for client in self.clients_for_tunnel(&tunnel_id).await {
-                        self.write_to_client(&client, OnionResponse::Error(todo!(), tunnel_id))
+                        self.write_to_client(&client, OnionResponse::Error(reason, tunnel_id))
                             .await?;
-                        // TODO remove tunnel from tunnel if build failed
+
+                        if reason == ErrorReason::Build {
+                            self.tunnels.lock().await.remove(&tunnel_id);
+                            self.hostkeys.lock().await.remove(&tunnel_id);
+                        }
                     }
                 }
             }

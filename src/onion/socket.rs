@@ -42,7 +42,6 @@ pub(crate) enum OnionSocketError {
     /// - a wrong circuit id
     // In the case that a command response is awaited, incoming Tunnel Data messages may or may
     // not be ignored. Either way would be conforming to the specification.
-    // TODO argument: message
     #[error("received broken message that cannot be parsed and violates protocol")]
     BrokenMessage,
     /// Indicates that the remote peer returned a tunnel request with an error code
@@ -235,7 +234,6 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        // FIXME why do I have to define Key here?
         let tunnel_res = TunnelResponseTruncated;
         self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
             .await

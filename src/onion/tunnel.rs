@@ -8,12 +8,9 @@ use crate::Result;
 use crate::{Event, Peer};
 use anyhow::{anyhow, Context};
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
-use log::trace;
-use log::warn;
+use log::{trace, warn};
 use ring::rand;
 use ring::rand::SecureRandom;
-use std::convert::TryInto;
 use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -207,13 +204,6 @@ impl Tunnel {
         Ok(())
     }
 
-    pub(crate) fn random_id(rng: &rand::SystemRandom) -> TunnelId {
-        // FIXME an attacker may fill up all ids
-        let mut id_buf = [0u8; 4];
-        rng.fill(&mut id_buf).unwrap();
-        u32::from_le_bytes(id_buf)
-    }
-
     async fn unbuild(&self, rng: &rand::SystemRandom) {
         // TODO graceful deconstruction
         self.teardown(rng).await;
@@ -222,6 +212,13 @@ impl Tunnel {
     async fn teardown(&self, rng: &rand::SystemRandom) {
         self.out_circuit.teardown_with_timeout(rng).await;
     }
+}
+
+pub fn random_id(rng: &rand::SystemRandom) -> TunnelId {
+    // FIXME an attacker may fill up all ids
+    let mut id_buf = [0u8; 4];
+    rng.fill(&mut id_buf).unwrap();
+    u32::from_le_bytes(id_buf)
 }
 
 #[derive(Clone)]
@@ -341,7 +338,18 @@ impl TunnelHandler {
         }
     }
 
-    pub(crate) async fn handle(&mut self) -> Result<()> {
+    pub(crate) async fn handle(&mut self) {
+        match self.request_loop().await {
+            Ok(_) => {}
+            Err(e) => {
+                warn!("{}", e);
+                self.tunnel.teardown(&self.builder.rng).await;
+                // TODO cleanup next tunnel
+            }
+        }
+    }
+
+    async fn request_loop(&mut self) -> Result<()> {
         loop {
             match self.state {
                 State::Building => {
@@ -364,9 +372,6 @@ impl TunnelHandler {
                 State::Destroyed => return Ok(()),
             }
         }
-        self.tunnel.teardown(&self.builder.rng).await;
-        // TODO cleanup next tunnel
-        Ok(())
     }
 
     async fn handle_tunnel_message(

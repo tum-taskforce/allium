@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use crate::utils::{self, FromBytes, ToBytes};
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use onion::Result;
+use onion::{ErrorReason, Result};
 use serde::export::Formatter;
 use std::fmt;
 use std::net::SocketAddr;
@@ -135,7 +135,7 @@ pub enum OnionResponse<'a> {
     /// established tunnel. The reported error condition is not be mistaken with API violations.
     /// Error conditions trigger upon correct usage of API. API violations are to be handled by
     /// terminating the connection to the misbehaving client.
-    Error(/* request_type */ u16, /* tunnel_id */ u32),
+    Error(ErrorReason, /* tunnel_id */ u32),
 }
 
 impl ToBytes for OnionResponse<'_> {
@@ -167,10 +167,16 @@ impl ToBytes for OnionResponse<'_> {
                 buf.put_u32(*tunnel_id);
                 buf.put(*tunnel_data);
             }
-            OnionResponse::Error(request_type, tunnel_id) => {
+            OnionResponse::Error(reason, tunnel_id) => {
+                let request_type = match reason {
+                    ErrorReason::Build => ONION_TUNNEL_BUILD,
+                    ErrorReason::Data => ONION_TUNNEL_DATA,
+                    ErrorReason::Destroy => ONION_TUNNEL_DESTROY,
+                };
+
                 buf.put_u16(self.size() as u16);
                 buf.put_u16(ONION_TUNNEL_ERROR);
-                buf.put_u16(*request_type);
+                buf.put_u16(request_type);
                 buf.put_u16(0);
                 buf.put_u32(*tunnel_id);
             }

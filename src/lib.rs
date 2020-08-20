@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel::{self, Tunnel, TunnelBuilder, TunnelHandler};
+use crate::onion::tunnel::{self, TunnelBuilder, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{self, Duration};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
+pub use crate::onion::tunnel::random_id;
 pub use crate::onion::tunnel::TunnelId;
 
 mod onion;
@@ -57,13 +58,29 @@ enum Request {
 /// Events destined for the API
 #[derive(Debug, PartialEq)]
 pub enum Event {
-    Ready { tunnel_id: TunnelId },
-    Incoming { tunnel_id: TunnelId },
-    Data { tunnel_id: TunnelId, data: Bytes },
-    Error { tunnel_id: TunnelId },
+    Ready {
+        tunnel_id: TunnelId,
+    },
+    Incoming {
+        tunnel_id: TunnelId,
+    },
+    Data {
+        tunnel_id: TunnelId,
+        data: Bytes,
+    },
+    Error {
+        tunnel_id: TunnelId,
+        reason: ErrorReason,
+    },
 }
 
-/// TODO general documentation
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum ErrorReason {
+    Build,
+    Data,
+    Destroy,
+}
+
 #[derive(Clone)]
 pub struct Onion {
     requests: mpsc::UnboundedSender<Request>,
@@ -108,11 +125,10 @@ impl Onion {
         Ok((onion, evt_rx))
     }
 
-    pub fn build_tunnel(&self, dest: Peer, n_hops: usize) -> TunnelId {
-        let tunnel_id = Tunnel::random_id(todo!());
+    pub fn build_tunnel(&self, tunnel_id: TunnelId, dest: Peer, n_hops: usize) -> TunnelId {
         self.requests
             .send(Request::Build {
-                tunnel_id,
+                tunnel_id, // TODO maybe refactor to return tunnel_id with Ready
                 dest,
                 n_hops,
             })
@@ -190,11 +206,7 @@ where
                 dest,
                 n_hops,
             } => {
-                let evt = match self.handle_build(tunnel_id, dest, n_hops).await {
-                    Ok(()) => Event::Ready { tunnel_id },
-                    Err(_) => Event::Error { tunnel_id },
-                };
-                self.events.send(evt).await.unwrap();
+                self.handle_build(tunnel_id, dest, n_hops).await;
             }
             Request::Data { tunnel_id, data } => {
                 self.handle_data(tunnel_id, data).await;
@@ -207,12 +219,7 @@ where
 
     /// Builds a new tunnel to `dest` over `n_hops` additional peers.
     /// Performs a handshake with each hop and then spawns a task for handling incoming messages.
-    pub(crate) async fn handle_build(
-        &mut self,
-        tunnel_id: TunnelId,
-        dest: Peer,
-        n_hops: usize,
-    ) -> Result<()> {
+    pub(crate) async fn handle_build(&mut self, tunnel_id: TunnelId, dest: Peer, n_hops: usize) {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn({
             let mut builder =
@@ -222,20 +229,21 @@ where
                 let first_tunnel = match builder.build().await {
                     Ok(t) => t,
                     Err(e) => {
-                        let _ = events.send(Event::Error { tunnel_id });
+                        let _ = events.send(Event::Error {
+                            tunnel_id,
+                            reason: ErrorReason::Build,
+                        });
                         return;
                     }
                 };
                 let mut handler = TunnelHandler::new(first_tunnel, builder, rx, events);
-                handler.handle().await.unwrap();
+                handler.handle().await;
             }
         });
         self.tunnels.lock().await.insert(tunnel_id, tx);
-        Ok(())
     }
 
     pub(crate) async fn handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) {
-        // TODO handle errors
         let _ = self
             .tunnels
             .lock()
@@ -246,7 +254,6 @@ where
     }
 
     pub(crate) async fn handle_destroy(&mut self, tunnel_id: TunnelId) {
-        // TODO handle errors
         let _ = self
             .tunnels
             .lock()

@@ -1,7 +1,7 @@
 use crate::Result;
 use serde::Deserialize;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 

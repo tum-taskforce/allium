@@ -945,7 +945,7 @@ mod tests {
 
     fn generate_aes_keys(rng: &rand::SystemRandom) -> Result<[SessionKey; 1]> {
         let mut aes_key_bytes = [0u8; 16];
-        rng.fill(&mut aes_key_bytes)?; // TODO not sure about this
+        rng.fill(&mut aes_key_bytes)?;
         Ok([SessionKey::from_bytes(&aes_key_bytes)?])
     }
 }
