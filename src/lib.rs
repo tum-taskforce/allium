@@ -350,13 +350,30 @@ impl OnionListener {
                 tunnel_id,
                 requests,
             } => {
-                self.tunnels.lock().await.insert(tunnel_id, requests);
-                self.events.send(Event::Incoming { tunnel_id }).await;
+                match self.tunnels.lock().await.insert(tunnel_id, requests) {
+                    None => {
+                        self.events.send(Event::Incoming { tunnel_id }).await;
+                    }
+                    Some(s) => {
+                        s.send(tunnel::Request::Destroy);
+                        // implicit drop of any old channel
+                    }
+                };
             }
             circuit::Event::Data { tunnel_id, data } => {
+                /* TODO We do not accept any incoming Data packets on the old socket, which me might
+                    opt to for less packet drop on switchover.
+                */
                 if self.tunnels.lock().await.contains_key(&tunnel_id) {
                     self.events.send(Event::Data { tunnel_id, data }).await;
                 }
+            }
+            circuit::Event::End { tunnel_id } => {
+                /* TODO We never communicate this step to the API, nor do we need to. However, we
+                   need to clear up the map to prevent cluttering. Also, we do not limit old
+                   circuits to remain as zombie circuits on Alice's client since Alice expects an
+                   END response which we should send here.
+                */
             }
         }
     }

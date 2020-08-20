@@ -337,6 +337,26 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
             .await
     }
 
+    /// Sends a `TUNNEL END` message via this stream with the given `tunnel_id` to indicate a
+    /// conversation end to the final hop on this socket. This function does not block for
+    /// responses.
+    ///
+    /// If the targeted hop is not the final hop or forbids the connection, it may send a `TEARDOWN`
+    /// message that will not be read here, but listening on the connection for `TUNNEL DATA`
+    /// packets may reveal this.
+    pub(crate) async fn end(
+        &mut self,
+        circuit_id: CircuitId,
+        tunnel_id: TunnelId,
+        session_keys: &[SessionKey],
+        rng: &rand::SystemRandom,
+    ) -> SocketResult<()> {
+        self.buf.clear();
+        let tunnel_res = TunnelRequest::End(tunnel_id);
+        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
+            .await
+    }
+
     pub(crate) async fn send_keep_alive(
         &mut self,
         circuit_id: CircuitId,

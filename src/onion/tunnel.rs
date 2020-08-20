@@ -178,6 +178,16 @@ impl Tunnel {
         Ok(())
     }
 
+    /// Ends a data connection with the last hop in the tunnel
+    pub(crate) async fn end(&mut self, rng: &rand::SystemRandom) -> TunnelResult<()> {
+        self.out_circuit
+            .socket()
+            .await
+            .end(self.out_circuit.id, self.id, &self.session_keys, rng)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn truncate_to_length(
         &mut self,
         n_hops: usize,
@@ -387,20 +397,20 @@ impl TunnelHandler {
         match tunnel_msg {
             Ok(TunnelRequest::Data(tunnel_id, data)) => {
                 let event = Event::Data { tunnel_id, data };
-                // TODO send event in case of error
-                self.events.send(event).await?
+                self.events.send(event).await?;
+                Ok(())
             }
             Ok(TunnelRequest::End(tunnel_id)) => {
-                // TODO send event and deconstruct tunnel
-                todo!()
+                // TODO maybe reconstruct tunnel
+                Err(anyhow!("Tunnel broke due to unexpected End"))
             }
             _ => {
                 // invalid request or broken digest
-                // TODO teardown tunnel
-                todo!()
+                Err(anyhow!(
+                    "Tunnel broke due to invalid request or broken digest"
+                ))
             }
         }
-        Ok(())
     }
 
     async fn handle_request(&mut self, req: Request) -> Result<()> {
@@ -440,9 +450,9 @@ impl TunnelHandler {
                     .ok_or(anyhow!("Switchover failed: no next tunnel"))?;
 
                 mem::swap(&mut self.tunnel, &mut new_tunnel);
-                let old_tunnel = new_tunnel;
+                let mut old_tunnel = new_tunnel;
                 self.tunnel.begin(&self.builder.rng).await?;
-                // TODO send end on old_tunnel
+                old_tunnel.end(&self.builder.rng).await?;
 
                 self.spawn_next_tunnel_task();
                 tokio::spawn({

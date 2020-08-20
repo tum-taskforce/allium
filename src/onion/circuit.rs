@@ -108,6 +108,9 @@ pub(crate) enum Event {
         tunnel_id: TunnelId,
         data: Bytes,
     },
+    End {
+        tunnel_id: TunnelId,
+    },
 }
 
 impl CircuitHandler {
@@ -370,7 +373,25 @@ impl CircuitHandler {
             (TunnelRequest::Begin(_), state) => {
                 return Err(anyhow!("Begin request while not in Default state"));
             }
-            (TunnelRequest::End(tunnel_id), state) => state, // TODO End
+            (
+                TunnelRequest::End(req_tunnel_id),
+                State::Endpoint {
+                    tunnel_id,
+                    mut requests,
+                },
+            ) => {
+                if req_tunnel_id != tunnel_id {
+                    return Err(anyhow!("Unknown tunnel id in Data message"));
+                }
+
+                requests.close();
+                let _ = self.events.send(Event::End { tunnel_id }).await;
+
+                State::Default
+            }
+            (TunnelRequest::End(_), state) => {
+                return Err(anyhow!("End request white not in Endpoint state"));
+            }
             (
                 TunnelRequest::Data(req_tunnel_id, data),
                 State::Endpoint {
@@ -390,7 +411,7 @@ impl CircuitHandler {
                 }
             }
             (TunnelRequest::Data(_, _), state) => {
-                return Err(anyhow!("Data request while not in Default state"));
+                return Err(anyhow!("Data request while not in Endpoint state"));
             }
             /*
              KeepAlive messages are always valid and only cause a reset of the loop
@@ -473,8 +494,16 @@ impl CircuitHandler {
                     .send_data(circuit_id, tunnel_id, data, &self.session_key, &self.rng)
                     .await?;
             }
-            tunnel::Request::Destroy => unimplemented!(), // TODO handle tunnel destroy in CircuitHandler
-            tunnel::Request::Switchover => {}             // nothing to do here
+            tunnel::Request::Destroy => {
+                let circuit_id = self.in_circuit.id;
+                self.in_circuit
+                    .socket()
+                    .await
+                    .end(circuit_id, tunnel_id, &self.session_key, &self.rng)
+                    .await?;
+                self.state = State::Default;
+            }
+            tunnel::Request::Switchover => {} // nothing to do here
         }
         Ok(())
     }
