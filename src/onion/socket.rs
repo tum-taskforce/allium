@@ -4,6 +4,7 @@ use crate::utils::{ToBytes, TryFromBytes};
 use crate::{CircuitId, Result, TunnelId};
 use bytes::{Bytes, BytesMut};
 use ring::rand;
+use std::fmt;
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -60,7 +61,7 @@ impl From<CircuitProtocolError> for OnionSocketError {
     }
 }
 
-impl<E: std::fmt::Debug> From<TunnelProtocolError<E>> for OnionSocketError {
+impl<E: fmt::Debug> From<TunnelProtocolError<E>> for OnionSocketError {
     fn from(e: TunnelProtocolError<E>) -> Self {
         match e {
             TunnelProtocolError::Peer(_) => OnionSocketError::Peer,
@@ -519,5 +520,14 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 impl OnionSocket<TcpStream> {
     pub(crate) fn peer_addr(&self) -> Result<SocketAddr> {
         Ok(self.stream.peer_addr()?)
+    }
+}
+
+impl<S: fmt::Debug> fmt::Debug for OnionSocket<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnionSocket")
+            .field("stream", &self.stream)
+            .field("buf_len", &self.buf.len())
+            .finish()
     }
 }

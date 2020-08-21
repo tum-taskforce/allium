@@ -6,7 +6,7 @@ use crate::onion::tunnel::{self, TunnelBuilder, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
-use log::{info, trace, warn};
+use log::{info, warn};
 use ring::rand;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -19,6 +19,7 @@ use tokio::time::{self, Duration};
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
 pub use crate::onion::tunnel::random_id;
 pub use crate::onion::tunnel::TunnelId;
+use std::fmt;
 
 mod onion;
 mod utils;
@@ -40,6 +41,7 @@ impl Peer {
 }
 
 /// Handled by the RoundHandler
+#[derive(Debug)]
 enum Request {
     Build {
         tunnel_id: TunnelId,
@@ -356,10 +358,10 @@ impl OnionListener {
             } => {
                 match self.tunnels.lock().await.insert(tunnel_id, requests) {
                     None => {
-                        self.events.send(Event::Incoming { tunnel_id }).await;
+                        let _ = self.events.send(Event::Incoming { tunnel_id }).await;
                     }
                     Some(s) => {
-                        s.send(tunnel::Request::Destroy);
+                        let _ = s.send(tunnel::Request::Destroy);
                         // implicit drop of any old channel
                     }
                 };
@@ -369,7 +371,7 @@ impl OnionListener {
                     opt to for less packet drop on switchover.
                 */
                 if self.tunnels.lock().await.contains_key(&tunnel_id) {
-                    self.events.send(Event::Data { tunnel_id, data }).await;
+                    let _ = self.events.send(Event::Data { tunnel_id, data }).await;
                 }
             }
             circuit::Event::End { tunnel_id } => {
@@ -380,5 +382,11 @@ impl OnionListener {
                 */
             }
         }
+    }
+}
+
+impl fmt::Debug for Peer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Peer").field(&self.addr).finish()
     }
 }

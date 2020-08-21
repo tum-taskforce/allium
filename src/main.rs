@@ -104,7 +104,7 @@ impl OnionModule {
                             &client_addr,
                             OnionResponse::Error(ErrorReason::Destroy, tunnel_id),
                         )
-                        .await;
+                        .await?;
                     }
                 }
                 OnionRequest::Data(tunnel_id, tunnel_data) => {
@@ -115,7 +115,7 @@ impl OnionModule {
                             &client_addr,
                             OnionResponse::Error(ErrorReason::Data, tunnel_id),
                         )
-                        .await;
+                        .await?;
                     }
                 }
                 OnionRequest::Cover(_cover_size) => {
@@ -253,6 +253,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    join!(api_listen_task, event_task);
+    let (_, _) = join!(api_listen_task, event_task);
     Ok(())
 }

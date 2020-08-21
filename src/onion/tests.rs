@@ -169,14 +169,11 @@ async fn test_data_bidirectional() -> Result<()> {
                 match evt {
                     Event::Data { tunnel_id, data } => {
                         assert_eq!(&data[..], &data_ping[..]);
-                        tunnels
-                            .lock()
-                            .await
-                            .get(&tunnel_id)
-                            .unwrap()
-                            .send(tunnel::Request::Data {
+                        let _ = tunnels.lock().await.get(&tunnel_id).unwrap().send(
+                            tunnel::Request::Data {
                                 data: data_pong.clone(),
-                            });
+                            },
+                        );
                     }
                     _ => {}
                 }

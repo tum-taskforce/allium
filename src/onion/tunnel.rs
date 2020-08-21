@@ -11,6 +11,7 @@ use bytes::Bytes;
 use log::{trace, warn};
 use ring::rand;
 use ring::rand::SecureRandom;
+use std::fmt;
 use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -46,6 +47,7 @@ impl From<OnionSocketError> for TunnelError {
 
 pub(crate) type TunnelResult<T> = std::result::Result<T, TunnelError>;
 
+#[derive(Debug)]
 pub(crate) enum Request {
     Data { data: Bytes },
     Switchover,
@@ -339,7 +341,7 @@ pub(crate) struct TunnelHandler {
     builder: TunnelBuilder,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) enum State {
     Building,
     Ready,
@@ -447,7 +449,8 @@ impl TunnelHandler {
             (Request::Switchover, State::Building) => {
                 self.state = State::Ready;
                 self.tunnel.begin(&self.builder.rng).await?;
-                self.events
+                let _ = self
+                    .events
                     .send(Event::Ready {
                         tunnel_id: self.tunnel.id,
                     })
@@ -487,9 +490,9 @@ impl TunnelHandler {
             (Request::Destroy, State::Ready) => self.state = State::Destroying,
             (Request::KeepAlive, State::Destroyed) => {} // ignore this request,
             (Request::KeepAlive, _) => {
-                self.tunnel.keep_alive(&self.builder.rng).await;
+                self.tunnel.keep_alive(&self.builder.rng).await?;
                 if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
-                    next_tunnel.keep_alive(&self.builder.rng).await;
+                    next_tunnel.keep_alive(&self.builder.rng).await?;
                 }
             } // ignore this request
             _ => return Err(anyhow!("Illegal TunnelHandler state")),
@@ -506,5 +509,35 @@ impl TunnelHandler {
                 next_tunnel.lock().await.replace(new_tunnel);
             }
         });
+    }
+}
+
+impl fmt::Debug for Tunnel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tunnel")
+            .field("id", &self.id)
+            .field("out_circuit", &self.out_circuit)
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for TunnelBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TunnelBuilder")
+            .field("tunnel_id", &self.tunnel_id)
+            .field("dest", &self.dest)
+            .field("n_hops", &self.n_hops)
+            .finish()
+    }
+}
+
+impl fmt::Debug for TunnelHandler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TunnelHandler")
+            .field("tunnel", &self.tunnel)
+            .field("state", &self.state)
+            .field("builder", &self.builder)
+            .finish()
     }
 }

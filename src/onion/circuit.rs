@@ -13,6 +13,7 @@ use log::trace;
 use log::warn;
 use ring::rand;
 use ring::rand::SecureRandom;
+use std::fmt;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex, MutexGuard};
@@ -144,7 +145,7 @@ impl CircuitHandler {
             })
         } else {
             trace!("Incoming handshake failed post-handshake: unable to derive key");
-            time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
+            let _ = time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
                 socket.teardown(circuit_id, &rng)
             })
             .await;
@@ -535,6 +536,57 @@ impl CircuitHandler {
     async fn teardown_out_circuit(&mut self) {
         if let State::Router { out_circuit } = &self.state {
             out_circuit.teardown_with_timeout(&self.rng).await;
+        }
+    }
+}
+
+impl fmt::Debug for Circuit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Circuit").field(&self.id).finish()
+    }
+}
+
+impl fmt::Debug for Event {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            Event::Incoming { tunnel_id, .. } => f
+                .debug_struct("Incoming")
+                .field("tunnel_id", tunnel_id)
+                .finish(),
+            Event::Data { tunnel_id, data } => f
+                .debug_struct("Data")
+                .field("tunnel_id", tunnel_id)
+                .field("data", data)
+                .finish(),
+            Event::End { tunnel_id } => f
+                .debug_struct("Data")
+                .field("tunnel_id", tunnel_id)
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for CircuitHandler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CircuitHandler")
+            .field("in_circuit", &self.in_circuit)
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl fmt::Debug for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            State::Default => f.debug_struct("Default").finish(),
+            State::Router { out_circuit } => f
+                .debug_struct("Router")
+                .field("out_circuit", out_circuit)
+                .finish(),
+            State::Endpoint { tunnel_id, .. } => f
+                .debug_struct("Endpoint")
+                .field("tunnel_id", tunnel_id)
+                .finish(),
         }
     }
 }

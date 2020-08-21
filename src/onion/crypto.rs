@@ -14,6 +14,7 @@ pub(crate) struct EphemeralPublicKey(agreement::UnparsedPublicKey<Bytes>);
 pub struct RsaPublicKey(signature::UnparsedPublicKey<Bytes>);
 pub struct RsaPrivateKey(signature::RsaKeyPair);
 pub(crate) struct SessionKey(aead::LessSafeKey);
+// TODO consider storing generic B: AsRef<[u8]> instead of Bytes (-> avoid allocations)
 
 impl EphemeralPrivateKey {
     pub(crate) fn generate(rng: &rand::SystemRandom) -> Self {
@@ -22,7 +23,6 @@ impl EphemeralPrivateKey {
 
     pub(crate) fn public_key(&self) -> EphemeralPublicKey {
         let public_key = self.0.compute_public_key().unwrap();
-        // TODO maybe avoid allocating here
         let public_key_bytes = public_key.as_ref().to_vec().into();
         EphemeralPublicKey(agreement::UnparsedPublicKey::new(
             &agreement::X25519,

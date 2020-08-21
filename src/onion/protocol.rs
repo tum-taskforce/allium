@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use ring::rand::SecureRandom;
 use ring::{aead, digest, rand};
+use std::fmt;
 use std::net::SocketAddr;
 use thiserror::Error;
 
@@ -45,7 +46,7 @@ pub(crate) enum CircuitProtocolError {
 pub(crate) type CircuitProtocolResult<T> = std::result::Result<T, CircuitProtocolError>;
 
 #[derive(Error, Debug)]
-pub(crate) enum TunnelProtocolError<E: std::fmt::Debug> {
+pub(crate) enum TunnelProtocolError<E: fmt::Debug> {
     #[error("Peer responded with an error code")]
     Peer(E),
     #[error("Unknown tunnel message id: {actual}")]
@@ -203,7 +204,7 @@ pub(crate) enum TunnelTruncatedError {
 
 pub(crate) struct TunnelResponseTruncated;
 
-pub(crate) trait TryFromBytesExt<E: std::fmt::Debug>:
+pub(crate) trait TryFromBytesExt<E: fmt::Debug>:
     TryFromBytes<TunnelProtocolError<E>>
 {
     fn read_with_digest_from(buf: &mut BytesMut) -> TunnelProtocolResult<Self, E>
@@ -220,7 +221,7 @@ pub(crate) trait TryFromBytesExt<E: std::fmt::Debug>:
     }
 }
 
-impl<T, E: std::fmt::Debug> TryFromBytesExt<E> for T where T: TryFromBytes<TunnelProtocolError<E>> {}
+impl<T, E: fmt::Debug> TryFromBytesExt<E> for T where T: TryFromBytes<TunnelProtocolError<E>> {}
 
 pub(crate) trait ToBytesExt: ToBytes {
     fn write_with_digest_to(&self, buf: &mut BytesMut, rng: &rand::SystemRandom, pad_size: usize) {
