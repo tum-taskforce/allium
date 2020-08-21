@@ -505,8 +505,12 @@ impl TunnelHandler {
             let next_tunnel = self.next_tunnel.clone();
             let mut builder = self.builder.clone();
             async move {
-                let new_tunnel = builder.build().await.unwrap();
-                next_tunnel.lock().await.replace(new_tunnel);
+                match builder.build().await {
+                    Ok(new_tunnel) => {
+                        next_tunnel.lock().await.replace(new_tunnel);
+                    },
+                    Err(e) => warn!("Rebuilding of a tunnel failed: {}", e),
+                };
             }
         });
     }
