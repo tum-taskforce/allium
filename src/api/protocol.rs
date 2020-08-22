@@ -17,6 +17,7 @@ const ONION_TUNNEL_ERROR: u16 = 565;
 const ONION_TUNNEL_COVER: u16 = 566;
 
 /// Messages received by the onion module.
+#[derive(PartialEq)]
 pub enum OnionRequest {
     /// This message is to be used by the CM/UI module to request the Onion module to build a tunnel
     /// to the given destination in the next period.
@@ -109,7 +110,7 @@ impl OnionRequest {
 }
 
 /// Messages sent by the onion module.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum OnionResponse {
     /// This message is sent by the Onion module when the requested tunnel is built. The recipient
     /// is allowed to send data in this tunnel after receiving this message. It contains the
@@ -213,7 +214,7 @@ impl Module {
 }
 
 /// Messages received by the RPS module.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum RpsRequest {
     /// This message is used to ask RPS to reply with a random peer.
     Query,
@@ -237,7 +238,7 @@ impl ToBytes for RpsRequest {
 }
 
 /// Messages sent by the RPS module.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum RpsResponse {
     /// This message is sent by the RPS module as a response to the RPS QUERY message. It contains
     /// the peer identity and the network address of a peer which is selected by RPS at random. In
@@ -292,7 +293,7 @@ impl RpsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::ToBytes;
+    use crate::utils::{ToBytes, TryFromBytes};
 
     impl ToBytes for OnionRequest {
         fn size(&self) -> usize {
@@ -370,8 +371,63 @@ mod tests {
 
                     Ok(OnionResponse::Error(reason, tunnel_id))
                 }
-                _ => Err(anyhow!("Unkown response message type: {}", message_type)),
+                _ => Err(anyhow!("Unknown response message type: {}", message_type)),
             }
         }
+    }
+
+    fn check_read_write<M, E>(msg: M, buf: &mut BytesMut)
+    where
+        M: ToBytes + TryFromBytes<E> + PartialEq + fmt::Debug,
+        E: fmt::Debug,
+    {
+        buf.clear();
+        msg.write_to(buf);
+        assert_eq!(buf.len(), msg.size());
+        let read_msg = M::try_read_from(buf).unwrap();
+        assert_eq!(msg, read_msg);
+    }
+
+    #[test]
+    fn test_onion_request() {
+        let mut buf = BytesMut::new();
+
+        let dst_addr = "127.0.0.1:4201".parse().unwrap();
+        let dst_hostkey = Bytes::from_static(b"testkey");
+        let msg = OnionRequest::Build(dst_addr, dst_hostkey);
+        check_read_write(msg, &mut buf);
+
+        let tunnel_id = 3;
+        let msg = OnionRequest::Destroy(tunnel_id);
+        check_read_write(msg, &mut buf);
+
+        let data = Bytes::from_static(b"testdata");
+        let msg = OnionRequest::Data(tunnel_id, data);
+        check_read_write(msg, &mut buf);
+
+        let cover_size = 100;
+        let msg = OnionRequest::Cover(cover_size);
+        check_read_write(msg, &mut buf);
+    }
+
+    #[test]
+    fn test_onion_response() {
+        let mut buf = BytesMut::new();
+
+        let tunnel_id = 3;
+        let dst_hostkey = Bytes::from_static(b"testkey");
+        let msg = OnionResponse::Ready(tunnel_id, dst_hostkey);
+        check_read_write(msg, &mut buf);
+
+        let msg = OnionResponse::Incoming(tunnel_id);
+        check_read_write(msg, &mut buf);
+
+        let data = Bytes::from_static(b"testdata");
+        let msg = OnionResponse::Data(tunnel_id, data);
+        check_read_write(msg, &mut buf);
+
+        let reason = ErrorReason::Build;
+        let msg = OnionResponse::Error(reason, tunnel_id);
+        check_read_write(msg, &mut buf);
     }
 }
