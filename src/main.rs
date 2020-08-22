@@ -139,12 +139,7 @@ impl OnionModule {
                             &client,
                             OnionResponse::Ready(
                                 tunnel_id,
-                                self.hostkeys
-                                    .lock()
-                                    .await
-                                    .remove(&tunnel_id)
-                                    .unwrap()
-                                    .as_ref(),
+                                self.hostkeys.lock().await.remove(&tunnel_id).unwrap(),
                             ),
                         )
                         .await?;
@@ -161,11 +156,8 @@ impl OnionModule {
                 }
                 Event::Data { tunnel_id, data } => {
                     for client in self.clients_for_tunnel(&tunnel_id).await {
-                        self.write_to_client(
-                            &client,
-                            OnionResponse::Data(tunnel_id, data.as_ref()),
-                        )
-                        .await?;
+                        self.write_to_client(&client, OnionResponse::Data(tunnel_id, data.clone()))
+                            .await?;
                     }
                 }
                 Event::Error { tunnel_id, reason } => {

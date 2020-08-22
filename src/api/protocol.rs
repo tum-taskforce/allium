@@ -110,12 +110,12 @@ impl OnionRequest {
 
 /// Messages sent by the onion module.
 #[derive(Debug)]
-pub enum OnionResponse<'a> {
+pub enum OnionResponse {
     /// This message is sent by the Onion module when the requested tunnel is built. The recipient
     /// is allowed to send data in this tunnel after receiving this message. It contains the
     /// identity of the destination peer and a tunnel ID which is assigned by the Onion moduel to
     /// uniquely identify different tunnels.
-    Ready(/* tunnel_id */ u32, /* dst_hostkey */ &'a [u8]),
+    Ready(/* tunnel_id */ u32, /* dst_hostkey */ Bytes),
     /// This message is sent by the Onion module on all of its API connections to signal a new
     /// incoming tunnel connection. The new tunnel will be identified by the given tunnel ID.
     /// No response is solicited by Onion for this message. When undesired, the tunnel could be
@@ -129,7 +129,7 @@ pub enum OnionResponse<'a> {
     /// tunnel which is used to forwarding the data; for incoming data it is the tunnel on which the
     /// data is received. For outgoing data, Onion should make a best effort to forward the given
     /// data. However, no guarantee is given: the data could be lost and/or delivered out of order.
-    Data(/* tunnel_id */ u32, /* tunnel_data */ &'a [u8]),
+    Data(/* tunnel_id */ u32, /* tunnel_data */ Bytes),
     /// This message is sent by the Onion module to signal an error condition which stems from
     /// servicing an earlier request. The message contains the tunnel ID to signal the failure of an
     /// established tunnel. The reported error condition is not be mistaken with API violations.
@@ -138,7 +138,7 @@ pub enum OnionResponse<'a> {
     Error(ErrorReason, /* tunnel_id */ u32),
 }
 
-impl ToBytes for OnionResponse<'_> {
+impl ToBytes for OnionResponse {
     fn size(&self) -> usize {
         match self {
             OnionResponse::Ready(_, dst_hostkey) => 8 + dst_hostkey.len(),
@@ -154,7 +154,7 @@ impl ToBytes for OnionResponse<'_> {
                 buf.put_u16(self.size() as u16);
                 buf.put_u16(ONION_TUNNEL_READY);
                 buf.put_u32(*tunnel_id);
-                buf.put(*dst_hostkey);
+                buf.put(dst_hostkey.as_ref());
             }
             OnionResponse::Incoming(tunnel_id) => {
                 buf.put_u16(self.size() as u16);
@@ -165,7 +165,7 @@ impl ToBytes for OnionResponse<'_> {
                 buf.put_u16(self.size() as u16);
                 buf.put_u16(ONION_TUNNEL_DATA);
                 buf.put_u32(*tunnel_id);
-                buf.put(*tunnel_data);
+                buf.put(tunnel_data.as_ref());
             }
             OnionResponse::Error(reason, tunnel_id) => {
                 let request_type = match reason {
@@ -285,6 +285,93 @@ impl RpsResponse {
     pub fn id(&self) -> u16 {
         match self {
             RpsResponse::Peer(_, _, _, _) => RPS_PEER,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::ToBytes;
+
+    impl ToBytes for OnionRequest {
+        fn size(&self) -> usize {
+            match self {
+                OnionRequest::Build(dst_addr, dst_hostkey) => {
+                    8 + (if dst_addr.is_ipv4() { 4 } else { 16 }) + dst_hostkey.len()
+                }
+                OnionRequest::Destroy(_tunnel_id) => 4 + 4,
+                OnionRequest::Data(_tunnel_id, data) => 4 + 4 + data.len(),
+                OnionRequest::Cover(_cover_size) => 4 + 4,
+            }
+        }
+
+        fn write_to(&self, buf: &mut BytesMut) {
+            match self {
+                OnionRequest::Build(dst_addr, dst_hostkey) => {
+                    buf.put_u16(self.size() as u16);
+                    buf.put_u16(ONION_TUNNEL_BUILD);
+                    buf.put_u16(if dst_addr.is_ipv6() { 1 } else { 0 });
+                    buf.put_u16(dst_addr.port());
+                    dst_addr.ip().write_to(buf);
+                    buf.put(dst_hostkey.as_ref());
+                }
+                OnionRequest::Destroy(tunnel_id) => {
+                    buf.put_u16(self.size() as u16);
+                    buf.put_u16(ONION_TUNNEL_DESTROY);
+                    buf.put_u32(*tunnel_id);
+                }
+                OnionRequest::Data(tunnel_id, data) => {
+                    buf.put_u16(self.size() as u16);
+                    buf.put_u16(ONION_TUNNEL_DATA);
+                    buf.put_u32(*tunnel_id);
+                    buf.put(data.as_ref());
+                }
+                OnionRequest::Cover(cover_size) => {
+                    buf.put_u16(self.size() as u16);
+                    buf.put_u16(ONION_TUNNEL_COVER);
+                    buf.put_u16(*cover_size);
+                    buf.put_u16(0);
+                }
+            }
+        }
+    }
+
+    impl FromBytes for Result<OnionResponse> {
+        fn read_from(buf: &mut BytesMut) -> Self {
+            let size = buf.get_u16() as usize;
+            let message_type = buf.get_u16();
+            match message_type {
+                ONION_TUNNEL_READY => {
+                    let tunnel_id = buf.get_u32();
+                    let hostkey = buf.split_to(size - 8).freeze();
+                    Ok(OnionResponse::Ready(tunnel_id, hostkey))
+                }
+                ONION_TUNNEL_INCOMING => {
+                    let tunnel_id = buf.get_u32();
+                    Ok(OnionResponse::Incoming(tunnel_id))
+                }
+                ONION_TUNNEL_DATA => {
+                    let tunnel_id = buf.get_u32();
+                    let data = buf.split_to(size - 8).freeze();
+                    Ok(OnionResponse::Data(tunnel_id, data))
+                }
+                ONION_TUNNEL_ERROR => {
+                    let request_type = buf.get_u16();
+                    buf.get_u16();
+                    let tunnel_id = buf.get_u32();
+
+                    let reason = match request_type {
+                        ONION_TUNNEL_BUILD => ErrorReason::Build,
+                        ONION_TUNNEL_DATA => ErrorReason::Data,
+                        ONION_TUNNEL_DESTROY => ErrorReason::Destroy,
+                        _ => return Err(anyhow!("Unknown error message")),
+                    };
+
+                    Ok(OnionResponse::Error(reason, tunnel_id))
+                }
+                _ => Err(anyhow!("Unkown response message type: {}", message_type)),
+            }
         }
     }
 }
