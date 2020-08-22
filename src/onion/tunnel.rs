@@ -302,13 +302,23 @@ impl TunnelBuilder {
                         .context(anyhow!("Failed to get random peer"))?;
                     Tunnel::init(self.tunnel_id, &peer, &self.rng).await.ok()
                 }
-                Some(mut tunnel) if tunnel.len() - 1 < self.n_hops => {
+                Some(mut tunnel) if tunnel.len() < self.n_hops => {
                     let peer = self
                         .random_peer()
                         .await
                         .context(anyhow!("Failed to get random peer"))?;
 
                     match tunnel.extend(&peer, &self.rng).await {
+                        Err(TunnelError::Broken(e)) => {
+                            tunnel.teardown(&self.rng).await;
+                            None
+                        }
+                        Err(TunnelError::Incomplete) => Some(tunnel),
+                        Ok(_) => Some(tunnel),
+                    }
+                }
+                Some(mut tunnel) if tunnel.len() == self.n_hops => {
+                    match tunnel.extend(&self.dest, &self.rng).await {
                         Err(TunnelError::Broken(e)) => {
                             tunnel.teardown(&self.rng).await;
                             None
@@ -367,6 +377,10 @@ impl TunnelHandler {
     }
 
     pub(crate) async fn handle(&mut self) {
+        trace!(
+            "Starting TunnelHandler for tunnel {:?}",
+            self.builder.tunnel_id
+        );
         if let Err(e) = self.try_handle().await {
             warn!("Error in TunnelHandler: {}", e);
             self.tunnel.teardown(&self.builder.rng).await;
@@ -429,6 +443,11 @@ impl TunnelHandler {
     }
 
     async fn handle_request(&mut self, req: Request) -> Result<()> {
+        trace!(
+            "TunnelHandler: handling request {:?} (state = {:?})",
+            req,
+            self.state
+        );
         match (req, self.state) {
             (Request::Data { data }, State::Ready) => {
                 let circuit_id = self.tunnel.out_circuit.id;
@@ -508,7 +527,7 @@ impl TunnelHandler {
                 match builder.build().await {
                     Ok(new_tunnel) => {
                         next_tunnel.lock().await.replace(new_tunnel);
-                    },
+                    }
                     Err(e) => warn!("Rebuilding of a tunnel failed: {}", e),
                 };
             }

@@ -6,7 +6,7 @@ use crate::onion::tunnel::{self, TunnelBuilder, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
-use log::{info, warn};
+use log::{info, trace, warn};
 use ring::rand;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -193,6 +193,7 @@ impl RoundHandler {
     }
 
     pub(crate) async fn handle(&mut self) {
+        info!("Starting RoundHandler");
         let mut round_timer = time::interval(ROUND_DURATION);
         loop {
             tokio::select! {
@@ -207,6 +208,7 @@ impl RoundHandler {
     }
 
     async fn handle_request(&mut self, req: Request) {
+        trace!("RoundHandler: handling request {:?}", req);
         match req {
             Request::Build {
                 tunnel_id,
@@ -283,6 +285,7 @@ impl RoundHandler {
     /// period. Since the destination peer of both old and new tunnel remains the same, the seamless
     /// switch over is possible.
     async fn next_round(&mut self) {
+        info!("next round");
         for tunnel in self.tunnels.lock().await.values_mut() {
             let _ = tunnel.send(tunnel::Request::Switchover);
         }
@@ -332,6 +335,7 @@ impl OnionListener {
     }
 
     async fn handle_connection(&self, stream: TcpStream, events_tx: mpsc::Sender<circuit::Event>) {
+        info!("Accepted connection from {:?}", stream.peer_addr().unwrap());
         let socket = OnionSocket::new(stream);
         let hostkey = self.hostkey.clone();
 
@@ -351,6 +355,7 @@ impl OnionListener {
     }
 
     async fn handle_event(&mut self, event: circuit::Event) {
+        trace!("OnionListener: handling event {:?}", event);
         match event {
             circuit::Event::Incoming {
                 tunnel_id,
