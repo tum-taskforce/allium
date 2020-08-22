@@ -113,7 +113,7 @@ impl Onion {
             let events = evt_tx.clone();
             let tunnels = tunnels.clone();
             let mut round_handler = RoundHandler::new(req_rx, events, peer_tx, tunnels);
-            async move { round_handler.next_round().await }
+            async move { round_handler.handle().await }
         });
 
         // create task listening on p2p connections

@@ -8,6 +8,7 @@ const DEFAULT_ADDR: &str = "127.0.0.1:4200";
 
 #[tokio::main]
 async fn main() {
+    pretty_env_logger::init();
     let onion_addr = env::args()
         .nth(1)
         .unwrap_or(DEFAULT_ADDR.to_string())
@@ -52,7 +53,7 @@ async fn parse_command(cmd: String, onion: &Onion, hostkey: &RsaPublicKey) {
             onion.send_data(tunnel_id, data);
         }
         Some("help") => {
-            println!("Available commands:");
+            println!("Available Commands:");
             println!("  build <tunnel_id> <dest_addr> <n_hops>");
             println!("  destroy <tunnel_id>");
             println!("  data <tunnel_id> data");
