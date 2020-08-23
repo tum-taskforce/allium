@@ -119,8 +119,8 @@ impl Onion {
         // create task listening on p2p connections
         // also sends events on evt_tx
         tokio::spawn({
-            let events = evt_tx.clone();
-            let tunnels = tunnels.clone();
+            let events = evt_tx;
+            let tunnels = tunnels;
             let mut listener = OnionListener::new(hostkey, events, tunnels);
             async move { listener.listen_addr(listen_addr).await }
         });

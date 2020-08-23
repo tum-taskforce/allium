@@ -172,10 +172,10 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
     /// - `StreamTimeout` -  The stream operations timed out
-    pub(crate) async fn finalize_handshake<'k>(
+    pub(crate) async fn finalize_handshake(
         &mut self,
         circuit_id: CircuitId,
-        key: SignKey<'k>,
+        key: SignKey<'_>,
         rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();

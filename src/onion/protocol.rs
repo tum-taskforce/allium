@@ -212,7 +212,7 @@ pub(crate) trait TryFromBytesExt<E: fmt::Debug>:
         Self: Sized,
     {
         let digest = digest::digest(&digest::SHA256, &buf[DIGEST_LEN..]);
-        if &digest.as_ref()[..DIGEST_LEN] == &buf[..DIGEST_LEN] {
+        if digest.as_ref()[..DIGEST_LEN] == buf[..DIGEST_LEN] {
             buf.advance(DIGEST_LEN);
             Self::try_read_from(buf)
         } else {
@@ -333,7 +333,7 @@ impl CircuitOpaque<CircuitOpaqueBytes> {
         decrypt_keys: impl Iterator<Item = &'k SessionKey>,
     ) -> Result<()> {
         for key in decrypt_keys {
-            key.decrypt(self.payload.nonce.clone(), self.payload.bytes.as_mut())
+            key.decrypt(self.payload.nonce, self.payload.bytes.as_mut())
                 .context("Failed to decrypt message")?;
         }
         Ok(())
@@ -344,7 +344,7 @@ impl CircuitOpaque<CircuitOpaqueBytes> {
         encrypt_keys: impl Iterator<Item = &'k SessionKey>,
     ) -> Result<()> {
         for key in encrypt_keys {
-            key.encrypt(self.payload.nonce.clone(), self.payload.bytes.as_mut())
+            key.encrypt(self.payload.nonce, self.payload.bytes.as_mut())
                 .context("Failed to encrypt message")?;
         }
         Ok(())
@@ -397,7 +397,7 @@ impl ToBytes for CircuitOpaque<CircuitOpaqueBytes> {
 impl<'a, M: ToBytes> CircuitOpaque<CircuitOpaquePayload<'a, M>> {
     fn encrypt(&self, buf: &mut BytesMut, nonce: [u8; aead::NONCE_LEN]) -> Result<()> {
         for key in self.payload.encrypt_keys.iter() {
-            key.encrypt(nonce.clone(), buf.as_mut())
+            key.encrypt(nonce, buf.as_mut())
                 .context("Failed to encrypt message")?;
         }
         Ok(())

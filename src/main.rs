@@ -66,7 +66,7 @@ impl OnionModule {
         self.connections
             .lock()
             .await
-            .insert(client_addr.clone(), ApiSocket::new(write_stream));
+            .insert(client_addr, ApiSocket::new(write_stream));
         let mut socket = ApiSocket::new(read_stream);
 
         while let Some(msg) = socket.read_next::<OnionRequest>().await? {
@@ -210,7 +210,9 @@ async fn main() -> Result<()> {
     );
 
     // read config file
-    let config_path = env::args().nth(1).unwrap_or("config.ini".to_string());
+    let config_path = env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config.ini".to_string());
     let config = Config::from_file(config_path)?;
 
     // connect to RPS (random peer sampling) module
@@ -231,7 +233,7 @@ async fn main() -> Result<()> {
     let onion_module = Arc::new(OnionModule::new());
     let api_listen_task = tokio::spawn({
         let api_handler = onion_module.clone();
-        let api_addr = config.onion.api_address.clone();
+        let api_addr = config.onion.api_address;
         async move {
             api_handler.listen_api(api_addr, onion).await.unwrap();
         }

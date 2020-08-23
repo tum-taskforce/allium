@@ -152,7 +152,7 @@ impl Tunnel {
             .await?;
 
         for _ in 0..n {
-            &self.session_keys.remove(0);
+            self.session_keys.remove(0);
         }
         Ok(())
     }
@@ -483,7 +483,7 @@ impl TunnelHandler {
                     .lock()
                     .await
                     .take()
-                    .ok_or(anyhow!("Switchover failed: no next tunnel"))?;
+                    .ok_or_else(|| anyhow!("Switchover failed: no next tunnel"))?;
 
                 mem::swap(&mut self.tunnel, &mut new_tunnel);
                 let old_tunnel = new_tunnel;

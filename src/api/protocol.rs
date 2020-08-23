@@ -69,7 +69,7 @@ impl FromBytes for Result<OnionRequest> {
     fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u16();
-        return match message_type {
+        match message_type {
             ONION_TUNNEL_BUILD => {
                 let flag = buf.get_u16();
                 let dst_port = buf.get_u16();
@@ -94,7 +94,7 @@ impl FromBytes for Result<OnionRequest> {
                 Ok(OnionRequest::Cover(cover_size))
             }
             _ => Err(anyhow!("Unknown onion message type: {}", message_type)),
-        };
+        }
     }
 }
 
@@ -258,7 +258,7 @@ impl FromBytes for Result<RpsResponse> {
     fn read_from(buf: &mut BytesMut) -> Self {
         let size = buf.get_u16() as usize;
         let message_type = buf.get_u16();
-        return match message_type {
+        match message_type {
             RPS_PEER => {
                 let port = buf.get_u16();
                 let portmap_len = buf.get_u8() as usize;
@@ -278,14 +278,6 @@ impl FromBytes for Result<RpsResponse> {
                 Ok(RpsResponse::Peer(port, portmap, peer_addr, peer_hostkey))
             }
             _ => Err(anyhow!("Unknown RPS message type: {}", message_type)),
-        };
-    }
-}
-
-impl RpsResponse {
-    pub fn id(&self) -> u16 {
-        match self {
-            RpsResponse::Peer(_, _, _, _) => RPS_PEER,
         }
     }
 }
