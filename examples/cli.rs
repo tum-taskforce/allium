@@ -1,4 +1,4 @@
-use onion::{Onion, Peer, RsaPrivateKey, RsaPublicKey};
+use onion::{Onion, Peer, PeerProvider, RsaPrivateKey, RsaPublicKey};
 use std::env;
 use tokio::io::{self, BufReader};
 use tokio::prelude::*;
@@ -18,7 +18,8 @@ async fn main() {
     let hostkey = RsaPrivateKey::from_pem_file("testkey.pem").unwrap();
     let public_key = hostkey.public_key();
     let (mut peer_tx, peer_rx) = mpsc::unbounded_channel();
-    let (onion, mut events) = Onion::new(onion_addr, hostkey, peer_rx).unwrap();
+    let (onion, mut events) =
+        Onion::new(onion_addr, hostkey, PeerProvider::from_stream(peer_rx)).unwrap();
 
     let mut stdin = BufReader::new(io::stdin()).lines();
     loop {

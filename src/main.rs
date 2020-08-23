@@ -225,9 +225,11 @@ async fn main() -> Result<()> {
     let hostkey =
         RsaPrivateKey::from_pem_file(&config.onion.hostkey).context("Could not read hostkey")?;
 
+    let peer_provider = PeerProvider::from_stream(rps.into_stream());
+
     // initialize onion, start listening on p2p port
     // events is a stream of events from the p2p protocol which should notify API clients
-    let (onion, events) = Onion::new(onion_addr, hostkey, rps.into_stream())?;
+    let (onion, events) = Onion::new(onion_addr, hostkey, peer_provider)?;
 
     // initialize onion module listening on API connections
     let onion_module = Arc::new(OnionModule::new());

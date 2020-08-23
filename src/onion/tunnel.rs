@@ -4,8 +4,8 @@ use crate::onion::protocol::{
     CircuitOpaque, CircuitOpaqueBytes, TryFromBytesExt, TunnelRequest, VerifyKey,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::Result;
 use crate::{Event, Peer};
+use crate::{PeerProvider, Result};
 use anyhow::{anyhow, Context};
 use bytes::Bytes;
 use log::{trace, warn};
@@ -17,7 +17,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 
 const MAX_PEER_FAILURES: usize = 10;
 
@@ -254,7 +254,7 @@ pub(crate) struct TunnelBuilder {
     tunnel_id: TunnelId,
     dest: Peer,
     n_hops: usize,
-    peer_provider: mpsc::Sender<oneshot::Sender<Peer>>,
+    peer_provider: PeerProvider,
     rng: rand::SystemRandom,
 }
 
@@ -263,7 +263,7 @@ impl TunnelBuilder {
         tunnel_id: TunnelId,
         dest: Peer,
         n_hops: usize,
-        peer_provider: mpsc::Sender<oneshot::Sender<Peer>>,
+        peer_provider: PeerProvider,
         rng: rand::SystemRandom,
     ) -> Self {
         TunnelBuilder {
@@ -297,6 +297,7 @@ impl TunnelBuilder {
                     .ok(),
                 None => {
                     let peer = self
+                        .peer_provider
                         .random_peer()
                         .await
                         .context(anyhow!("Failed to get random peer"))?;
@@ -304,6 +305,7 @@ impl TunnelBuilder {
                 }
                 Some(mut tunnel) if tunnel.len() < self.n_hops => {
                     let peer = self
+                        .peer_provider
                         .random_peer()
                         .await
                         .context(anyhow!("Failed to get random peer"))?;
@@ -331,12 +333,6 @@ impl TunnelBuilder {
             }
         }
         Err(anyhow!("failed to build tunnel"))
-    }
-
-    async fn random_peer(&mut self) -> Result<Peer> {
-        let (peer_tx, peer_rx) = oneshot::channel();
-        let _ = self.peer_provider.send(peer_tx).await;
-        Ok(peer_rx.await?)
     }
 }
 
