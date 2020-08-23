@@ -118,8 +118,8 @@ impl OnionModule {
                         .await?;
                     }
                 }
-                OnionRequest::Cover(_cover_size) => {
-                    // TODO unimplemented!();
+                OnionRequest::Cover(cover_size) => {
+                    onion.send_cover(cover_size);
                 }
             }
         }

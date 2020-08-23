@@ -55,6 +55,9 @@ enum Request {
     Destroy {
         tunnel_id: TunnelId,
     },
+    Cover {
+        size: u16,
+    },
 }
 
 /// Events destined for the API
@@ -164,6 +167,13 @@ impl Onion {
             .map_err(|_| anyhow!("Failed to send data request"))
             .unwrap();
     }
+
+    pub fn send_cover(&self, size: u16) {
+        self.requests
+            .send(Request::Cover { size })
+            .map_err(|_| anyhow!("Failed to send cover request"))
+            .unwrap();
+    }
 }
 
 struct RoundHandler {
@@ -172,6 +182,7 @@ struct RoundHandler {
     rng: rand::SystemRandom,
     peer_provider: mpsc::Sender<oneshot::Sender<Peer>>,
     tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
+    cover_tunnel: Option<mpsc::UnboundedSender<tunnel::Request>>,
     // more info about outgoing tunnels
 }
 
@@ -189,6 +200,7 @@ impl RoundHandler {
             rng,
             peer_provider,
             tunnels,
+            cover_tunnel: None,
         }
     }
 
@@ -222,6 +234,9 @@ impl RoundHandler {
             }
             Request::Destroy { tunnel_id } => {
                 self.handle_destroy(tunnel_id).await;
+            }
+            Request::Cover { size } => {
+                self.handle_cover(size).await;
             }
         }
     }
@@ -276,6 +291,12 @@ impl RoundHandler {
             .get(&tunnel_id)
             .unwrap()
             .send(tunnel::Request::Destroy);
+    }
+
+    pub(crate) async fn handle_cover(&mut self, _size: u16) {
+        if let Some(tunnel) = &mut self.cover_tunnel {
+            let _ = tunnel.send(tunnel::Request::KeepAlive);
+        }
     }
 
     /// Tunnels created in one period should be torn down and rebuilt for the next period.
