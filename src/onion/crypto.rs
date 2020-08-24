@@ -92,16 +92,17 @@ pub(crate) fn read_rsa_keypair<P: AsRef<Path>>(path: P) -> Result<(RsaPrivateKey
 }
 
 impl RsaPublicKey {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        let public_key =
-            signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, bytes.into());
+    pub fn new(bytes: &[u8]) -> Self {
+        let public_key = signature::UnparsedPublicKey::new(
+            &signature::RSA_PKCS1_2048_8192_SHA256,
+            bytes.to_vec().into(),
+        );
         RsaPublicKey(public_key)
     }
 
-    pub fn new_from_stupid_format(bytes: &[u8]) -> Result<Self> {
-        let public_key = openssl::rsa::Rsa::public_key_from_der(&bytes)?;
-        let cool_bytes = public_key.public_key_to_der_pkcs1()?;
-        Ok(Self::new(cool_bytes))
+    /// Converts a RSA public key from the SubjectPublicKeyInfo format
+    pub fn from_subject_info(bytes: &[u8]) -> Self {
+        Self::new(&bytes[24..])
     }
 
     pub(crate) fn verify(&self, data: &[u8], signature: &[u8]) -> Result<()> {

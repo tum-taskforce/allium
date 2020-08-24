@@ -79,8 +79,7 @@ impl OnionModule {
             let _msg_id = msg.id();
             match msg {
                 OnionRequest::Build(dst_addr, dst_hostkey) => {
-                    let dest_public_key =
-                        RsaPublicKey::new_from_stupid_format(dst_hostkey.as_ref())?;
+                    let dest_public_key = RsaPublicKey::from_subject_info(dst_hostkey.as_ref());
                     let dest = Peer::new(dst_addr, dest_public_key);
                     let tunnel_id = loop {
                         let tunnel_id = random_id(&self.rng);
