@@ -74,9 +74,13 @@ impl Tunnel {
             .await
             .context("Could not connect to peer")?;
         let mut socket = OnionSocket::new(stream);
-        let peer_key = socket.initiate_handshake(circuit_id, key, rng).await?;
+        let peer_key = socket
+            .initiate_handshake(circuit_id, key, rng)
+            .await
+            .context("Handshake failed while initializing new tunnel")?;
 
-        let secret = Tunnel::derive_secret(&peer, private_key, peer_key)?;
+        let secret = Tunnel::derive_secret(&peer, private_key, peer_key)
+            .context("SessionKey derivation failed")?;
         Ok(Self {
             id,
             out_circuit: Circuit::new(circuit_id, socket),
@@ -294,6 +298,7 @@ impl TunnelBuilder {
             tunnel = match tunnel.take() {
                 None if self.n_hops == 0 => Tunnel::init(self.tunnel_id, &self.dest, &self.rng)
                     .await
+                    .map_err(|e| warn!("Error while building tunnel: {:?}", e))
                     .ok(),
                 None => {
                     let peer = self
@@ -301,7 +306,10 @@ impl TunnelBuilder {
                         .random_peer()
                         .await
                         .context(anyhow!("Failed to get random peer"))?;
-                    Tunnel::init(self.tunnel_id, &peer, &self.rng).await.ok()
+                    Tunnel::init(self.tunnel_id, &peer, &self.rng)
+                        .await
+                        .map_err(|e| warn!("Error while building tunnel: {:?}", e))
+                        .ok()
                 }
                 Some(mut tunnel) if tunnel.len() < self.n_hops => {
                     let peer = self
@@ -312,6 +320,7 @@ impl TunnelBuilder {
 
                     match tunnel.extend(&peer, &self.rng).await {
                         Err(TunnelError::Broken(e)) => {
+                            warn!("Error while building tunnel: {:?}", e);
                             tunnel.teardown(&self.rng).await;
                             None
                         }
@@ -322,6 +331,7 @@ impl TunnelBuilder {
                 Some(mut tunnel) if tunnel.len() == self.n_hops => {
                     match tunnel.extend(&self.dest, &self.rng).await {
                         Err(TunnelError::Broken(e)) => {
+                            warn!("Error while building tunnel: {:?}", e);
                             tunnel.teardown(&self.rng).await;
                             None
                         }

@@ -132,7 +132,10 @@ impl CircuitHandler {
         let (private_key, key) = crypto::generate_ephemeral_keypair(&rng);
         let key = SignKey::sign(&key, host_key, &rng);
 
-        socket.finalize_handshake(circuit_id, key, &rng).await?;
+        socket
+            .finalize_handshake(circuit_id, key, &rng)
+            .await
+            .context("Could not finalize handshake")?;
 
         if let Ok(secret) = SessionKey::from_key_exchange(private_key, &peer_key) {
             let in_circuit = Circuit::new(circuit_id, socket);
@@ -157,6 +160,7 @@ impl CircuitHandler {
 
     /// Handles messages and requests depending on the current state in a loop.
     pub(crate) async fn handle(&mut self) -> Result<()> {
+        trace!("CircuitHandler started for circuit {:?}", self.in_circuit);
         // main accept loop
         match self.respond_loop().await {
             Ok(_) => Ok(()),
@@ -262,7 +266,9 @@ impl CircuitHandler {
             Err(OnionSocketError::BrokenMessage) => Err(anyhow!(
                 "In Circuit breached protocol by sending unexpected message"
             )),
-            Err(OnionSocketError::StreamTerminated(e)) => Err(anyhow!("In Stream terminated")),
+            Err(OnionSocketError::StreamTerminated(e)) => {
+                Err(anyhow!("In Stream terminated: {:?}", e))
+            }
             Err(OnionSocketError::TeardownMessage) => Err(anyhow!("In Stream torn down")),
             Err(e) => {
                 // Panicking stub

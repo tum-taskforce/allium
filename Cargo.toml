@@ -21,6 +21,7 @@ bytes = "0.5.5"
 log = "0.4"
 pretty_env_logger = "0.4"
 rust-ini = "0.15"
+openssl = "0.10.30"
 
 [patch.crates-io]
 ring = { git = "https://github.com/voidc/ring", branch = "open-no-tag" }

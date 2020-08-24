@@ -98,6 +98,12 @@ impl RsaPublicKey {
         RsaPublicKey(public_key)
     }
 
+    pub fn new_from_stupid_format(bytes: &[u8]) -> Result<Self> {
+        let public_key = openssl::rsa::Rsa::public_key_from_der(&bytes)?;
+        let cool_bytes = public_key.public_key_to_der_pkcs1()?;
+        Ok(Self::new(cool_bytes))
+    }
+
     pub(crate) fn verify(&self, data: &[u8], signature: &[u8]) -> Result<()> {
         self.0.verify(data, signature)?;
         Ok(())
