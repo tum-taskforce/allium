@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn test_read_config() {
-        let config = Config::from_file("config.ini").unwrap();
-        println!("{:#?}", config);
+        let _ = Config::from_file("config.ini").unwrap();
+        let _ = Config::from_file("config.toml").unwrap();
     }
 }
