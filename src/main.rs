@@ -6,7 +6,7 @@ use anyhow::Context;
 use api::protocol::*;
 use bytes::Bytes;
 use futures::stream::StreamExt;
-use log::{info, trace};
+use log::{info, trace, warn};
 use onion::*;
 use ring::rand;
 use std::collections::HashMap;
@@ -21,6 +21,9 @@ use tokio::sync::Mutex;
 
 mod api;
 mod utils;
+
+// for security reasons there should always be at least two hops per tunnel
+const MIN_HOPS: usize = 2;
 
 struct OnionModule {
     connections: Mutex<HashMap<SocketAddr, ApiSocket<OwnedWriteHalf>>>,
@@ -216,6 +219,14 @@ async fn main() -> Result<()> {
         .nth(1)
         .unwrap_or_else(|| "config.ini".to_string());
     let config = Config::from_file(config_path)?;
+
+    if config.onion.hops < MIN_HOPS {
+        // this could be a hard error in the future
+        warn!(
+            "The number of hops should be at least 2! (current value: {})",
+            config.onion.hops
+        );
+    }
 
     // connect to RPS (random peer sampling) module
     let rps = RpsModule::new(&config.rps)

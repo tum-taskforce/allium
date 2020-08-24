@@ -32,6 +32,7 @@ pub struct OnionConfig {
     /// openssl rsa -in testkey.pkcs8.pem -out testkey.pem
     /// ```
     pub hostkey: PathBuf,
+    /// The number of hops in each tunnel (excluding the final peer).
     pub hops: usize,
 }
 
