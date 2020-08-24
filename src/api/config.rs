@@ -32,6 +32,7 @@ pub struct OnionConfig {
     /// openssl rsa -in testkey.pkcs8.pem -out testkey.pem
     /// ```
     pub hostkey: PathBuf,
+    pub hops: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +63,7 @@ impl Config {
                     p2p_port: sec.get("p2p_port")?.parse().ok()?,
                     p2p_hostname: sec.get("p2p_hostname")?.parse().ok()?,
                     hostkey: sec.get("hostkey")?.into(),
+                    hops: sec.get("hops")?.parse().ok()?,
                 })
             })
             .ok_or(anyhow!("Could not parse onion config"))?;

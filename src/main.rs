@@ -1,4 +1,4 @@
-use crate::api::config::Config;
+use crate::api::config::{Config, OnionConfig};
 use crate::api::rps::RpsModule;
 use crate::api::socket::ApiSocket;
 use crate::utils::ToBytes;
@@ -27,15 +27,17 @@ struct OnionModule {
     tunnels: Mutex<HashMap<TunnelId, Vec<SocketAddr>>>,
     hostkeys: Mutex<HashMap<TunnelId, Bytes>>,
     rng: rand::SystemRandom,
+    n_hops: usize,
 }
 
 impl OnionModule {
-    pub fn new() -> Self {
+    pub fn new(config: &OnionConfig) -> Self {
         OnionModule {
             connections: Default::default(),
             tunnels: Default::default(),
             hostkeys: Default::default(),
             rng: rand::SystemRandom::new(),
+            n_hops: config.hops,
         }
     }
 
@@ -83,7 +85,7 @@ impl OnionModule {
                         }
                     };
 
-                    onion.build_tunnel(tunnel_id, dest, 3);
+                    onion.build_tunnel(tunnel_id, dest, self.n_hops);
 
                     self.tunnels
                         .lock()
@@ -232,7 +234,7 @@ async fn main() -> Result<()> {
     let (onion, events) = Onion::new(onion_addr, hostkey, peer_provider)?;
 
     // initialize onion module listening on API connections
-    let onion_module = Arc::new(OnionModule::new());
+    let onion_module = Arc::new(OnionModule::new(&config.onion));
     let api_listen_task = tokio::spawn({
         let api_handler = onion_module.clone();
         let api_addr = config.onion.api_address;
