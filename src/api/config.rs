@@ -1,4 +1,6 @@
 use crate::Result;
+use anyhow::anyhow;
+use ini::Ini;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
@@ -45,14 +47,46 @@ pub struct PeerConfig {
 }
 
 impl Config {
-    pub fn from_str(string: &str) -> Result<Self> {
+    pub fn from_toml(string: &str) -> Result<Self> {
         Ok(toml::from_str(string)?)
+    }
+
+    pub fn from_ini(string: &str) -> Result<Self> {
+        let ini = Ini::load_from_str(string)?;
+
+        let onion = ini
+            .section(Some("onion"))
+            .and_then(|sec| {
+                Some(OnionConfig {
+                    api_address: sec.get("api_address")?.parse().ok()?,
+                    p2p_port: sec.get("p2p_port")?.parse().ok()?,
+                    p2p_hostname: sec.get("p2p_hostname")?.parse().ok()?,
+                    hostkey: sec.get("hostkey")?.into(),
+                })
+            })
+            .ok_or(anyhow!("Could not parse onion config"))?;
+
+        let rps = ini
+            .section(Some("rps"))
+            .and_then(|sec| {
+                Some(RpsConfig {
+                    api_address: Some(sec.get("api_address")?.parse().ok()?),
+                    peers: None,
+                })
+            })
+            .ok_or(anyhow!("Could not parse rps config"))?;
+
+        Ok(Config { onion, rps })
     }
 
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut buf = String::new();
-        File::open(path)?.read_to_string(&mut buf)?;
-        Self::from_str(&buf)
+        File::open(&path)?.read_to_string(&mut buf)?;
+        match path.as_ref().extension() {
+            Some(ext) if ext == "toml" => Self::from_toml(&buf),
+            Some(ext) if ext == "ini" => Self::from_ini(&buf),
+            _ => Err(anyhow!("Unsupported config format")),
+        }
     }
 }
 
