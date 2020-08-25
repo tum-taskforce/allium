@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel::{self, TunnelBuilder, TunnelBuilderDest, TunnelHandler};
+use crate::onion::tunnel::{self, TunnelBuilder, TunnelDestination, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -274,7 +274,7 @@ impl RoundHandler {
         tokio::spawn({
             let mut builder = TunnelBuilder::new(
                 tunnel_id,
-                TunnelBuilderDest::Fixed { peer: dest },
+                TunnelDestination::Fixed(dest),
                 n_hops,
                 self.peer_provider.clone(),
                 self.rng.clone(),
@@ -350,7 +350,7 @@ impl RoundHandler {
             tokio::spawn({
                 let mut builder = TunnelBuilder::new(
                     tunnel_id,
-                    TunnelBuilderDest::Random,
+                    TunnelDestination::Random,
                     COVER_TUNNEL_HOPS,
                     self.peer_provider.clone(),
                     self.rng.clone(),
