@@ -64,11 +64,16 @@ async fn parse_command(
             let peer = Peer::new(peer_addr, hostkey.clone());
             let _ = peers.send(peer);
         }
+        Some("cover") => {
+            let size = parts.next().unwrap().parse().unwrap();
+            onion.send_cover(size);
+        }
         Some("help") => {
             println!("Available Commands:");
             println!("  build <tunnel_id> <dest_addr> <n_hops>");
             println!("  destroy <tunnel_id>");
             println!("  data <tunnel_id> data");
+            println!("  cover <size>");
             println!("  help");
         }
         _ => println!("Unknown command!"),

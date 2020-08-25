@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel::{self, TunnelBuilder, TunnelHandler};
+use crate::onion::tunnel::{self, TunnelBuilder, TunnelBuilderDest, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{self, Duration};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
+use crate::onion::protocol::MESSAGE_SIZE;
 pub use crate::onion::tunnel::random_id;
 pub use crate::onion::tunnel::TunnelId;
 use std::fmt;
@@ -27,6 +28,9 @@ mod utils;
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
 const ROUND_DURATION: Duration = Duration::from_secs(30); // TODO read from config
+/// This must be strictly smaller than `TIMEOUT_IDLE` but sufficiently large to not produce any spam
+const KEEP_ALIVE_DURATION: Duration = Duration::from_secs(20); // TODO read from config
+const COVER_TUNNEL_HOPS: usize = 0; // TODO read from config
 
 #[derive(Clone)]
 pub struct Peer {
@@ -197,7 +201,10 @@ struct RoundHandler {
     rng: rand::SystemRandom,
     peer_provider: PeerProvider,
     tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
-    cover_tunnel: Option<mpsc::UnboundedSender<tunnel::Request>>,
+    cover_tunnel: Option<(
+        mpsc::UnboundedSender<tunnel::Request>,
+        mpsc::Receiver<Event>,
+    )>,
     // more info about outgoing tunnels
 }
 
@@ -222,6 +229,7 @@ impl RoundHandler {
     pub(crate) async fn handle(&mut self) {
         info!("Starting RoundHandler");
         let mut round_timer = time::interval(ROUND_DURATION);
+        let mut keep_alive_timer = time::interval(KEEP_ALIVE_DURATION);
         loop {
             tokio::select! {
                 Some(req) = self.requests.recv() => {
@@ -229,6 +237,9 @@ impl RoundHandler {
                 }
                 _ = round_timer.tick() => {
                     self.next_round().await;
+                }
+                _ = keep_alive_timer.tick() => {
+                    self.send_keep_alive().await;
                 }
             }
         }
@@ -263,7 +274,7 @@ impl RoundHandler {
         tokio::spawn({
             let mut builder = TunnelBuilder::new(
                 tunnel_id,
-                dest,
+                TunnelBuilderDest::Fixed { peer: dest },
                 n_hops,
                 self.peer_provider.clone(),
                 self.rng.clone(),
@@ -308,8 +319,10 @@ impl RoundHandler {
             .send(tunnel::Request::Destroy);
     }
 
-    pub(crate) async fn handle_cover(&mut self, _size: u16) {
-        if let Some(tunnel) = &mut self.cover_tunnel {
+    pub(crate) async fn handle_cover(&self, size: u16) {
+        let packet_count = size / (MESSAGE_SIZE - 8 - 4) as u16; // TODO don't hardcode header sizes here
+
+        if let Some((tunnel, _)) = &self.cover_tunnel {
             let _ = tunnel.send(tunnel::Request::KeepAlive);
         }
     }
@@ -322,8 +335,59 @@ impl RoundHandler {
     /// switch over is possible.
     async fn next_round(&mut self) {
         info!("next round");
+        if self.tunnels.lock().await.is_empty() {
+            if let Some((cover_tunnel, _)) = &self.cover_tunnel {
+                let _ = cover_tunnel.send(tunnel::Request::Destroy);
+            }
+            info!(
+                "Constructing new cover tunnel ({:?} hops to destination)",
+                COVER_TUNNEL_HOPS
+            );
+            let (tx, rx) = mpsc::unbounded_channel();
+            let (cover_events_tx, cover_events_rx) = mpsc::channel(1);
+            let tunnel_id = tunnel::random_id(&self.rng);
+
+            tokio::spawn({
+                let mut builder = TunnelBuilder::new(
+                    tunnel_id,
+                    TunnelBuilderDest::Random,
+                    COVER_TUNNEL_HOPS,
+                    self.peer_provider.clone(),
+                    self.rng.clone(),
+                );
+                async move {
+                    let cover_tunnel = match builder.build().await {
+                        Ok(t) => {
+                            trace!("Cover tunnel has been completed");
+                            t
+                        }
+                        Err(e) => {
+                            warn!("Failed to build cover tunnel: {}", e);
+                            return;
+                        }
+                    };
+                    let mut handler =
+                        TunnelHandler::new(cover_tunnel, builder, rx, cover_events_tx);
+                    handler.handle().await;
+                }
+            });
+
+            self.cover_tunnel = Some((tx, cover_events_rx));
+        } else {
+            self.cover_tunnel = None;
+            for tunnel in self.tunnels.lock().await.values_mut() {
+                let _ = tunnel.send(tunnel::Request::Switchover);
+            }
+        }
+    }
+
+    async fn send_keep_alive(&mut self) {
+        info!("Sending keep alive");
+        if let Some((cover_tunnel, _)) = &self.cover_tunnel {
+            let _ = cover_tunnel.send(tunnel::Request::KeepAlive);
+        }
         for tunnel in self.tunnels.lock().await.values_mut() {
-            let _ = tunnel.send(tunnel::Request::Switchover);
+            let _ = tunnel.send(tunnel::Request::KeepAlive);
         }
     }
 }
@@ -417,9 +481,9 @@ impl OnionListener {
             }
             circuit::Event::End { tunnel_id } => {
                 /* TODO We never communicate this step to the API, nor do we need to. However, we
-                   need to clear up the map to prevent cluttering. Also, we do not limit old
-                   circuits to remain as zombie circuits on Alice's client since Alice expects an
-                   END response which we should send here.
+                    need to clear up the map to prevent cluttering. Also, we do not limit old
+                    circuits to remain as zombie circuits on Alice's client since Alice expects an
+                    END response which we should send here.
                 */
             }
         }

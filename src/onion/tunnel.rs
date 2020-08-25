@@ -253,10 +253,16 @@ pub fn random_id(rng: &rand::SystemRandom) -> TunnelId {
     u32::from_le_bytes(id_buf)
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum TunnelBuilderDest {
+    Fixed { peer: Peer },
+    Random,
+}
+
 #[derive(Clone)]
 pub(crate) struct TunnelBuilder {
     tunnel_id: TunnelId,
-    dest: Peer,
+    dest: TunnelBuilderDest,
     n_hops: usize,
     peer_provider: PeerProvider,
     rng: rand::SystemRandom,
@@ -265,7 +271,7 @@ pub(crate) struct TunnelBuilder {
 impl TunnelBuilder {
     pub(crate) fn new(
         tunnel_id: TunnelId,
-        dest: Peer,
+        dest: TunnelBuilderDest,
         n_hops: usize,
         peer_provider: PeerProvider,
         rng: rand::SystemRandom,
@@ -295,12 +301,14 @@ impl TunnelBuilder {
     pub(crate) async fn build(&mut self) -> Result<Tunnel> {
         let mut tunnel = None;
         for i in 0..MAX_PEER_FAILURES {
-            tunnel = match tunnel.take() {
-                None if self.n_hops == 0 => Tunnel::init(self.tunnel_id, &self.dest, &self.rng)
-                    .await
-                    .map_err(|e| warn!("Error while building tunnel: {:?}", e))
-                    .ok(),
-                None => {
+            tunnel = match (tunnel.take(), &self.dest) {
+                (None, TunnelBuilderDest::Fixed { peer }) if self.n_hops == 0 => {
+                    Tunnel::init(self.tunnel_id, peer, &self.rng)
+                        .await
+                        .map_err(|e| warn!("Error while building tunnel: {:?}", e))
+                        .ok()
+                }
+                (None, _) => {
                     let peer = self
                         .peer_provider
                         .random_peer()
@@ -311,7 +319,20 @@ impl TunnelBuilder {
                         .map_err(|e| warn!("Error while building tunnel: {:?}", e))
                         .ok()
                 }
-                Some(mut tunnel) if tunnel.len() < self.n_hops => {
+                (Some(mut tunnel), TunnelBuilderDest::Fixed { peer })
+                    if tunnel.len() == self.n_hops =>
+                {
+                    match tunnel.extend(peer, &self.rng).await {
+                        Err(TunnelError::Broken(e)) => {
+                            warn!("Error while building tunnel: {:?}", e);
+                            tunnel.teardown(&self.rng).await;
+                            None
+                        }
+                        Err(TunnelError::Incomplete) => Some(tunnel),
+                        Ok(_) => Some(tunnel),
+                    }
+                }
+                (Some(mut tunnel), _) if tunnel.len() <= self.n_hops => {
                     let peer = self
                         .peer_provider
                         .random_peer()
@@ -328,18 +349,7 @@ impl TunnelBuilder {
                         Ok(_) => Some(tunnel),
                     }
                 }
-                Some(mut tunnel) if tunnel.len() == self.n_hops => {
-                    match tunnel.extend(&self.dest, &self.rng).await {
-                        Err(TunnelError::Broken(e)) => {
-                            warn!("Error while building tunnel: {:?}", e);
-                            tunnel.teardown(&self.rng).await;
-                            None
-                        }
-                        Err(TunnelError::Incomplete) => Some(tunnel),
-                        Ok(_) => Some(tunnel),
-                    }
-                }
-                Some(tunnel) => return Ok(tunnel),
+                (Some(tunnel), _) => return Ok(tunnel),
             }
         }
         Err(anyhow!("failed to build tunnel"))
