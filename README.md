@@ -2,8 +2,10 @@ Voidphone Onion Module
 ======================
 
 ## Building and Running
+Rust and Cargo (version 1.45.0 or newer) are required for building.
+If not installed already, install both with [rustup](https://rustup.rs/).
 
-After cloning the repository build and run the project with:
+After cloning the repository, build and run the project with:
 ```
 $ cargo run --release -- [ARGS]
 ```
