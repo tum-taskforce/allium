@@ -399,8 +399,8 @@ impl TunnelHandler {
         );
         if let Err(e) = self.try_handle().await {
             warn!("Error in TunnelHandler: {}", e);
+            self.state = State::Destroyed;
             self.tunnel.teardown(&self.builder.rng).await;
-            // TODO cleanup next tunnel
         }
     }
 
@@ -433,10 +433,9 @@ impl TunnelHandler {
         &mut self,
         msg: SocketResult<CircuitOpaque<CircuitOpaqueBytes>>,
     ) -> Result<()> {
-        // TODO apply timeout to handle tunnel rotation
-        // TODO send event in case of error
+        // no event in case of error
         let mut msg = msg?;
-        // TODO send event in case of error
+        // no event in case of error
         msg.decrypt(self.tunnel.session_keys.iter().rev())?;
         let tunnel_msg = TunnelRequest::read_with_digest_from(&mut msg.payload.bytes);
         match tunnel_msg {
@@ -446,7 +445,7 @@ impl TunnelHandler {
                 Ok(())
             }
             Ok(TunnelRequest::End(tunnel_id)) => {
-                // TODO maybe reconstruct tunnel
+                // maybe reconstruct tunnel
                 Err(anyhow!("Tunnel broke due to unexpected End"))
             }
             _ => {
@@ -542,6 +541,7 @@ impl TunnelHandler {
             async move {
                 match builder.build().await {
                     Ok(new_tunnel) => {
+                        // TODO only replace if not destroyed
                         next_tunnel.lock().await.replace(new_tunnel);
                     }
                     Err(e) => warn!("Rebuilding of a tunnel failed: {}", e),

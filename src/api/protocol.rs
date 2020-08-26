@@ -173,6 +173,7 @@ impl ToBytes for OnionResponse {
                     ErrorReason::Build => ONION_TUNNEL_BUILD,
                     ErrorReason::Data => ONION_TUNNEL_DATA,
                     ErrorReason::Destroy => ONION_TUNNEL_DESTROY,
+                    ErrorReason::Cover => ONION_TUNNEL_COVER,
                 };
 
                 buf.put_u16(self.size() as u16);
@@ -358,6 +359,7 @@ mod tests {
                         ONION_TUNNEL_BUILD => ErrorReason::Build,
                         ONION_TUNNEL_DATA => ErrorReason::Data,
                         ONION_TUNNEL_DESTROY => ErrorReason::Destroy,
+                        ONION_TUNNEL_COVER => ErrorReason::Cover,
                         _ => return Err(anyhow!("Unknown error message")),
                     };
 

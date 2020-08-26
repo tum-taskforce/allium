@@ -88,6 +88,7 @@ pub enum ErrorReason {
     Build,
     Data,
     Destroy,
+    Cover,
 }
 
 #[derive(Clone)]
@@ -300,30 +301,59 @@ impl RoundHandler {
     }
 
     pub(crate) async fn handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) {
-        let _ = self
-            .tunnels
+        if let None = self.try_handle_data(tunnel_id, data).await {
+            warn!("RoundHandler: handle_data failed");
+            let _ = self.events.send(Event::Error {
+                tunnel_id,
+                reason: ErrorReason::Data,
+            });
+        }
+    }
+
+    async fn try_handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) -> Option<()> {
+        self.tunnels
             .lock()
             .await
-            .get(&tunnel_id)
-            .unwrap()
-            .send(tunnel::Request::Data { data });
+            .get(&tunnel_id)?
+            .send(tunnel::Request::Data { data })
+            .ok()
     }
 
     pub(crate) async fn handle_destroy(&mut self, tunnel_id: TunnelId) {
-        let _ = self
-            .tunnels
-            .lock()
-            .await
-            .get(&tunnel_id)
-            .unwrap()
-            .send(tunnel::Request::Destroy);
+        if let None = self.try_handle_destroy(tunnel_id).await {
+            warn!("RoundHandler: handle_destroy failed");
+            let _ = self.events.send(Event::Error {
+                tunnel_id,
+                reason: ErrorReason::Destroy,
+            });
+        }
     }
 
-    pub(crate) async fn handle_cover(&self, size: u16) {
-        let packet_count = size / (MESSAGE_SIZE - 8 - 4) as u16; // TODO don't hardcode header sizes here
+    async fn try_handle_destroy(&mut self, tunnel_id: TunnelId) -> Option<()> {
+        self.tunnels
+            .lock()
+            .await
+            .get(&tunnel_id)?
+            .send(tunnel::Request::Destroy)
+            .ok()
+    }
 
+    pub(crate) async fn handle_cover(&mut self, size: u16) {
+        if let None = self.try_handle_cover(size).await {
+            warn!("RoundHandler: handle_cover failed");
+            let _ = self.events.send(Event::Error {
+                tunnel_id: 0,
+                reason: ErrorReason::Cover,
+            });
+        }
+    }
+
+    async fn try_handle_cover(&mut self, size: u16) -> Option<()> {
+        let packet_count = size / (MESSAGE_SIZE - 8 - 4) as u16; // TODO don't hardcode header sizes here
         if let Some((tunnel, _)) = &self.cover_tunnel {
-            let _ = tunnel.send(tunnel::Request::KeepAlive);
+            tunnel.send(tunnel::Request::KeepAlive).ok()
+        } else {
+            None
         }
     }
 
