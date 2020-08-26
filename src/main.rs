@@ -6,7 +6,7 @@ use anyhow::Context;
 use api::protocol::*;
 use bytes::Bytes;
 use futures::stream::StreamExt;
-use log::{info, trace, warn};
+use log::{error, info, trace, warn};
 use onion::*;
 use ring::rand;
 use std::collections::HashMap;
@@ -250,7 +250,9 @@ async fn main() -> Result<()> {
         let api_handler = onion_module.clone();
         let api_addr = config.onion.api_address;
         async move {
-            api_handler.listen_api(api_addr, onion).await.unwrap();
+            if let Err(e) = api_handler.listen_api(api_addr, onion).await {
+                error!("API handler failed: {}", e);
+            }
         }
     });
 
@@ -258,7 +260,9 @@ async fn main() -> Result<()> {
     let event_task = tokio::spawn({
         let event_handler = onion_module.clone();
         async move {
-            event_handler.handle_events(events).await.unwrap();
+            if let Err(e) = event_handler.handle_events(events).await {
+                error!("Event handler failed: {}", e);
+            }
         }
     });
 
