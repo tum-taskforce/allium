@@ -3,12 +3,14 @@ use crate::api::protocol::{Module, RpsRequest, RpsResponse};
 use crate::api::socket::ApiSocket;
 use crate::Result;
 use anyhow::anyhow;
-use async_stream::stream;
 use futures::Stream;
 use log::info;
 use onion::{Peer, RsaPrivateKey, RsaPublicKey};
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+
+const PEER_BUFFER_SIZE: usize = 20;
 
 pub enum RpsModule {
     Socket(SocketRpsModule),
@@ -41,11 +43,14 @@ impl RpsModule {
     }
 
     pub fn into_stream(mut self) -> impl Stream<Item = Peer> {
-        Box::pin(stream! {
-            while let Ok(peer) = self.query().await {
-                yield peer
+        let (mut peer_tx, peer_rx) = mpsc::channel(PEER_BUFFER_SIZE);
+        tokio::spawn(async move {
+            loop {
+                let peer = self.query().await.unwrap();
+                peer_tx.send(peer).await.unwrap();
             }
-        })
+        });
+        peer_rx
     }
 }
 

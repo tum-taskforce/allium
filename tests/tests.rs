@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use futures::FutureExt;
 use onion::{ErrorReason, Event, Onion, Peer, PeerProvider, RsaPrivateKey, TunnelId};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU16, Ordering};
