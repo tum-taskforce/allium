@@ -3,10 +3,11 @@ use crate::onion::crypto::{self, RsaPrivateKey};
 use crate::onion::tunnel::{Tunnel, TunnelError};
 use crate::*;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::stream;
 
 const TEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-const TEST_PORT: u16 = 4200;
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(42000);
 
 async fn listen(mut listener: TcpListener, host_key: &RsaPrivateKey) -> Result<()> {
     println!(
@@ -25,8 +26,9 @@ async fn spawn_n_peers(n: usize) -> Vec<Peer> {
     let (host_key, peer_key) = crypto::read_rsa_keypair("testkey.pem").unwrap();
     let mut peers = Vec::new();
     let host_key = Arc::new(host_key);
-    for i in 0..n {
-        let peer_addr = (TEST_IP, TEST_PORT + i as u16).into();
+    for _ in 0..n {
+        let peer_port = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let peer_addr = (TEST_IP, peer_port).into();
         let listener = TcpListener::bind(&peer_addr).await.unwrap();
         let host_key = host_key.clone();
         tokio::spawn(async move {
@@ -117,7 +119,8 @@ async fn test_truncate_two_peers() -> Result<()> {
 #[tokio::test]
 async fn test_data_unidirectional() -> Result<()> {
     let (host_key, peer_key) = crypto::read_rsa_keypair("testkey.pem").unwrap();
-    let peer_addr = (TEST_IP, TEST_PORT).into();
+    let peer_port = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let peer_addr = (TEST_IP, peer_port).into();
     let peer = Peer::new(peer_addr, peer_key);
 
     let (evt_tx, mut evt_rx) = mpsc::channel(100);
@@ -146,7 +149,8 @@ async fn test_data_unidirectional() -> Result<()> {
 #[tokio::test]
 async fn test_data_bidirectional() -> Result<()> {
     let (host_key, peer_key) = crypto::read_rsa_keypair("testkey.pem").unwrap();
-    let peer_addr = (TEST_IP, TEST_PORT).into();
+    let peer_port = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let peer_addr = (TEST_IP, peer_port).into();
     let peer = Peer::new(peer_addr, peer_key);
 
     let data_ping = Bytes::from_static(b"ping");
