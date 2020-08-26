@@ -307,7 +307,7 @@ impl RoundHandler {
     }
 
     pub(crate) async fn handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) {
-        if let None = self.try_handle_data(tunnel_id, data).await {
+        if self.try_handle_data(tunnel_id, data).await.is_none() {
             warn!("RoundHandler: handle_data failed");
             let _ = self
                 .events
@@ -320,7 +320,7 @@ impl RoundHandler {
     }
 
     async fn try_handle_data(&mut self, tunnel_id: TunnelId, mut data: Bytes) -> Option<()> {
-        while data.len() > 0 {
+        while !data.is_empty() {
             let part = data.split_to(cmp::min(protocol::MAX_DATA_SIZE, data.len()));
             self.tunnels
                 .lock()
@@ -333,7 +333,7 @@ impl RoundHandler {
     }
 
     pub(crate) async fn handle_destroy(&mut self, tunnel_id: TunnelId) {
-        if let None = self.try_handle_destroy(tunnel_id).await {
+        if self.try_handle_destroy(tunnel_id).await.is_none() {
             warn!("RoundHandler: handle_destroy failed");
             let _ = self
                 .events
@@ -355,7 +355,7 @@ impl RoundHandler {
     }
 
     pub(crate) async fn handle_cover(&mut self, size: u16) {
-        if let None = self.try_handle_cover(size).await {
+        if self.try_handle_cover(size).await.is_none() {
             warn!("RoundHandler: handle_cover failed");
             let _ = self
                 .events
