@@ -34,6 +34,7 @@ const SIGNATURE_LEN: usize = 512;
 const KEY_LEN: usize = 32;
 
 pub(crate) const MESSAGE_SIZE: usize = 1024;
+pub(crate) const MAX_DATA_SIZE: usize = MESSAGE_SIZE - 4 - aead::NONCE_LEN - DIGEST_LEN - 8;
 
 #[derive(Error, Debug)]
 pub(crate) enum CircuitProtocolError {

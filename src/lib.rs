@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
+use crate::onion::protocol;
 use crate::onion::socket::OnionSocket;
 use crate::onion::tunnel::{self, TunnelBuilder, TunnelDestination, TunnelHandler};
 use anyhow::anyhow;
@@ -11,16 +12,15 @@ use ring::rand;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::{cmp, fmt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::Stream;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{self, Duration};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
-use crate::onion::protocol::MESSAGE_SIZE;
 pub use crate::onion::tunnel::random_id;
 pub use crate::onion::tunnel::TunnelId;
-use std::fmt;
 
 mod onion;
 mod utils;
@@ -41,6 +41,10 @@ pub struct Peer {
 impl Peer {
     pub fn new(addr: SocketAddr, hostkey: RsaPublicKey) -> Self {
         Peer { addr, hostkey }
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.addr
     }
 }
 
@@ -286,10 +290,12 @@ impl RoundHandler {
                     Ok(t) => t,
                     Err(e) => {
                         warn!("Failed to build tunnel: {}", e);
-                        let _ = events.send(Event::Error {
-                            tunnel_id,
-                            reason: ErrorReason::Build,
-                        });
+                        let _ = events
+                            .send(Event::Error {
+                                tunnel_id,
+                                reason: ErrorReason::Build,
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -303,29 +309,39 @@ impl RoundHandler {
     pub(crate) async fn handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) {
         if let None = self.try_handle_data(tunnel_id, data).await {
             warn!("RoundHandler: handle_data failed");
-            let _ = self.events.send(Event::Error {
-                tunnel_id,
-                reason: ErrorReason::Data,
-            });
+            let _ = self
+                .events
+                .send(Event::Error {
+                    tunnel_id,
+                    reason: ErrorReason::Data,
+                })
+                .await;
         }
     }
 
-    async fn try_handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) -> Option<()> {
-        self.tunnels
-            .lock()
-            .await
-            .get(&tunnel_id)?
-            .send(tunnel::Request::Data { data })
-            .ok()
+    async fn try_handle_data(&mut self, tunnel_id: TunnelId, mut data: Bytes) -> Option<()> {
+        while data.len() > 0 {
+            let part = data.split_to(cmp::min(protocol::MAX_DATA_SIZE, data.len()));
+            self.tunnels
+                .lock()
+                .await
+                .get(&tunnel_id)?
+                .send(tunnel::Request::Data { data: part })
+                .ok()?;
+        }
+        Some(())
     }
 
     pub(crate) async fn handle_destroy(&mut self, tunnel_id: TunnelId) {
         if let None = self.try_handle_destroy(tunnel_id).await {
             warn!("RoundHandler: handle_destroy failed");
-            let _ = self.events.send(Event::Error {
-                tunnel_id,
-                reason: ErrorReason::Destroy,
-            });
+            let _ = self
+                .events
+                .send(Event::Error {
+                    tunnel_id,
+                    reason: ErrorReason::Destroy,
+                })
+                .await;
         }
     }
 
@@ -341,17 +357,24 @@ impl RoundHandler {
     pub(crate) async fn handle_cover(&mut self, size: u16) {
         if let None = self.try_handle_cover(size).await {
             warn!("RoundHandler: handle_cover failed");
-            let _ = self.events.send(Event::Error {
-                tunnel_id: 0,
-                reason: ErrorReason::Cover,
-            });
+            let _ = self
+                .events
+                .send(Event::Error {
+                    tunnel_id: 0,
+                    reason: ErrorReason::Cover,
+                })
+                .await;
         }
     }
 
     async fn try_handle_cover(&mut self, size: u16) -> Option<()> {
-        let packet_count = size / (MESSAGE_SIZE - 8 - 4) as u16; // TODO don't hardcode header sizes here
+        let size = size as usize;
+        let packet_count = (size + protocol::MAX_DATA_SIZE - 1) / protocol::MAX_DATA_SIZE;
         if let Some((tunnel, _)) = &self.cover_tunnel {
-            tunnel.send(tunnel::Request::KeepAlive).ok()
+            for _ in 0..packet_count {
+                tunnel.send(tunnel::Request::KeepAlive).ok()?
+            }
+            Some(())
         } else {
             None
         }
