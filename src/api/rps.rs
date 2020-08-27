@@ -9,8 +9,11 @@ use onion::{Peer, RsaPrivateKey, RsaPublicKey};
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time;
+use tokio::time::Duration;
 
 const PEER_BUFFER_SIZE: usize = 20;
+const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub enum RpsModule {
     Socket(SocketRpsModule),
@@ -73,20 +76,40 @@ impl SocketRpsModule {
 
     async fn query(&mut self) -> Result<Peer> {
         self.socket.write(RpsRequest::Query).await?;
-        if let Some(msg) = self.socket.read_next().await? {
-            match msg {
-                RpsResponse::Peer(_port, portmap, peer_addr, peer_hostkey) => {
-                    let (_, peer_port) = portmap
-                        .iter()
-                        .find(|(m, _)| *m == Module::Onion)
-                        .ok_or_else(|| anyhow!("Peer does not expose onion port"))?;
-                    let peer_addr = SocketAddr::new(peer_addr, *peer_port);
-                    let peer_hostkey = RsaPublicKey::new(peer_hostkey.as_ref());
-                    Ok(Peer::new(peer_addr, peer_hostkey))
-                }
+        let msg = time::timeout(QUERY_TIMEOUT, self.socket.read_next())
+            .await
+            .map_err(|_| anyhow!("RPS query timed out"))?
+            .map_err(|e| anyhow!("RPS query failed: {}", e))?;
+
+        match msg {
+            RpsResponse::Peer(_port, portmap, peer_addr, peer_hostkey) => {
+                let (_, peer_port) = portmap
+                    .iter()
+                    .find(|(m, _)| *m == Module::Onion)
+                    .ok_or_else(|| anyhow!("Peer does not expose onion port"))?;
+                let peer_addr = SocketAddr::new(peer_addr, *peer_port);
+                let peer_hostkey = RsaPublicKey::new(peer_hostkey.as_ref());
+                Ok(Peer::new(peer_addr, peer_hostkey))
             }
-        } else {
-            Err(anyhow!("rps query failed"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::config::RpsConfig;
+    use crate::api::rps::RpsModule;
+
+    #[tokio::test]
+    #[ignore = "requires a running RPS instance listening on 127.0.0.1:7101"]
+    async fn test_rps_query() {
+        let config = RpsConfig {
+            api_address: Some("127.0.0.1:7101".parse().unwrap()),
+            peers: None,
+        };
+
+        let mut rps = RpsModule::new(&config).await.unwrap();
+        println!("Connected to RPS");
+        println!("{:?}", rps.query().await);
     }
 }

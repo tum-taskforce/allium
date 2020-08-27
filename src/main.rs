@@ -74,7 +74,8 @@ impl OnionModule {
             .insert(client_addr, ApiSocket::new(write_stream));
         let mut socket = ApiSocket::new(read_stream);
 
-        while let Some(msg) = socket.read_next::<OnionRequest>().await? {
+        loop {
+            let msg = socket.read_next::<OnionRequest>().await?;
             trace!("Handling {:?}", msg);
             let _msg_id = msg.id();
             match msg {
@@ -128,7 +129,6 @@ impl OnionModule {
                 }
             }
         }
-        Ok(())
     }
 
     /// Handles P2P protocol events and notifies interested API clients
