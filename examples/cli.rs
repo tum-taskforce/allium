@@ -21,6 +21,7 @@ async fn main() {
     let (mut peer_tx, peer_rx) = mpsc::unbounded_channel();
     let (onion, mut events) = Onion::new(onion_addr, hostkey, PeerProvider::from_stream(peer_rx))
         .enable_cover_traffic(cover_enabled)
+        .set_hops_per_tunnel(0)
         .start()
         .unwrap();
 
@@ -50,8 +51,7 @@ async fn parse_command(
             let tunnel_id = parts.next().unwrap().parse().unwrap();
             let dest_addr = parts.next().unwrap_or(DEFAULT_ADDR).parse().unwrap();
             let dest = Peer::new(dest_addr, hostkey.clone());
-            let n_hops = parts.next().unwrap_or("0").parse().unwrap();
-            onion.build_tunnel(tunnel_id, dest, n_hops);
+            onion.build_tunnel(tunnel_id, dest);
         }
         Some("destroy") => {
             let tunnel_id = parts.next().unwrap().parse().unwrap();

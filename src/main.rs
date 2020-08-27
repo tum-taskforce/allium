@@ -1,4 +1,4 @@
-use crate::api::config::{Config, OnionConfig};
+use crate::api::config::Config;
 use crate::api::rps::RpsModule;
 use crate::api::socket::ApiSocket;
 use crate::utils::ToBytes;
@@ -30,17 +30,15 @@ struct OnionModule {
     tunnels: Mutex<HashMap<TunnelId, Vec<SocketAddr>>>,
     hostkeys: Mutex<HashMap<TunnelId, Bytes>>,
     rng: rand::SystemRandom,
-    n_hops: usize,
 }
 
 impl OnionModule {
-    pub fn new(config: &OnionConfig) -> Self {
+    pub fn new() -> Self {
         OnionModule {
             connections: Default::default(),
             tunnels: Default::default(),
             hostkeys: Default::default(),
             rng: rand::SystemRandom::new(),
-            n_hops: config.hops,
         }
     }
 
@@ -89,7 +87,7 @@ impl OnionModule {
                         }
                     };
 
-                    onion.build_tunnel(tunnel_id, dest, self.n_hops);
+                    onion.build_tunnel(tunnel_id, dest);
 
                     self.tunnels
                         .lock()
@@ -244,10 +242,11 @@ async fn main() -> Result<()> {
     // events is a stream of events from the p2p protocol which should notify API clients
     let (onion, events) = Onion::new(onion_addr, hostkey, peer_provider)
         .enable_cover_traffic(config.onion.cover_traffic.unwrap_or(true))
+        .set_hops_per_tunnel(config.onion.hops)
         .start()?;
 
     // initialize onion module listening on API connections
-    let onion_module = Arc::new(OnionModule::new(&config.onion));
+    let onion_module = Arc::new(OnionModule::new());
     let api_listen_task = tokio::spawn({
         let api_handler = onion_module.clone();
         let api_addr = config.onion.api_address;

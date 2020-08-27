@@ -30,7 +30,6 @@ pub type Result<T> = std::result::Result<T, anyhow::Error>;
 const ROUND_DURATION: Duration = Duration::from_secs(30); // TODO read from config
 /// This must be strictly smaller than `TIMEOUT_IDLE` but sufficiently large to not produce any spam
 const KEEP_ALIVE_DURATION: Duration = Duration::from_secs(20); // TODO read from config
-const COVER_TUNNEL_HOPS: usize = 0; // TODO read from config
 
 #[derive(Clone)]
 pub struct Peer {
@@ -51,21 +50,10 @@ impl Peer {
 /// Handled by the RoundHandler
 #[derive(Debug)]
 enum Request {
-    Build {
-        tunnel_id: TunnelId,
-        dest: Peer,
-        n_hops: usize,
-    },
-    Data {
-        tunnel_id: TunnelId,
-        data: Bytes,
-    },
-    Destroy {
-        tunnel_id: TunnelId,
-    },
-    Cover {
-        size: u16,
-    },
+    Build { tunnel_id: TunnelId, dest: Peer },
+    Data { tunnel_id: TunnelId, data: Bytes },
+    Destroy { tunnel_id: TunnelId },
+    Cover { size: u16 },
 }
 
 /// Events destined for the API
@@ -113,15 +101,15 @@ impl Onion {
             hostkey,
             peer_provider,
             enable_cover: true,
+            n_hops: 2,
         }
     }
 
-    pub fn build_tunnel(&self, tunnel_id: TunnelId, dest: Peer, n_hops: usize) -> TunnelId {
+    pub fn build_tunnel(&self, tunnel_id: TunnelId, dest: Peer) -> TunnelId {
         self.requests
             .send(Request::Build {
                 tunnel_id, // TODO maybe refactor to return tunnel_id with Ready
                 dest,
-                n_hops,
             })
             .map_err(|_| anyhow!("Failed to send build request"))
             .unwrap();
@@ -159,11 +147,17 @@ pub struct OnionBuilder {
     hostkey: RsaPrivateKey,
     peer_provider: PeerProvider,
     enable_cover: bool,
+    n_hops: usize,
 }
 
 impl OnionBuilder {
     pub fn enable_cover_traffic(mut self, enable: bool) -> Self {
-        self.enable_cover = false;
+        self.enable_cover = enable;
+        self
+    }
+
+    pub fn set_hops_per_tunnel(mut self, n_hops: usize) -> Self {
+        self.n_hops = n_hops;
         self
     }
 
@@ -174,6 +168,7 @@ impl OnionBuilder {
             hostkey,
             peer_provider,
             enable_cover,
+            n_hops,
         } = self;
 
         // create request channel for interaction from the API to the round handler
@@ -188,7 +183,7 @@ impl OnionBuilder {
             let events = evt_tx.clone();
             let tunnels = tunnels.clone();
             let mut round_handler =
-                RoundHandler::new(req_rx, events, peer_provider, tunnels, enable_cover);
+                RoundHandler::new(req_rx, events, peer_provider, tunnels, enable_cover, n_hops);
             async move { round_handler.handle().await }
         });
 
@@ -243,6 +238,7 @@ struct RoundHandler {
         mpsc::Receiver<Event>,
     )>,
     enable_cover: bool,
+    n_hops: usize,
 }
 
 impl RoundHandler {
@@ -252,6 +248,7 @@ impl RoundHandler {
         peer_provider: PeerProvider,
         tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
         enable_cover: bool,
+        n_hops: usize,
     ) -> Self {
         let rng = rand::SystemRandom::new();
         RoundHandler {
@@ -262,6 +259,7 @@ impl RoundHandler {
             tunnels,
             cover_tunnel: None,
             enable_cover,
+            n_hops,
         }
     }
 
@@ -287,12 +285,8 @@ impl RoundHandler {
     async fn handle_request(&mut self, req: Request) {
         trace!("RoundHandler: handling request {:?}", req);
         match req {
-            Request::Build {
-                tunnel_id,
-                dest,
-                n_hops,
-            } => {
-                self.handle_build(tunnel_id, dest, n_hops).await;
+            Request::Build { tunnel_id, dest } => {
+                self.handle_build(tunnel_id, dest).await;
             }
             Request::Data { tunnel_id, data } => {
                 self.handle_data(tunnel_id, data).await;
@@ -308,13 +302,13 @@ impl RoundHandler {
 
     /// Builds a new tunnel to `dest` over `n_hops` additional peers.
     /// Performs a handshake with each hop and then spawns a task for handling incoming messages.
-    pub(crate) async fn handle_build(&mut self, tunnel_id: TunnelId, dest: Peer, n_hops: usize) {
+    pub(crate) async fn handle_build(&mut self, tunnel_id: TunnelId, dest: Peer) {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn({
             let mut builder = TunnelBuilder::new(
                 tunnel_id,
                 TunnelDestination::Fixed(dest),
-                n_hops,
+                self.n_hops,
                 self.peer_provider.clone(),
                 self.rng.clone(),
             );
@@ -428,7 +422,7 @@ impl RoundHandler {
             }
             info!(
                 "Constructing new cover tunnel ({:?} hops to destination)",
-                COVER_TUNNEL_HOPS
+                self.n_hops
             );
             let (tx, rx) = mpsc::unbounded_channel();
             let (cover_events_tx, cover_events_rx) = mpsc::channel(1);
@@ -438,7 +432,7 @@ impl RoundHandler {
                 let mut builder = TunnelBuilder::new(
                     tunnel_id,
                     TunnelDestination::Random,
-                    COVER_TUNNEL_HOPS,
+                    self.n_hops,
                     self.peer_provider.clone(),
                     self.rng.clone(),
                 );
@@ -469,7 +463,7 @@ impl RoundHandler {
     }
 
     async fn send_keep_alive(&mut self) {
-        info!("Sending keep alive");
+        trace!("Sending keep alive");
         if let Some((cover_tunnel, _)) = &self.cover_tunnel {
             let _ = cover_tunnel.send(tunnel::Request::KeepAlive);
         }

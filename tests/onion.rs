@@ -28,10 +28,16 @@ fn new_unique_peer() -> (Peer, RsaPrivateKey) {
     (Peer::new(addr, hostkey.public_key()), hostkey)
 }
 
-async fn spawn_peer(peers: Vec<Peer>) -> TestPeer<impl Stream<Item = Event>> {
+async fn spawn_peer(
+    peers: Vec<Peer>,
+    cover: bool,
+    hops: usize,
+) -> TestPeer<impl Stream<Item = Event>> {
     let (peer, hostkey) = new_unique_peer();
     let peer_provider = PeerProvider::from_stream(stream::iter(peers));
     let (onion, events) = Onion::new(peer.address(), hostkey, peer_provider)
+        .enable_cover_traffic(cover)
+        .set_hops_per_tunnel(hops)
         .start()
         .unwrap();
     TestPeer {
@@ -41,15 +47,20 @@ async fn spawn_peer(peers: Vec<Peer>) -> TestPeer<impl Stream<Item = Event>> {
     }
 }
 
+async fn spawn_simple_peer() -> TestPeer<impl Stream<Item = Event>> {
+    spawn_peer(vec![], false, 0).await
+}
+
 #[tokio::test]
 async fn test_idle() {
-    let _ = spawn_peer(vec![]).await;
+    let _ = spawn_simple_peer().await;
 }
 
 #[tokio::test]
 async fn test_cover() {
-    let peer1 = spawn_peer(vec![]).await;
-    let mut peer2 = spawn_peer(vec![peer1.peer.clone(), peer1.peer]).await;
+    pretty_env_logger::init();
+    let peer1 = spawn_simple_peer().await;
+    let mut peer2 = spawn_peer(vec![peer1.peer], true, 0).await;
     time::delay_for(ERROR_TIMEOUT).await;
     peer2.onion.send_cover(1);
     match time::timeout(ERROR_TIMEOUT, peer2.events.next()).await {
@@ -60,7 +71,7 @@ async fn test_cover() {
 
 #[tokio::test]
 async fn test_cover_error() {
-    let mut peer1 = spawn_peer(vec![]).await;
+    let mut peer1 = spawn_simple_peer().await;
     peer1.onion.send_cover(1);
     match time::timeout(ERROR_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Error {
@@ -74,9 +85,9 @@ async fn test_cover_error() {
 
 #[tokio::test]
 async fn test_build() {
-    let mut peer1 = spawn_peer(vec![]).await;
-    let mut peer2 = spawn_peer(vec![]).await;
-    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer, 0);
+    let mut peer1 = spawn_simple_peer().await;
+    let mut peer2 = spawn_simple_peer().await;
+    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer);
     match time::timeout(ROUND_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Ready { tunnel_id })) => assert_eq!(tunnel_id, TUNNEL_ID),
         Ok(e) => panic!("Expected ready event, got {:?}", e),
@@ -92,9 +103,9 @@ async fn test_build() {
 
 #[tokio::test]
 async fn test_build_error() {
-    let mut peer1 = spawn_peer(vec![]).await;
+    let mut peer1 = spawn_simple_peer().await;
     let (peer2, _) = new_unique_peer();
-    peer1.onion.build_tunnel(TUNNEL_ID, peer2, 0);
+    peer1.onion.build_tunnel(TUNNEL_ID, peer2);
     match time::timeout(ERROR_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Error {
             reason: ErrorReason::Build,
@@ -107,10 +118,10 @@ async fn test_build_error() {
 
 #[tokio::test]
 async fn test_data() {
-    let mut peer1 = spawn_peer(vec![]).await;
-    let mut peer2 = spawn_peer(vec![]).await;
+    let mut peer1 = spawn_simple_peer().await;
+    let mut peer2 = spawn_simple_peer().await;
 
-    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer, 0);
+    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer);
     match time::timeout(ROUND_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Ready { tunnel_id })) => assert_eq!(tunnel_id, TUNNEL_ID),
         Ok(e) => panic!("Expected ready event, got {:?}", e),
@@ -136,10 +147,10 @@ async fn test_data() {
 
 #[tokio::test]
 async fn test_long_data() {
-    let mut peer1 = spawn_peer(vec![]).await;
-    let mut peer2 = spawn_peer(vec![]).await;
+    let mut peer1 = spawn_simple_peer().await;
+    let mut peer2 = spawn_simple_peer().await;
 
-    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer, 0);
+    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer);
     match time::timeout(ROUND_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Ready { tunnel_id })) => assert_eq!(tunnel_id, TUNNEL_ID),
         Ok(e) => panic!("Expected ready event, got {:?}", e),
@@ -170,7 +181,7 @@ async fn test_long_data() {
 async fn spawn_many_peers(n: usize) -> Vec<Peer> {
     let mut peers = vec![];
     for _ in 0..n {
-        let peer = spawn_peer(vec![]).await;
+        let peer = spawn_simple_peer().await;
         peers.push(peer.peer);
     }
     peers
@@ -178,11 +189,11 @@ async fn spawn_many_peers(n: usize) -> Vec<Peer> {
 
 #[tokio::test]
 async fn test_long_data_two_hops() {
-    let hops = spawn_many_peers(3).await;
-    let mut peer1 = spawn_peer(hops).await;
-    let mut peer2 = spawn_peer(vec![]).await;
+    let hops = spawn_many_peers(2).await;
+    let mut peer1 = spawn_peer(hops, false, 2).await;
+    let mut peer2 = spawn_simple_peer().await;
 
-    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer, 0);
+    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer);
     match time::timeout(ROUND_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Ready { tunnel_id })) => assert_eq!(tunnel_id, TUNNEL_ID),
         Ok(e) => panic!("Expected ready event, got {:?}", e),
