@@ -129,12 +129,12 @@ async fn test_build_error() {
 #[tokio::test]
 async fn test_build_unstable_success() {
     // For some reason 8 (MAX_PEER_FAILURES - 2) or higher fails
-    let mut peers = new_unique_peers(7);
-    let peer2 = spawn_peer(vec![]).await;
-    peers.push(peer2.peer);
-    let mut peer1 = spawn_peer(peers).await;
-    let mut peer3 = spawn_peer(vec![]).await;
-    peer1.onion.build_tunnel(TUNNEL_ID, peer3.peer, 1);
+    let mut hop_candidates = new_unique_peers(7);
+    let peer2 = spawn_simple_peer().await;
+    hop_candidates.push(peer2.peer);
+    let mut peer1 = spawn_peer(hop_candidates, false, 2).await;
+    let mut peer3 = spawn_simple_peer().await;
+    peer1.onion.build_tunnel(TUNNEL_ID, peer3.peer);
     match time::timeout(ROUND_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Ready { tunnel_id })) => assert_eq!(tunnel_id, TUNNEL_ID),
         Ok(e) => panic!("Expected ready event, got {:?}", e),
@@ -150,12 +150,12 @@ async fn test_build_unstable_success() {
 
 #[tokio::test]
 async fn test_build_unstable_error() {
-    let mut peers = new_unique_peers(12);
-    let peer2 = spawn_peer(vec![]).await;
-    peers.push(peer2.peer);
-    let mut peer1 = spawn_peer(peers).await;
-    let peer3 = spawn_peer(vec![]).await;
-    peer1.onion.build_tunnel(TUNNEL_ID, peer3.peer, 1);
+    let mut hop_candidates = new_unique_peers(12);
+    let peer2 = spawn_simple_peer().await;
+    hop_candidates.push(peer2.peer);
+    let mut peer1 = spawn_peer(hop_candidates, false, 1).await;
+    let peer3 = spawn_simple_peer().await;
+    peer1.onion.build_tunnel(TUNNEL_ID, peer3.peer);
     match time::timeout(ERROR_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Error {
             reason: ErrorReason::Build,
