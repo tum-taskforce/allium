@@ -158,9 +158,9 @@ async fn test_build_unstable_error() {
     peer1.onion.build_tunnel(TUNNEL_ID, peer3.peer, 1);
     match time::timeout(ERROR_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Error {
-                    reason: ErrorReason::Build,
-                    tunnel_id,
-                })) => assert_eq!(tunnel_id, TUNNEL_ID),
+            reason: ErrorReason::Build,
+            tunnel_id,
+        })) => assert_eq!(tunnel_id, TUNNEL_ID),
         Ok(e) => panic!("Expected error event, got {:?}", e),
         Err(_) => panic!("Expected error event, got timeout"),
     }
@@ -273,10 +273,10 @@ async fn test_long_data_two_hops() {
 
 #[tokio::test]
 async fn test_data_error_tunnel_id() {
-    let mut peer1 = spawn_peer(vec![]).await;
-    let mut peer2 = spawn_peer(vec![]).await;
+    let mut peer1 = spawn_simple_peer().await;
+    let mut peer2 = spawn_simple_peer().await;
 
-    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer, 0);
+    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer);
     match time::timeout(ROUND_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Ready { tunnel_id })) => assert_eq!(tunnel_id, TUNNEL_ID),
         Ok(e) => panic!("Expected ready event, got {:?}", e),
@@ -293,9 +293,9 @@ async fn test_data_error_tunnel_id() {
     peer1.onion.send_data(wrong_tunnel_id, TEST_DATA);
     match time::timeout(ERROR_TIMEOUT, peer2.events.next()).await {
         Ok(Some(Event::Error {
-                    reason: ErrorReason::Data,
-                    tunnel_id,
-                })) => assert_eq!(tunnel_id, wrong_tunnel_id),
+            reason: ErrorReason::Data,
+            tunnel_id,
+        })) => assert_eq!(tunnel_id, wrong_tunnel_id),
         Ok(e) => panic!("Expected error event, got {:?}", e),
         Err(_) => panic!("Expected error event, got timeout"),
     }
@@ -303,10 +303,10 @@ async fn test_data_error_tunnel_id() {
 
 #[tokio::test]
 async fn test_data_error_disconnected_destination() {
-    let mut peer1 = spawn_peer(vec![]).await;
-    let mut peer2 = spawn_peer(vec![]).await;
+    let mut peer1 = spawn_simple_peer().await;
+    let mut peer2 = spawn_simple_peer().await;
 
-    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer, 0);
+    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer);
     match time::timeout(ROUND_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Ready { tunnel_id })) => assert_eq!(tunnel_id, TUNNEL_ID),
         Ok(e) => panic!("Expected ready event, got {:?}", e),
@@ -330,10 +330,10 @@ async fn test_data_error_disconnected_destination() {
 
 #[tokio::test]
 async fn test_data_error_disconnected_source() {
-    let mut peer1 = spawn_peer(vec![]).await;
-    let mut peer2 = spawn_peer(vec![]).await;
+    let mut peer1 = spawn_simple_peer().await;
+    let mut peer2 = spawn_simple_peer().await;
 
-    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer, 0);
+    peer1.onion.build_tunnel(TUNNEL_ID, peer2.peer);
     match time::timeout(ROUND_TIMEOUT, peer1.events.next()).await {
         Ok(Some(Event::Ready { tunnel_id })) => assert_eq!(tunnel_id, TUNNEL_ID),
         Ok(e) => panic!("Expected ready event, got {:?}", e),
