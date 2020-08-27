@@ -233,10 +233,7 @@ struct RoundHandler {
     rng: rand::SystemRandom,
     peer_provider: PeerProvider,
     tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
-    cover_tunnel: Option<(
-        mpsc::UnboundedSender<tunnel::Request>,
-        mpsc::Receiver<Event>,
-    )>,
+    cover_tunnel: Option<mpsc::UnboundedSender<tunnel::Request>>,
     enable_cover: bool,
     n_hops: usize,
 }
@@ -398,9 +395,9 @@ impl RoundHandler {
     async fn try_handle_cover(&mut self, size: u16) -> Option<()> {
         let size = size as usize;
         let packet_count = (size + protocol::MAX_DATA_SIZE - 1) / protocol::MAX_DATA_SIZE;
-        if let Some((tunnel, _)) = &self.cover_tunnel {
+        if let Some(cover_tunnel) = &self.cover_tunnel {
             for _ in 0..packet_count {
-                tunnel.send(tunnel::Request::KeepAlive).ok()?
+                cover_tunnel.send(tunnel::Request::KeepAlive).ok()?
             }
             Some(())
         } else {
@@ -417,7 +414,7 @@ impl RoundHandler {
     async fn next_round(&mut self) {
         info!("next round");
         if self.enable_cover && self.tunnels.lock().await.is_empty() {
-            if let Some((cover_tunnel, _)) = &self.cover_tunnel {
+            if let Some(cover_tunnel) = &self.cover_tunnel {
                 let _ = cover_tunnel.send(tunnel::Request::Destroy);
             }
             info!(
@@ -425,7 +422,7 @@ impl RoundHandler {
                 self.n_hops
             );
             let (tx, rx) = mpsc::unbounded_channel();
-            let (cover_events_tx, cover_events_rx) = mpsc::channel(1);
+            let (cover_events_tx, _) = mpsc::channel(1);
             let tunnel_id = tunnel::random_id(&self.rng);
 
             tokio::spawn({
@@ -453,7 +450,7 @@ impl RoundHandler {
                 }
             });
 
-            self.cover_tunnel = Some((tx, cover_events_rx));
+            self.cover_tunnel = Some(tx);
         } else {
             self.cover_tunnel = None;
             for tunnel in self.tunnels.lock().await.values_mut() {
@@ -464,7 +461,7 @@ impl RoundHandler {
 
     async fn send_keep_alive(&mut self) {
         trace!("Sending keep alive");
-        if let Some((cover_tunnel, _)) = &self.cover_tunnel {
+        if let Some(cover_tunnel) = &self.cover_tunnel {
             let _ = cover_tunnel.send(tunnel::Request::KeepAlive);
         }
         for tunnel in self.tunnels.lock().await.values_mut() {
