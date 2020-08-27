@@ -238,7 +238,13 @@ async fn test_timeout() -> Result<()> {
     let (events_tx, mut events_rx) = mpsc::channel(1);
     let tunnel_id = tunnel.id;
     let peer_provider = PeerProvider::from_stream(stream::iter(vec![peers[2].clone()]));
-    let builder = TunnelBuilder::new(tunnel.id, TunnelDestination::Fixed(peers[1].clone()), 1, peer_provider, rng);
+    let builder = TunnelBuilder::new(
+        tunnel.id,
+        TunnelDestination::Fixed(peers[1].clone()),
+        1,
+        peer_provider,
+        rng,
+    );
     let mut handler = TunnelHandler::new(tunnel, builder, rx, events_tx);
 
     let handler_task = tokio::spawn({
@@ -249,12 +255,16 @@ async fn test_timeout() -> Result<()> {
 
     tx.send(tunnel::Request::Switchover)?;
     match time::timeout(ERROR_TIMEOUT, events_rx.next()).await {
-        Ok(Some(Event::Ready { tunnel_id: ev_tunnel_id })) => assert_eq!(ev_tunnel_id, tunnel_id),
+        Ok(Some(Event::Ready {
+            tunnel_id: ev_tunnel_id,
+        })) => assert_eq!(ev_tunnel_id, tunnel_id),
         Ok(e) => panic!("Expected ready event, got {:?}", e),
         Err(_) => panic!("Expected ready event, got timeout"),
     }
 
-    let mut delay = time::delay_for(Duration::from_secs(circuit::TIMEOUT_IDLE + TIME_ERROR_TIMEOUT));
+    let mut delay = time::delay_for(Duration::from_secs(
+        circuit::TIMEOUT_IDLE + TIME_ERROR_TIMEOUT,
+    ));
     tokio::select! {
         _ = handler_task => Ok(()),
         _ = &mut delay => {
