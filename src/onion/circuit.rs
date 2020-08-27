@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, Mutex, MutexGuard};
 use tokio::time;
 use tokio::time::Duration;
 
-/// timeout apllied if there is no traffic on a circuit
-const TIMEOUT_IDLE: u64 = 120;
+/// timeout applied if there is no traffic on a circuit
+pub(crate) const TIMEOUT_IDLE: u64 = 120;
 /// timeout applied for a teardown operation
 const TIMEOUT_TEARDOWN: u64 = 5;
 

@@ -300,7 +300,7 @@ impl TunnelBuilder {
     /// generate a secure stream of peers.
     pub(crate) async fn build(&mut self) -> Result<Tunnel> {
         let mut tunnel = None;
-        for i in 0..MAX_PEER_FAILURES {
+        for _ in 0..MAX_PEER_FAILURES {
             tunnel = match (tunnel.take(), &self.dest) {
                 (None, TunnelDestination::Fixed(peer)) if self.n_hops == 0 => {
                     Tunnel::init(self.tunnel_id, peer, &self.rng)
