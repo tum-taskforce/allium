@@ -132,7 +132,7 @@ async fn test_build_unstable_success() {
     let mut hop_candidates = new_unique_peers(7);
     let peer2 = spawn_simple_peer().await;
     hop_candidates.push(peer2.peer);
-    let mut peer1 = spawn_peer(hop_candidates, false, 2).await;
+    let mut peer1 = spawn_peer(hop_candidates, false, 1).await;
     let mut peer3 = spawn_simple_peer().await;
     peer1.onion.build_tunnel(TUNNEL_ID, peer3.peer);
     match time::timeout(ROUND_TIMEOUT, peer1.events.next()).await {
@@ -292,12 +292,8 @@ async fn test_data_error_tunnel_id() {
     let wrong_tunnel_id = TUNNEL_ID + 1;
     peer1.onion.send_data(wrong_tunnel_id, TEST_DATA);
     match time::timeout(ERROR_TIMEOUT, peer2.events.next()).await {
-        Ok(Some(Event::Error {
-            reason: ErrorReason::Data,
-            tunnel_id,
-        })) => assert_eq!(tunnel_id, wrong_tunnel_id),
-        Ok(e) => panic!("Expected error event, got {:?}", e),
-        Err(_) => panic!("Expected error event, got timeout"),
+        Ok(e) => panic!("Got unexpected event: {:?}", e),
+        Err(_) => {}
     }
 }
 
