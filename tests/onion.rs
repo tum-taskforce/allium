@@ -31,7 +31,9 @@ fn new_unique_peer() -> (Peer, RsaPrivateKey) {
 async fn spawn_peer(peers: Vec<Peer>) -> TestPeer<impl Stream<Item = Event>> {
     let (peer, hostkey) = new_unique_peer();
     let peer_provider = PeerProvider::from_stream(stream::iter(peers));
-    let (onion, events) = Onion::new(peer.address(), hostkey, peer_provider).unwrap();
+    let (onion, events) = Onion::new(peer.address(), hostkey, peer_provider)
+        .start()
+        .unwrap();
     TestPeer {
         peer,
         onion,

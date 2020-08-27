@@ -1,11 +1,13 @@
 use crate::Result;
 use anyhow::anyhow;
+use ini::ini::Properties;
 use ini::Ini;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -34,6 +36,8 @@ pub struct OnionConfig {
     pub hostkey: PathBuf,
     /// The number of hops in each tunnel (excluding the final peer).
     pub hops: usize,
+    /// Enable cover traffic
+    pub cover_traffic: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,31 +58,46 @@ impl Config {
     }
 
     pub fn from_ini(string: &str) -> Result<Self> {
-        let ini = Ini::load_from_str(string)?;
+        fn required<F: FromStr>(sec: &Properties, key: &str) -> Result<F> {
+            sec.get(key)
+                .ok_or(anyhow!("Missing required property {}", key))?
+                .parse()
+                .map_err(|_| anyhow!("Could not parse property {}", key))
+        }
 
+        fn optional<F: FromStr>(sec: &Properties, key: &str) -> Result<Option<F>> {
+            match sec.get(key) {
+                Some(s) => match s.parse() {
+                    Ok(v) => Ok(Some(v)),
+                    Err(_) => Err(anyhow!("Could not parse property {}", key)),
+                },
+                None => Ok(None),
+            }
+        }
+
+        let ini = Ini::load_from_str(string)?;
         let onion = ini
             .section(Some("onion"))
+            .ok_or(anyhow!("Missing onion section"))
             .and_then(|sec| {
-                Some(OnionConfig {
-                    api_address: sec.get("api_address")?.parse().ok()?,
-                    p2p_port: sec.get("p2p_port")?.parse().ok()?,
-                    p2p_hostname: sec.get("p2p_hostname")?.parse().ok()?,
-                    hostkey: sec.get("hostkey")?.into(),
-                    hops: sec.get("hops")?.parse().ok()?,
+                Ok(OnionConfig {
+                    api_address: required(sec, "api_address")?,
+                    p2p_port: required(sec, "p2p_port")?,
+                    p2p_hostname: required(sec, "p2p_hostname")?,
+                    hostkey: required(sec, "hostkey")?,
+                    hops: required(sec, "hops")?,
+                    cover_traffic: optional(sec, "cover_traffic")?,
                 })
-            })
-            .ok_or(anyhow!("Could not parse onion config"))?;
-
+            })?;
         let rps = ini
             .section(Some("rps"))
+            .ok_or(anyhow!("Missing rps section"))
             .and_then(|sec| {
-                Some(RpsConfig {
-                    api_address: Some(sec.get("api_address")?.parse().ok()?),
+                Ok(RpsConfig {
+                    api_address: optional(sec, "api_address")?,
                     peers: None,
                 })
-            })
-            .ok_or(anyhow!("Could not parse rps config"))?;
-
+            })?;
         Ok(Config { onion, rps })
     }
 

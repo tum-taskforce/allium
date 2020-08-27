@@ -34,6 +34,8 @@ p2p_hostname = 127.0.0.1
 hostkey = testkey.pem
 ; The number of hops (excluding the destination) in each tunnel (should be at least 2)
 hops = 2
+; Enable or disable cover traffic
+cover_traffic = true 
 
 [rps]
 ; The address and port the RPS module is listening on
@@ -60,4 +62,10 @@ $ cargo run --example cli
 Additionally, the logging level can be specified like this:
 ```
 $ RUST_LOG=trace cargo run --example cli
+```
+
+## Tests
+Tests can be run with
+```
+cargo test
 ```

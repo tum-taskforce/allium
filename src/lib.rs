@@ -102,38 +102,18 @@ pub struct Onion {
 
 impl Onion {
     /// Construct a new onion instance.
-    /// Returns the constructed instance and an event stream.
+    /// Returns a builder which allows further configuration.
     pub fn new(
         listen_addr: SocketAddr,
         hostkey: RsaPrivateKey,
         peer_provider: PeerProvider,
-    ) -> Result<(Self, impl Stream<Item = Event>)> {
-        // create request channel for interaction from the API to the round handler
-        let (req_tx, req_rx) = mpsc::unbounded_channel();
-        // create event channel for propagating events back to the API
-        let (evt_tx, evt_rx) = mpsc::channel(100);
-        // shared map of all tunnels (incoming and outgoing)
-        let tunnels = Arc::new(Mutex::new(HashMap::new()));
-
-        // creates round handler task which receives requests on req_rx and sends events on evt_tx
-        tokio::spawn({
-            let events = evt_tx.clone();
-            let tunnels = tunnels.clone();
-            let mut round_handler = RoundHandler::new(req_rx, events, peer_provider, tunnels);
-            async move { round_handler.handle().await }
-        });
-
-        // create task listening on p2p connections
-        // also sends events on evt_tx
-        tokio::spawn({
-            let events = evt_tx;
-            let tunnels = tunnels;
-            let mut listener = OnionListener::new(hostkey, events, tunnels);
-            async move { listener.listen_addr(listen_addr).await }
-        });
-
-        let onion = Onion { requests: req_tx };
-        Ok((onion, evt_rx))
+    ) -> OnionBuilder {
+        OnionBuilder {
+            listen_addr,
+            hostkey,
+            peer_provider,
+            enable_cover: true,
+        }
     }
 
     pub fn build_tunnel(&self, tunnel_id: TunnelId, dest: Peer, n_hops: usize) -> TunnelId {
@@ -174,6 +154,58 @@ impl Onion {
     }
 }
 
+pub struct OnionBuilder {
+    listen_addr: SocketAddr,
+    hostkey: RsaPrivateKey,
+    peer_provider: PeerProvider,
+    enable_cover: bool,
+}
+
+impl OnionBuilder {
+    pub fn enable_cover_traffic(mut self, enable: bool) -> Self {
+        self.enable_cover = false;
+        self
+    }
+
+    /// Returns the constructed instance and an event stream.
+    pub fn start(self) -> Result<(Onion, impl Stream<Item = Event>)> {
+        let OnionBuilder {
+            listen_addr,
+            hostkey,
+            peer_provider,
+            enable_cover,
+        } = self;
+
+        // create request channel for interaction from the API to the round handler
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        // create event channel for propagating events back to the API
+        let (evt_tx, evt_rx) = mpsc::channel(100);
+        // shared map of all tunnels (incoming and outgoing)
+        let tunnels = Arc::new(Mutex::new(HashMap::new()));
+
+        // creates round handler task which receives requests on req_rx and sends events on evt_tx
+        tokio::spawn({
+            let events = evt_tx.clone();
+            let tunnels = tunnels.clone();
+            let mut round_handler =
+                RoundHandler::new(req_rx, events, peer_provider, tunnels, enable_cover);
+            async move { round_handler.handle().await }
+        });
+
+        // create task listening on p2p connections
+        // also sends events on evt_tx
+        tokio::spawn({
+            let events = evt_tx;
+            let tunnels = tunnels;
+            let mut listener = OnionListener::new(hostkey, events, tunnels);
+            async move { listener.listen_addr(listen_addr).await }
+        });
+
+        let onion = Onion { requests: req_tx };
+        Ok((onion, evt_rx))
+    }
+}
+
 #[derive(Clone)]
 pub struct PeerProvider {
     inner: mpsc::Sender<oneshot::Sender<Peer>>,
@@ -210,7 +242,7 @@ struct RoundHandler {
         mpsc::UnboundedSender<tunnel::Request>,
         mpsc::Receiver<Event>,
     )>,
-    // more info about outgoing tunnels
+    enable_cover: bool,
 }
 
 impl RoundHandler {
@@ -219,6 +251,7 @@ impl RoundHandler {
         events: mpsc::Sender<Event>,
         peer_provider: PeerProvider,
         tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
+        enable_cover: bool,
     ) -> Self {
         let rng = rand::SystemRandom::new();
         RoundHandler {
@@ -228,6 +261,7 @@ impl RoundHandler {
             peer_provider,
             tunnels,
             cover_tunnel: None,
+            enable_cover,
         }
     }
 
@@ -388,7 +422,7 @@ impl RoundHandler {
     /// switch over is possible.
     async fn next_round(&mut self) {
         info!("next round");
-        if self.tunnels.lock().await.is_empty() {
+        if self.enable_cover && self.tunnels.lock().await.is_empty() {
             if let Some((cover_tunnel, _)) = &self.cover_tunnel {
                 let _ = cover_tunnel.send(tunnel::Request::Destroy);
             }
