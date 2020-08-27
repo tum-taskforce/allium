@@ -15,10 +15,12 @@ async fn main() {
         .unwrap_or(DEFAULT_ADDR.to_string())
         .parse()
         .unwrap();
+    let cover_enabled = env::args().any(|arg| arg == "--cover");
     let hostkey = RsaPrivateKey::from_pem_file("testkey.pem").unwrap();
     let public_key = hostkey.public_key();
     let (mut peer_tx, peer_rx) = mpsc::unbounded_channel();
     let (onion, mut events) = Onion::new(onion_addr, hostkey, PeerProvider::from_stream(peer_rx))
+        .enable_cover_traffic(cover_enabled)
         .start()
         .unwrap();
 
