@@ -110,8 +110,7 @@ impl Config {
         File::open(&path)?.read_to_string(&mut buf)?;
         match path.as_ref().extension() {
             Some(ext) if ext == "toml" => Self::from_toml(&buf),
-            Some(ext) if ext == "ini" => Self::from_ini(&buf),
-            _ => Err(anyhow!("Unsupported config format")),
+            _ => Self::from_ini(&buf),
         }
     }
 }
