@@ -56,7 +56,7 @@ The public key supplied in a `BUILD` message must be in the DER-encoded `Subject
 $ openssl rsa -in testkey.pem -outform DER -pubout -out testkey_pub.der
 ```
 
-## CLI example
+## CLI Example
 For testing purposes, a command-line interface is provided which can be run like this:
 ```
 $ cargo run --example cli
@@ -71,3 +71,18 @@ Tests can be run with
 ```
 cargo test
 ```
+
+## Installing
+Install the binary to `~/.cargo/bin/` by running the following command inside the cloned directory.
+```
+cargo install --path .
+```
+
+## Known Issues
+
+## Future Work
+* Revise the public interface of the library to make it more socket-like
+    * `build` returns `TunnelSocket` which provides `read` and `write` methods
+* Publish the library to the crates.io registry
+* Write benchmarks and tune the performance
+    * Reduce the number of allocations and copy operations
