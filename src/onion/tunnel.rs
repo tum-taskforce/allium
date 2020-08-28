@@ -210,7 +210,7 @@ impl Tunnel {
         Ok(())
     }
 
-    pub(crate) async fn truncate_to_length(
+    pub(crate) async fn _truncate_to_length(
         &mut self,
         n_hops: usize,
         rng: &rand::SystemRandom,
@@ -444,7 +444,7 @@ impl TunnelHandler {
                 self.events.send(event).await?;
                 Ok(())
             }
-            Ok(TunnelRequest::End(tunnel_id)) => {
+            Ok(TunnelRequest::End(_tunnel_id)) => {
                 // maybe reconstruct tunnel
                 Err(anyhow!("Tunnel broke due to unexpected End"))
             }

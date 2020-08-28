@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::protocol;
 use crate::onion::socket::OnionSocket;
@@ -31,6 +29,9 @@ const ROUND_DURATION: Duration = Duration::from_secs(30); // TODO read from conf
 /// This must be strictly smaller than `TIMEOUT_IDLE` but sufficiently large to not produce any spam
 const KEEP_ALIVE_DURATION: Duration = Duration::from_secs(20); // TODO read from config
 
+/// A remote peer characterized by its address, the port on which it is listening for onion
+/// connections and its public key. The public key is needed to verify the authenticity of
+/// signed messages received from this peer.
 #[derive(Clone)]
 pub struct Peer {
     addr: SocketAddr,
@@ -557,7 +558,7 @@ impl OnionListener {
                     let _ = self.events.send(Event::Data { tunnel_id, data }).await;
                 }
             }
-            circuit::Event::End { tunnel_id } => {
+            circuit::Event::End { .. } => {
                 /* TODO We never communicate this step to the API, nor do we need to. However, we
                     need to clear up the map to prevent cluttering. Also, we do not limit old
                     circuits to remain as zombie circuits on Alice's client since Alice expects an

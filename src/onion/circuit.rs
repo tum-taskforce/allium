@@ -336,7 +336,7 @@ impl CircuitHandler {
 
                 state
             }
-            (TunnelRequest::Truncate, State::Router { out_circuit }) => {
+            (TunnelRequest::Truncate, State::Router { .. }) => {
                 // Teardown out circuit
                 self.teardown_out_circuit().await;
 
@@ -377,7 +377,7 @@ impl CircuitHandler {
                     requests: rx,
                 }
             }
-            (TunnelRequest::Begin(_), state) => {
+            (TunnelRequest::Begin(_), _) => {
                 return Err(anyhow!("Begin request while not in Default state"));
             }
             (
@@ -396,7 +396,7 @@ impl CircuitHandler {
 
                 State::Default
             }
-            (TunnelRequest::End(_), state) => {
+            (TunnelRequest::End(_), _) => {
                 return Err(anyhow!("End request white not in Endpoint state"));
             }
             (
@@ -417,7 +417,7 @@ impl CircuitHandler {
                     requests,
                 }
             }
-            (TunnelRequest::Data(_, _), state) => {
+            (TunnelRequest::Data(_, _), _) => {
                 return Err(anyhow!("Data request while not in Endpoint state"));
             }
             /*
@@ -473,7 +473,7 @@ impl CircuitHandler {
                     "Out Circuit breached protocol by sending unexpected message"
                 ))
             }
-            Err(OnionSocketError::StreamTerminated(e)) => {
+            Err(OnionSocketError::StreamTerminated(_)) => {
                 // NOTE: error handling will just be propagated, robustness could be improved here
                 Err(anyhow!("Out Stream terminated"))
             }

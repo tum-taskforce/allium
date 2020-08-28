@@ -85,12 +85,6 @@ impl RsaPrivateKey {
     }
 }
 
-pub(crate) fn read_rsa_keypair<P: AsRef<Path>>(path: P) -> Result<(RsaPrivateKey, RsaPublicKey)> {
-    let private_key = RsaPrivateKey::from_pem_file(path)?;
-    let public_key = private_key.public_key();
-    Ok((private_key, public_key))
-}
-
 impl RsaPublicKey {
     pub fn new(bytes: &[u8]) -> Self {
         let public_key = signature::UnparsedPublicKey::new(

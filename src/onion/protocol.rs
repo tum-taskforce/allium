@@ -558,7 +558,7 @@ impl ToBytes for TunnelRequest {
 
 impl FromBytes for TunnelProtocolResult<TunnelResponseExtended<VerifyKey>, TunnelExtendedError> {
     fn read_from(buf: &mut BytesMut) -> Self {
-        let size = buf.get_u16() as usize;
+        let _size = buf.get_u16() as usize;
         let message_type = buf.get_u8();
         match message_type {
             TUNNEL_EXTENDED => {
@@ -614,7 +614,7 @@ impl ToBytes for TunnelExtendedError {
 
 impl FromBytes for TunnelProtocolResult<TunnelResponseTruncated, TunnelTruncatedError> {
     fn read_from(buf: &mut BytesMut) -> Self {
-        let size = buf.get_u16() as usize;
+        let _size = buf.get_u16() as usize;
         let message_type = buf.get_u8();
         match message_type {
             TUNNEL_TRUNCATED => Ok(TunnelResponseTruncated),
@@ -723,7 +723,8 @@ impl<'a> SignKey<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::onion::crypto::{self, EphemeralPrivateKey};
+    use crate::onion::crypto::EphemeralPrivateKey;
+    use crate::onion::tests::read_rsa_keypair;
     use ring::rand;
 
     #[test]
@@ -750,7 +751,7 @@ mod tests {
         let key = EphemeralPrivateKey::generate(&rng).public_key();
         let key_bytes = key.bytes().clone();
 
-        let (rsa_private, rsa_public) = crypto::read_rsa_keypair("testkey.pem")?;
+        let (rsa_private, rsa_public) = read_rsa_keypair("testkey.pem")?;
         let key = SignKey::sign(&key, &rsa_private, &rng);
 
         let circuit_id = 0;
@@ -810,7 +811,7 @@ mod tests {
         let key = EphemeralPrivateKey::generate(&rng).public_key();
         let key_bytes = key.bytes().clone();
 
-        let (rsa_private, rsa_public) = crypto::read_rsa_keypair("testkey.pem")?;
+        let (rsa_private, rsa_public) = read_rsa_keypair("testkey.pem")?;
         let key = SignKey::sign(&key, &rsa_private, &rng);
 
         let aes_keys = generate_aes_keys(&rng)?;

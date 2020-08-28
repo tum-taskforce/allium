@@ -55,8 +55,8 @@ pub(crate) type SocketResult<T> = std::result::Result<T, OnionSocketError>;
 impl From<CircuitProtocolError> for OnionSocketError {
     fn from(e: CircuitProtocolError) -> Self {
         match e {
-            CircuitProtocolError::Teardown { expected } => OnionSocketError::TeardownMessage,
-            CircuitProtocolError::Unknown { expected, actual } => OnionSocketError::BrokenMessage,
+            CircuitProtocolError::Teardown { .. } => OnionSocketError::TeardownMessage,
+            CircuitProtocolError::Unknown { .. } => OnionSocketError::BrokenMessage,
         }
     }
 }
@@ -510,7 +510,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
 
         res.decrypt(session_keys.iter().rev())
             .map_err(|_| OnionSocketError::BrokenMessage)?;
-        let tunnel_res = TunnelResponseTruncated::read_with_digest_from(&mut res.payload.bytes)?;
+        let _tunnel_res = TunnelResponseTruncated::read_with_digest_from(&mut res.payload.bytes)?;
         //.context("Invalid TunnelResponse message")?;
 
         Ok(())

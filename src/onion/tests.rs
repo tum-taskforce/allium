@@ -1,8 +1,9 @@
 use crate::onion::circuit::CircuitHandler;
-use crate::onion::crypto::{self, RsaPrivateKey};
+use crate::onion::crypto::RsaPrivateKey;
 use crate::onion::tunnel::{Tunnel, TunnelError};
 use crate::*;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::Path;
 use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::stream;
 
@@ -10,6 +11,12 @@ const TEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(42000);
 const TIME_ERROR_TIMEOUT: u64 = 4;
 const ERROR_TIMEOUT: Duration = Duration::from_secs(TIME_ERROR_TIMEOUT);
+
+pub(crate) fn read_rsa_keypair<P: AsRef<Path>>(path: P) -> Result<(RsaPrivateKey, RsaPublicKey)> {
+    let private_key = RsaPrivateKey::from_pem_file(path)?;
+    let public_key = private_key.public_key();
+    Ok((private_key, public_key))
+}
 
 async fn listen(mut listener: TcpListener, host_key: &RsaPrivateKey) -> Result<()> {
     println!(
@@ -25,7 +32,7 @@ async fn listen(mut listener: TcpListener, host_key: &RsaPrivateKey) -> Result<(
 }
 
 async fn spawn_n_peers(n: usize) -> Vec<Peer> {
-    let (host_key, peer_key) = crypto::read_rsa_keypair("testkey.pem").unwrap();
+    let (host_key, peer_key) = read_rsa_keypair("testkey.pem").unwrap();
     let mut peers = Vec::new();
     let host_key = Arc::new(host_key);
     for _ in 0..n {
@@ -120,7 +127,7 @@ async fn test_truncate_two_peers() -> Result<()> {
 
 #[tokio::test]
 async fn test_data_unidirectional() -> Result<()> {
-    let (host_key, peer_key) = crypto::read_rsa_keypair("testkey.pem").unwrap();
+    let (host_key, peer_key) = read_rsa_keypair("testkey.pem").unwrap();
     let peer_port = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
     let peer_addr = (TEST_IP, peer_port).into();
     let peer = Peer::new(peer_addr, peer_key);
@@ -151,7 +158,7 @@ async fn test_data_unidirectional() -> Result<()> {
 
 #[tokio::test]
 async fn test_data_bidirectional() -> Result<()> {
-    let (host_key, peer_key) = crypto::read_rsa_keypair("testkey.pem").unwrap();
+    let (host_key, peer_key) = read_rsa_keypair("testkey.pem").unwrap();
     let peer_port = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
     let peer_addr = (TEST_IP, peer_port).into();
     let peer = Peer::new(peer_addr, peer_key);
