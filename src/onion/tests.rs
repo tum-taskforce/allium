@@ -247,6 +247,7 @@ async fn test_keep_alive() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "takes very long to complete"]
 async fn test_timeout() -> Result<()> {
     let rng = rand::SystemRandom::new();
     let peers = spawn_n_peers(3).await;

@@ -79,6 +79,9 @@ cargo install --path .
 ```
 
 ## Known Issues
+* During switchover we kill the old tunnel without draining any possibly leftover Data messages. This may cause packet loss.
+* Circuit IDs (and to some degree tunnel IDs) are generated randomly. Although unlikely, there might be duplicates.
+* We don't sanitize the output from the RPS, so tunnels with loops or random cover tunnels with ourselves as destination might be possible, depending on the implementation of the RPS.
 
 ## Future Work
 * Revise the public interface of the library to make it more socket-like
@@ -86,3 +89,4 @@ cargo install --path .
 * Publish the library to the crates.io registry
 * Write benchmarks and tune the performance
     * Reduce the number of allocations and copy operations
+* Tunnels are generally torn down forcefully instead of being deconstructed iteratively, despite the necessary functionality being partially implemented

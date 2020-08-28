@@ -281,13 +281,7 @@ impl RoundHandler {
     pub(crate) async fn handle(&mut self) {
         info!("Starting RoundHandler");
         let mut round_timer = time::interval(self.round_duration);
-        // This must be less than IDLE_TIMEOUT but sufficiently large to not produce any spam
-        let keep_alive_interval = self.round_duration / 3 * 2;
-        assert!(
-            keep_alive_interval < IDLE_TIMEOUT,
-            "round duration > {:?}",
-            IDLE_TIMEOUT / 2 * 3
-        );
+        let keep_alive_interval = IDLE_TIMEOUT / 3 * 2;
         let mut keep_alive_timer = time::interval(keep_alive_interval);
         loop {
             tokio::select! {
