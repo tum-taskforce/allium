@@ -1,7 +1,10 @@
 [package]
 name = "voidphone-onion"
 version = "0.1.0"
-authors = ["Dominik Stolz <d.stolz@tum.de>"]
+authors = [
+    "Dominik Stolz <d.stolz@tum.de>",
+    "Oliver Jacobsen <oliver.jacobsen@tum.de>"
+]
 edition = "2018"
 
 [lib]
@@ -14,9 +17,9 @@ ring = { version = "0.16.15", features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.5"
 anyhow = "1.0"
-thiserror = "1.0.20"
-base64 = "0.12.2"
-bytes = "0.5.5"
+thiserror = "1.0"
+base64 = "0.12"
+bytes = "0.5"
 log = "0.4"
 pretty_env_logger = "0.4"
 rust-ini = "0.15"
