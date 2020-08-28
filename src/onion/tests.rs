@@ -10,6 +10,7 @@ use tokio::stream;
 const TEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(42000);
 const ERROR_TIMEOUT: Duration = Duration::from_secs(4);
+const ROUND_DURATION: Duration = Duration::from_secs(5);
 
 pub(crate) fn read_rsa_keypair<P: AsRef<Path>>(path: P) -> Result<(RsaPrivateKey, RsaPublicKey)> {
     let private_key = RsaPrivateKey::from_pem_file(path)?;
@@ -141,8 +142,15 @@ async fn test_data_unidirectional() -> Result<()> {
     let (_, req_rx) = mpsc::unbounded_channel();
     let (evt_tx, _) = mpsc::channel(100);
     let peer_provider = PeerProvider::from_stream(stream::empty());
-    let mut round_handler =
-        RoundHandler::new(req_rx, evt_tx, peer_provider, Default::default(), false, 0);
+    let mut round_handler = RoundHandler::new(
+        req_rx,
+        evt_tx,
+        peer_provider,
+        Default::default(),
+        false,
+        0,
+        ROUND_DURATION,
+    );
 
     let tunnel_id = 3;
     round_handler.handle_build(tunnel_id, peer).await;
@@ -198,8 +206,15 @@ async fn test_data_bidirectional() -> Result<()> {
     let (_, req_rx) = mpsc::unbounded_channel();
     let (evt_tx, mut evt_rx) = mpsc::channel(100);
     let peer_provider = PeerProvider::from_stream(stream::empty());
-    let mut round_handler =
-        RoundHandler::new(req_rx, evt_tx, peer_provider, Default::default(), false, 0);
+    let mut round_handler = RoundHandler::new(
+        req_rx,
+        evt_tx,
+        peer_provider,
+        Default::default(),
+        false,
+        0,
+        ROUND_DURATION,
+    );
 
     let tunnel_id = 3;
     round_handler.handle_build(tunnel_id, peer).await;

@@ -1,4 +1,4 @@
-use crate::onion::circuit::{self, CircuitHandler, CircuitId};
+use crate::onion::circuit::{self, CircuitHandler, CircuitId, IDLE_TIMEOUT};
 use crate::onion::protocol;
 use crate::onion::socket::OnionSocket;
 use crate::onion::tunnel::{self, TunnelBuilder, TunnelDestination, TunnelHandler};
@@ -25,9 +25,8 @@ mod utils;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
-const ROUND_DURATION: Duration = Duration::from_secs(30); // TODO read from config
-/// This must be strictly smaller than `TIMEOUT_IDLE` but sufficiently large to not produce any spam
-const KEEP_ALIVE_DURATION: Duration = Duration::from_secs(20); // TODO read from config
+const DEFAULT_ROUND_DURATION: Duration = Duration::from_secs(30);
+const DEFAULT_HOPS: usize = 2;
 
 /// A remote peer characterized by its address, the port on which it is listening for onion
 /// connections and its public key. The public key is needed to verify the authenticity of
@@ -102,7 +101,8 @@ impl Onion {
             hostkey,
             peer_provider,
             enable_cover: true,
-            n_hops: 2,
+            n_hops: DEFAULT_HOPS,
+            round_duration: DEFAULT_ROUND_DURATION,
         }
     }
 
@@ -149,6 +149,7 @@ pub struct OnionBuilder {
     peer_provider: PeerProvider,
     enable_cover: bool,
     n_hops: usize,
+    round_duration: Duration,
 }
 
 impl OnionBuilder {
@@ -162,6 +163,11 @@ impl OnionBuilder {
         self
     }
 
+    pub fn set_round_duration(mut self, secs: u64) -> Self {
+        self.round_duration = Duration::from_secs(secs);
+        self
+    }
+
     /// Returns the constructed instance and an event stream.
     pub fn start(self) -> Result<(Onion, impl Stream<Item = Event>)> {
         let OnionBuilder {
@@ -170,6 +176,7 @@ impl OnionBuilder {
             peer_provider,
             enable_cover,
             n_hops,
+            round_duration,
         } = self;
 
         // create request channel for interaction from the API to the round handler
@@ -183,8 +190,15 @@ impl OnionBuilder {
         tokio::spawn({
             let events = evt_tx.clone();
             let tunnels = tunnels.clone();
-            let mut round_handler =
-                RoundHandler::new(req_rx, events, peer_provider, tunnels, enable_cover, n_hops);
+            let mut round_handler = RoundHandler::new(
+                req_rx,
+                events,
+                peer_provider,
+                tunnels,
+                enable_cover,
+                n_hops,
+                round_duration,
+            );
             async move { round_handler.handle().await }
         });
 
@@ -237,6 +251,7 @@ struct RoundHandler {
     cover_tunnel: Option<mpsc::UnboundedSender<tunnel::Request>>,
     enable_cover: bool,
     n_hops: usize,
+    round_duration: Duration,
 }
 
 impl RoundHandler {
@@ -247,6 +262,7 @@ impl RoundHandler {
         tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
         enable_cover: bool,
         n_hops: usize,
+        round_duration: Duration,
     ) -> Self {
         let rng = rand::SystemRandom::new();
         RoundHandler {
@@ -258,13 +274,21 @@ impl RoundHandler {
             cover_tunnel: None,
             enable_cover,
             n_hops,
+            round_duration,
         }
     }
 
     pub(crate) async fn handle(&mut self) {
         info!("Starting RoundHandler");
-        let mut round_timer = time::interval(ROUND_DURATION);
-        let mut keep_alive_timer = time::interval(KEEP_ALIVE_DURATION);
+        let mut round_timer = time::interval(self.round_duration);
+        // This must be less than IDLE_TIMEOUT but sufficiently large to not produce any spam
+        let keep_alive_interval = self.round_duration / 3 * 2;
+        assert!(
+            keep_alive_interval < IDLE_TIMEOUT,
+            "round duration > {:?}",
+            IDLE_TIMEOUT / 2 * 3
+        );
+        let mut keep_alive_timer = time::interval(keep_alive_interval);
         loop {
             tokio::select! {
                 Some(req) = self.requests.recv() => {

@@ -38,6 +38,9 @@ pub struct OnionConfig {
     pub hops: usize,
     /// Enable cover traffic
     pub cover_traffic: Option<bool>,
+    /// Duration of each round in seconds.
+    /// After each round connections will seamlessly switchover to a new tunnel.
+    pub round_duration: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +90,7 @@ impl Config {
                     hostkey: required(sec, "hostkey")?,
                     hops: required(sec, "hops")?,
                     cover_traffic: optional(sec, "cover_traffic")?,
+                    round_duration: optional(sec, "round_duration")?,
                 })
             })?;
         let rps = ini

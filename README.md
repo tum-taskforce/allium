@@ -35,7 +35,9 @@ hostkey = testkey.pem
 ; The number of hops (excluding the destination) in each tunnel (should be at least 2)
 hops = 2
 ; Enable or disable cover traffic
-cover_traffic = true 
+cover_traffic = true
+; Duration of each round in seconds.
+round_duration = 120 
 
 [rps]
 ; The address and port the RPS module is listening on
