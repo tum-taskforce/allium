@@ -21,9 +21,9 @@ use tokio::time;
 use tokio::time::Duration;
 
 /// timeout applied if there is no traffic on a circuit
-pub(crate) const TIMEOUT_IDLE: u64 = 120;
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// timeout applied for a teardown operation
-const TIMEOUT_TEARDOWN: u64 = 5;
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) type CircuitId = u16;
 
@@ -51,7 +51,7 @@ impl Circuit {
     }
 
     pub(crate) async fn teardown_with_timeout(&self, rng: &rand::SystemRandom) {
-        match time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
+        match time::timeout(TEARDOWN_TIMEOUT, {
             // NOTE: Ignore any errors
             self.socket().await.teardown(self.id, rng)
         })
@@ -148,10 +148,7 @@ impl CircuitHandler {
             })
         } else {
             trace!("Incoming handshake failed post-handshake: unable to derive key");
-            let _ = time::timeout(Duration::from_secs(TIMEOUT_TEARDOWN), {
-                socket.teardown(circuit_id, &rng)
-            })
-            .await;
+            let _ = time::timeout(TEARDOWN_TIMEOUT, socket.teardown(circuit_id, &rng)).await;
             Err(anyhow!(
                 "Incoming handshake failed post-handshake: unable to derive key"
             ))
@@ -174,7 +171,7 @@ impl CircuitHandler {
 
     async fn respond_loop(&mut self) -> Result<()> {
         loop {
-            let mut delay = time::delay_for(Duration::from_secs(TIMEOUT_IDLE));
+            let mut delay = time::delay_for(IDLE_TIMEOUT);
 
             match &mut self.state {
                 State::Default => {

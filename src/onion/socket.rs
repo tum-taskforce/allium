@@ -11,10 +11,10 @@ use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::time::{timeout, Duration, Elapsed};
 
-/// timeout apllied during a read on the socket
-const TIMEOUT_READ: u64 = 5;
-/// timeout apllied during a write on the socket
-const TIMEOUT_WRITE: u64 = 2;
+/// timeout applied during a read on the socket
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// timeout applied during a write on the socket
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Error, Debug)]
 pub(crate) enum OnionSocketError {
@@ -90,11 +90,7 @@ impl<S> OnionSocket<S> {
 
 impl<S: AsyncRead + Unpin> OnionSocket<S> {
     async fn read_buf_from_stream(&mut self) -> SocketResult<usize> {
-        Ok(timeout(
-            Duration::from_secs(TIMEOUT_READ),
-            self.stream.read_exact(&mut self.buf),
-        )
-        .await??)
+        Ok(timeout(READ_TIMEOUT, self.stream.read_exact(&mut self.buf)).await??)
     }
 
     /// Listends for incoming `CIRCUIT CREATE` messages and returns the circuit id and key in this
@@ -137,11 +133,7 @@ impl<S: AsyncRead + Unpin> OnionSocket<S> {
 
 impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     async fn write_buf_to_stream(&mut self) -> SocketResult<()> {
-        Ok(timeout(
-            Duration::from_secs(TIMEOUT_WRITE),
-            self.stream.write_all(self.buf.as_ref()),
-        )
-        .await??)
+        Ok(timeout(WRITE_TIMEOUT, self.stream.write_all(self.buf.as_ref())).await??)
     }
 
     async fn encrypt_and_send_opaque<K: ToBytes>(

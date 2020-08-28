@@ -9,8 +9,7 @@ use tokio::stream;
 
 const TEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(42000);
-const TIME_ERROR_TIMEOUT: u64 = 4;
-const ERROR_TIMEOUT: Duration = Duration::from_secs(TIME_ERROR_TIMEOUT);
+const ERROR_TIMEOUT: Duration = Duration::from_secs(4);
 
 pub(crate) fn read_rsa_keypair<P: AsRef<Path>>(path: P) -> Result<(RsaPrivateKey, RsaPublicKey)> {
     let private_key = RsaPrivateKey::from_pem_file(path)?;
@@ -269,9 +268,7 @@ async fn test_timeout() -> Result<()> {
         Err(_) => panic!("Expected ready event, got timeout"),
     }
 
-    let mut delay = time::delay_for(Duration::from_secs(
-        circuit::TIMEOUT_IDLE + TIME_ERROR_TIMEOUT,
-    ));
+    let mut delay = time::delay_for(circuit::IDLE_TIMEOUT + ERROR_TIMEOUT);
     tokio::select! {
         _ = handler_task => Ok(()),
         _ = &mut delay => {
