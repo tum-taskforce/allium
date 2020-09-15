@@ -18,7 +18,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 const MAX_PEER_FAILURES: usize = 10;
 
@@ -48,8 +48,8 @@ impl From<OnionSocketError> for TunnelError {
 
 pub(crate) type TunnelResult<T> = std::result::Result<T, TunnelError>;
 
-#[derive(Debug)]
-pub(crate) enum Request {
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum Event {
     Switchover,
     Destroy,
     KeepAlive,
@@ -357,12 +357,11 @@ impl TunnelBuilder {
 }
 
 /// Manages a tunnel after its creation.
-/// Associates a requests channel with a concrete tunnel (enabling switch-over??)
 pub(crate) struct TunnelHandler {
     tunnel: Tunnel,
     next_tunnel: Arc<Mutex<Option<Tunnel>>>,
     state: State,
-    requests: mpsc::UnboundedReceiver<Request>,
+    events: broadcast::Receiver<Event>,
     builder: TunnelBuilder,
 }
 
@@ -382,14 +381,14 @@ impl TunnelHandler {
     pub(crate) fn new(
         first_tunnel: Tunnel,
         tunnel_builder: TunnelBuilder,
-        requests: mpsc::UnboundedReceiver<Request>,
+        events: broadcast::Receiver<Event>,
         ready: oneshot::Sender<Result<OnionTunnel>>,
     ) -> Self {
         TunnelHandler {
             tunnel: first_tunnel,
             next_tunnel: Arc::new(Mutex::new(None)),
             state: State::Building { ready },
-            requests,
+            events,
             builder: tunnel_builder,
         }
     }
@@ -411,8 +410,8 @@ impl TunnelHandler {
             match &mut self.state {
                 State::Building { .. } | State::Destroying => {
                     tokio::select! {
-                        Some(req) = self.requests.recv() => {
-                            self.handle_request(req).await?;
+                        Ok(evt) = self.events.recv() => {
+                            self.handle_event(evt).await?;
                         }
                     }
                 }
@@ -424,8 +423,8 @@ impl TunnelHandler {
                         msg = self.tunnel.out_circuit.accept_opaque() => {
                             self.handle_tunnel_message(msg).await?;
                         }
-                        Some(req) = self.requests.recv() => {
-                            self.handle_request(req).await?;
+                        Ok(evt) = self.events.recv() => {
+                            self.handle_event(evt).await?;
                         }
                     }
                 }
@@ -487,23 +486,23 @@ impl TunnelHandler {
         Ok(())
     }
 
-    async fn handle_request(&mut self, req: Request) -> Result<()> {
+    async fn handle_event(&mut self, evt: Event) -> Result<()> {
         trace!(
-            "TunnelHandler: handling request {:?} (state = {:?})",
-            req,
+            "TunnelHandler: handling event {:?} (state = {:?})",
+            evt,
             self.state
         );
         let mut state = State::Destroyed; // arbitrary
         std::mem::swap(&mut self.state, &mut state);
-        self.state = match (req, state) {
-            (Request::Switchover, State::Building { ready }) => {
+        self.state = match (evt, state) {
+            (Event::Switchover, State::Building { ready }) => {
                 self.tunnel.begin(&self.builder.rng).await?;
                 let (tunnel, data_tx, data_rx) = OnionTunnel::new(self.tunnel.id);
                 let _ = ready.send(Ok(tunnel)); // TODO handle closed
                 self.spawn_next_tunnel_task();
                 State::Ready { data_tx, data_rx }
             }
-            (Request::Switchover, State::Ready { data_tx, data_rx }) => {
+            (Event::Switchover, State::Ready { data_tx, data_rx }) => {
                 let mut new_tunnel = self
                     .next_tunnel
                     .lock()
@@ -525,22 +524,22 @@ impl TunnelHandler {
                 });
                 State::Ready { data_tx, data_rx }
             }
-            (Request::Switchover, State::Destroying) => {
+            (Event::Switchover, State::Destroying) => {
                 self.tunnel.unbuild(&self.builder.rng).await;
                 if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
                     next_tunnel.unbuild(&self.builder.rng).await;
                 }
                 State::Destroyed
             }
-            (Request::Destroy, State::Ready { .. }) => State::Destroying,
-            (Request::KeepAlive, State::Destroyed) => State::Destroyed, // ignore this request,
-            (Request::KeepAlive, state) => {
+            (Event::Destroy, State::Ready { .. }) => State::Destroying,
+            (Event::KeepAlive, State::Destroyed) => State::Destroyed, // ignore this event
+            (Event::KeepAlive, state) => {
                 self.tunnel.keep_alive(&self.builder.rng).await?;
                 if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
                     next_tunnel.keep_alive(&self.builder.rng).await?;
                 }
                 state
-            } // ignore this request
+            } // ignore this event
             _ => return Err(anyhow!("Illegal TunnelHandler state")),
         };
         Ok(())
