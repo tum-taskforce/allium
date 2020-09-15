@@ -5,6 +5,7 @@ use crate::onion::protocol::{
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::onion::tunnel::{self, TunnelId};
+use crate::onionx::OnionTunnel;
 use crate::{Result, RsaPrivateKey};
 use anyhow::anyhow;
 use anyhow::Context;
@@ -82,7 +83,7 @@ impl Circuit {
 pub(crate) struct CircuitHandler {
     in_circuit: Circuit,
     session_key: [SessionKey; 1],
-    events: mpsc::Sender<Event>,
+    incoming: mpsc::Sender<OnionTunnel>,
     rng: rand::SystemRandom,
     state: State,
 }
@@ -95,22 +96,8 @@ pub(crate) enum State {
     /// Stores the receiving end of a channel which is used by higher layers to control the tunnel.
     Endpoint {
         tunnel_id: TunnelId,
-        requests: mpsc::UnboundedReceiver<tunnel::Request>,
-    },
-}
-
-pub(crate) enum Event {
-    /// Sent when a Begin message is received
-    Incoming {
-        tunnel_id: TunnelId,
-        requests: mpsc::UnboundedSender<tunnel::Request>,
-    },
-    Data {
-        tunnel_id: TunnelId,
-        data: Bytes,
-    },
-    End {
-        tunnel_id: TunnelId,
+        data_rx: mpsc::UnboundedReceiver<Bytes>,
+        data_tx: mpsc::Sender<Bytes>,
     },
 }
 
@@ -120,7 +107,7 @@ impl CircuitHandler {
     pub(crate) async fn init(
         mut socket: OnionSocket<TcpStream>,
         host_key: &RsaPrivateKey,
-        events: mpsc::Sender<Event>,
+        incoming: mpsc::Sender<OnionTunnel>,
     ) -> Result<Self> {
         trace!("Accepting handshake from {:?}", socket.peer_addr());
         let (circuit_id, peer_key) = socket
@@ -142,7 +129,7 @@ impl CircuitHandler {
             Ok(Self {
                 in_circuit,
                 session_key: [secret],
-                events,
+                incoming,
                 rng,
                 state: State::Default,
             })
@@ -159,7 +146,7 @@ impl CircuitHandler {
     pub(crate) async fn handle(&mut self) -> Result<()> {
         trace!("CircuitHandler started for circuit {:?}", self.in_circuit);
         // main accept loop
-        match self.respond_loop().await {
+        match self.try_handle().await {
             Ok(_) => Ok(()),
             Err(e) => {
                 // finally tear down the circuits
@@ -169,7 +156,7 @@ impl CircuitHandler {
         }
     }
 
-    async fn respond_loop(&mut self) -> Result<()> {
+    async fn try_handle(&mut self) -> Result<()> {
         loop {
             let mut delay = time::delay_for(IDLE_TIMEOUT);
 
@@ -195,12 +182,13 @@ impl CircuitHandler {
                 }
                 State::Endpoint {
                     tunnel_id,
-                    requests,
+                    data_tx,
+                    data_rx,
                 } => {
                     let tunnel_id = *tunnel_id;
                     tokio::select! {
                         msg = self.in_circuit.accept_opaque() => self.handle_in_circuit(msg).await?,
-                        Some(req) = requests.recv() => self.handle_request(tunnel_id, req).await?,
+                        data = data_rx.recv() => self.handle_data(tunnel_id, data).await?,
                         _ = &mut delay => {
                             self.handle_timeout().await;
                             break;
@@ -360,36 +348,24 @@ impl CircuitHandler {
                 state
             }
             (TunnelRequest::Begin(tunnel_id), State::Default) => {
-                let (tx, rx) = mpsc::unbounded_channel();
-                let _ = self
-                    .events
-                    .send(Event::Incoming {
+                let (tunnel, tx, rx) = OnionTunnel::new(tunnel_id);
+                if self.incoming.try_send(tunnel).is_ok() {
+                    State::Endpoint {
                         tunnel_id,
-                        requests: tx,
-                    })
-                    .await;
-
-                State::Endpoint {
-                    tunnel_id,
-                    requests: rx,
+                        data_rx: rx,
+                        data_tx: tx,
+                    }
+                } else {
+                    State::Default
                 }
             }
             (TunnelRequest::Begin(_), _) => {
                 return Err(anyhow!("Begin request while not in Default state"));
             }
-            (
-                TunnelRequest::End(req_tunnel_id),
-                State::Endpoint {
-                    tunnel_id,
-                    mut requests,
-                },
-            ) => {
+            (TunnelRequest::End(req_tunnel_id), State::Endpoint { tunnel_id, .. }) => {
                 if req_tunnel_id != tunnel_id {
                     return Err(anyhow!("Unknown tunnel id in Data message"));
                 }
-
-                requests.close();
-                let _ = self.events.send(Event::End { tunnel_id }).await;
 
                 State::Default
             }
@@ -400,18 +376,20 @@ impl CircuitHandler {
                 TunnelRequest::Data(req_tunnel_id, data),
                 State::Endpoint {
                     tunnel_id,
-                    requests,
+                    mut data_tx,
+                    data_rx,
                 },
             ) => {
                 if req_tunnel_id != tunnel_id {
                     return Err(anyhow!("Unknown tunnel id in Data message"));
                 }
 
-                let _ = self.events.send(Event::Data { tunnel_id, data }).await;
+                let _ = data_tx.send(data).await; // TODO handle closed
 
                 State::Endpoint {
                     tunnel_id,
-                    requests,
+                    data_tx,
+                    data_rx,
                 }
             }
             (TunnelRequest::Data(_, _), _) => {
@@ -486,11 +464,12 @@ impl CircuitHandler {
         }
     }
 
-    /// Handles a request from a higher layer in the endpoint state.
+    /// Handles a request to send data from a higher layer in the endpoint state.
+    /// If data is None, the tunnel is no longer needed and can be destroyed.
     /// This function takes care of handling errors and tearing down the sockets if necessary
-    async fn handle_request(&mut self, tunnel_id: TunnelId, req: tunnel::Request) -> Result<()> {
-        match req {
-            tunnel::Request::Data { data } => {
+    async fn handle_data(&mut self, tunnel_id: TunnelId, data: Option<Bytes>) -> Result<()> {
+        match data {
+            Some(data) => {
                 let circuit_id = self.in_circuit.id;
                 self.in_circuit
                     .socket()
@@ -498,7 +477,7 @@ impl CircuitHandler {
                     .send_data(circuit_id, tunnel_id, data, &self.session_key, &self.rng)
                     .await?;
             }
-            tunnel::Request::Destroy => {
+            None => {
                 let circuit_id = self.in_circuit.id;
                 self.in_circuit
                     .socket()
@@ -507,8 +486,6 @@ impl CircuitHandler {
                     .await?;
                 self.state = State::Default;
             }
-            tunnel::Request::Switchover => {} // nothing to do here
-            tunnel::Request::KeepAlive => {} // nothing to do here since we don't care about other peer's tunnels
         }
         Ok(())
     }
@@ -546,26 +523,6 @@ impl CircuitHandler {
 impl fmt::Debug for Circuit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Circuit").field(&self.id).finish()
-    }
-}
-
-impl fmt::Debug for Event {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self {
-            Event::Incoming { tunnel_id, .. } => f
-                .debug_struct("Incoming")
-                .field("tunnel_id", tunnel_id)
-                .finish(),
-            Event::Data { tunnel_id, data } => f
-                .debug_struct("Data")
-                .field("tunnel_id", tunnel_id)
-                .field("data", data)
-                .finish(),
-            Event::End { tunnel_id } => f
-                .debug_struct("Data")
-                .field("tunnel_id", tunnel_id)
-                .finish(),
-        }
     }
 }
 
