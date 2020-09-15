@@ -4,7 +4,8 @@ use crate::onion::protocol::{
     CircuitOpaque, CircuitOpaqueBytes, TryFromBytesExt, TunnelRequest, VerifyKey,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::{Event, Peer};
+use crate::onionx::OnionTunnel;
+use crate::Peer;
 use crate::{PeerProvider, Result};
 use anyhow::{anyhow, Context};
 use bytes::Bytes;
@@ -17,7 +18,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 const MAX_PEER_FAILURES: usize = 10;
 
@@ -49,7 +50,6 @@ pub(crate) type TunnelResult<T> = std::result::Result<T, TunnelError>;
 
 #[derive(Debug)]
 pub(crate) enum Request {
-    Data { data: Bytes },
     Switchover,
     Destroy,
     KeepAlive,
@@ -363,14 +363,17 @@ pub(crate) struct TunnelHandler {
     next_tunnel: Arc<Mutex<Option<Tunnel>>>,
     state: State,
     requests: mpsc::UnboundedReceiver<Request>,
-    events: mpsc::Sender<Event>,
     builder: TunnelBuilder,
 }
 
-#[derive(Copy, Clone, Debug)]
 pub(crate) enum State {
-    Building,
-    Ready,
+    Building {
+        ready: oneshot::Sender<Result<OnionTunnel>>,
+    },
+    Ready {
+        data_tx: mpsc::Sender<Bytes>,
+        data_rx: mpsc::UnboundedReceiver<Bytes>,
+    },
     Destroying,
     Destroyed,
 }
@@ -380,14 +383,13 @@ impl TunnelHandler {
         first_tunnel: Tunnel,
         tunnel_builder: TunnelBuilder,
         requests: mpsc::UnboundedReceiver<Request>,
-        events: mpsc::Sender<Event>,
+        ready: oneshot::Sender<Result<OnionTunnel>>,
     ) -> Self {
         TunnelHandler {
             tunnel: first_tunnel,
             next_tunnel: Arc::new(Mutex::new(None)),
-            state: State::Building,
+            state: State::Building { ready },
             requests,
-            events,
             builder: tunnel_builder,
         }
     }
@@ -406,16 +408,19 @@ impl TunnelHandler {
 
     async fn try_handle(&mut self) -> Result<()> {
         loop {
-            match self.state {
-                State::Building => {
+            match &mut self.state {
+                State::Building { .. } | State::Destroying => {
                     tokio::select! {
                         Some(req) = self.requests.recv() => {
                             self.handle_request(req).await?;
                         }
                     }
                 }
-                State::Ready | State::Destroying => {
+                State::Ready { data_rx, data_tx } => {
                     tokio::select! {
+                        data = data_rx.recv() => {
+                            self.handle_data(data).await?;
+                        }
                         msg = self.tunnel.out_circuit.accept_opaque() => {
                             self.handle_tunnel_message(msg).await?;
                         }
@@ -438,13 +443,12 @@ impl TunnelHandler {
         // no event in case of error
         msg.decrypt(self.tunnel.session_keys.iter().rev())?;
         let tunnel_msg = TunnelRequest::read_with_digest_from(&mut msg.payload.bytes);
-        match tunnel_msg {
-            Ok(TunnelRequest::Data(tunnel_id, data)) => {
-                let event = Event::Data { tunnel_id, data };
-                self.events.send(event).await?;
+        match (tunnel_msg, &mut self.state) {
+            (Ok(TunnelRequest::Data(tunnel_id, data)), State::Ready { data_tx, .. }) => {
+                let _ = data_tx.send(data).await; // TODO handle closed
                 Ok(())
             }
-            Ok(TunnelRequest::End(_tunnel_id)) => {
+            (Ok(TunnelRequest::End(_tunnel_id)), _) => {
                 // maybe reconstruct tunnel
                 Err(anyhow!("Tunnel broke due to unexpected End"))
             }
@@ -457,14 +461,12 @@ impl TunnelHandler {
         }
     }
 
-    async fn handle_request(&mut self, req: Request) -> Result<()> {
-        trace!(
-            "TunnelHandler: handling request {:?} (state = {:?})",
-            req,
-            self.state
-        );
-        match (req, self.state) {
-            (Request::Data { data }, State::Ready) => {
+    async fn handle_data(&mut self, data: Option<Bytes>) -> Result<()> {
+        // state is assumed to be Ready
+        debug_assert!(matches!(&self.state, State::Ready { .. }));
+
+        match data {
+            Some(data) => {
                 let circuit_id = self.tunnel.out_circuit.id;
                 let tunnel_id = self.tunnel.id;
                 self.tunnel
@@ -480,19 +482,28 @@ impl TunnelHandler {
                     )
                     .await?;
             }
-            (Request::Switchover, State::Building) => {
-                self.state = State::Ready;
-                self.tunnel.begin(&self.builder.rng).await?;
-                let _ = self
-                    .events
-                    .send(Event::Ready {
-                        tunnel_id: self.tunnel.id,
-                    })
-                    .await;
+            None => self.state = State::Destroying,
+        }
+        Ok(())
+    }
 
+    async fn handle_request(&mut self, req: Request) -> Result<()> {
+        trace!(
+            "TunnelHandler: handling request {:?} (state = {:?})",
+            req,
+            self.state
+        );
+        let mut state = State::Destroyed; // arbitrary
+        std::mem::swap(&mut self.state, &mut state);
+        self.state = match (req, state) {
+            (Request::Switchover, State::Building { ready }) => {
+                self.tunnel.begin(&self.builder.rng).await?;
+                let (tunnel, data_tx, data_rx) = OnionTunnel::new(self.tunnel.id);
+                let _ = ready.send(Ok(tunnel)); // TODO handle closed
                 self.spawn_next_tunnel_task();
+                State::Ready { data_tx, data_rx }
             }
-            (Request::Switchover, State::Ready) => {
+            (Request::Switchover, State::Ready { data_tx, data_rx }) => {
                 let mut new_tunnel = self
                     .next_tunnel
                     .lock()
@@ -512,25 +523,26 @@ impl TunnelHandler {
                         old_tunnel.unbuild(&rng).await;
                     }
                 });
+                State::Ready { data_tx, data_rx }
             }
             (Request::Switchover, State::Destroying) => {
-                self.state = State::Destroyed;
-
                 self.tunnel.unbuild(&self.builder.rng).await;
                 if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
                     next_tunnel.unbuild(&self.builder.rng).await;
                 }
+                State::Destroyed
             }
-            (Request::Destroy, State::Ready) => self.state = State::Destroying,
-            (Request::KeepAlive, State::Destroyed) => {} // ignore this request,
-            (Request::KeepAlive, _) => {
+            (Request::Destroy, State::Ready { .. }) => State::Destroying,
+            (Request::KeepAlive, State::Destroyed) => State::Destroyed, // ignore this request,
+            (Request::KeepAlive, state) => {
                 self.tunnel.keep_alive(&self.builder.rng).await?;
                 if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
                     next_tunnel.keep_alive(&self.builder.rng).await?;
                 }
+                state
             } // ignore this request
             _ => return Err(anyhow!("Illegal TunnelHandler state")),
-        }
+        };
         Ok(())
     }
 
@@ -578,5 +590,16 @@ impl fmt::Debug for TunnelHandler {
             .field("state", &self.state)
             .field("builder", &self.builder)
             .finish()
+    }
+}
+
+impl fmt::Debug for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            State::Building { .. } => f.debug_struct("Building").finish(),
+            State::Ready { .. } => f.debug_struct("Ready").finish(),
+            State::Destroying => f.debug_struct("Destroying").finish(),
+            State::Destroyed => f.debug_struct("Destroyed").finish(),
+        }
     }
 }
