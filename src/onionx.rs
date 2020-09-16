@@ -1,13 +1,14 @@
 use super::Result;
 use crate::onion::circuit::{self, CircuitHandler};
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel;
 use crate::onion::tunnel::{TunnelBuilder, TunnelDestination, TunnelHandler};
-use crate::{Peer, PeerProvider, RsaPrivateKey, TunnelId};
+use crate::onion::{protocol, tunnel};
+use crate::{Peer, PeerProvider, RsaPrivateKey, TunnelId, DEFAULT_HOPS, DEFAULT_ROUND_DURATION};
 use anyhow::anyhow;
 use bytes::Bytes;
 use log::{info, trace, warn};
 use ring::rand;
+use std::cmp;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -46,10 +47,13 @@ impl OnionTunnel {
     }
 
     pub fn write(&self, buf: Bytes) -> Result<()> {
-        // TODO split buf
-        self.data_tx
-            .send(buf)
-            .map_err(|_| anyhow!("Connection closed."))
+        while !buf.is_empty() {
+            let part = data.split_to(cmp::min(protocol::MAX_DATA_SIZE, buf.len()));
+            self.data_tx
+                .send(part)
+                .map_err(|_| anyhow!("Connection closed."))?;
+        }
+        Ok(())
     }
 }
 
@@ -84,6 +88,17 @@ impl OnionContext {
             handler.handle().await;
         });
         ready_rx.await?
+    }
+
+    pub async fn send_cover(&mut self, size: u16) -> Result<()> {
+        let size = size as usize;
+        let packet_count = (size + protocol::MAX_DATA_SIZE - 1) / protocol::MAX_DATA_SIZE;
+        for _ in 0..packet_count {
+            self.events
+                .send(tunnel::Event::KeepAlive)
+                .map_err(|_| anyhow!("No tunnel to send cover traffic on."))?
+        }
+        Ok(())
     }
 
     pub async fn next_incoming(&mut self) -> OnionTunnel {
@@ -177,6 +192,23 @@ pub struct OnionBuilder {
 }
 
 impl OnionBuilder {
+    /// Construct a new onion instance.
+    /// Returns a builder which allows further configuration.
+    pub fn new(
+        listen_addr: SocketAddr,
+        hostkey: RsaPrivateKey,
+        peer_provider: PeerProvider,
+    ) -> OnionBuilder {
+        OnionBuilder {
+            listen_addr,
+            hostkey,
+            peer_provider,
+            enable_cover: true,
+            n_hops: DEFAULT_HOPS,
+            round_duration: DEFAULT_ROUND_DURATION,
+        }
+    }
+
     pub fn enable_cover_traffic(mut self, enable: bool) -> Self {
         self.enable_cover = enable;
         self
