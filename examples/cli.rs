@@ -1,4 +1,8 @@
-use onion::{Onion, Peer, PeerProvider, RsaPrivateKey, RsaPublicKey};
+use onion::{
+    OnionBuilder, OnionContext, OnionTunnel, OnionTunnelWriter, Peer, PeerProvider, RsaPrivateKey,
+    RsaPublicKey, TunnelDestination, TunnelId,
+};
+use std::collections::HashMap;
 use std::env;
 use tokio::io::{self, BufReader};
 use tokio::prelude::*;
@@ -19,20 +23,24 @@ async fn main() {
     let hostkey = RsaPrivateKey::from_pem_file("testkey.pem").unwrap();
     let public_key = hostkey.public_key();
     let (mut peer_tx, peer_rx) = mpsc::unbounded_channel();
-    let (onion, mut events) = Onion::new(onion_addr, hostkey, PeerProvider::from_stream(peer_rx))
-        .enable_cover_traffic(cover_enabled)
-        .set_hops_per_tunnel(0)
-        .start()
-        .unwrap();
+    let (onion, mut incoming) =
+        OnionBuilder::new(onion_addr, hostkey, PeerProvider::from_stream(peer_rx))
+            .enable_cover_traffic(cover_enabled)
+            .set_hops_per_tunnel(0)
+            .start();
+
+    let mut tunnels: HashMap<TunnelId, OnionTunnelWriter> = HashMap::new();
 
     let mut stdin = BufReader::new(io::stdin()).lines();
     loop {
         tokio::select! {
-            Some(evt) = events.next() => {
-                println!("Event: {:?}", evt);
+            Some(tunnel) = incoming.next() => {
+                println!("Incoming tunnel with ID {}", tunnel.id());
+                tunnels.insert(tunnel.id(), tunnel.writer());
+                handle_tunnel_data(tunnel);
             }
             Some(line) = stdin.next() => {
-                parse_command(line.unwrap(), &onion, &public_key, &mut peer_tx).await;
+                parse_command(line.unwrap(), &onion, &mut tunnels, &public_key, &mut peer_tx).await;
             }
             else => break,
         }
@@ -41,26 +49,36 @@ async fn main() {
 
 async fn parse_command(
     cmd: String,
-    onion: &Onion,
+    onion: &OnionContext,
+    tunnels: &mut HashMap<TunnelId, OnionTunnelWriter>,
     hostkey: &RsaPublicKey,
     peers: &mut mpsc::UnboundedSender<Peer>,
 ) {
     let mut parts = cmd.split_whitespace();
     match parts.next() {
         Some("build") => {
-            let tunnel_id = parts.next().unwrap().parse().unwrap();
             let dest_addr = parts.next().unwrap_or(DEFAULT_ADDR).parse().unwrap();
             let dest = Peer::new(dest_addr, hostkey.clone());
-            onion.build_tunnel(tunnel_id, dest);
+            let tunnel = onion
+                .build_tunnel(TunnelDestination::Fixed(dest))
+                .await
+                .unwrap();
+            println!("Built tunnel with ID {}", tunnel.id());
+            tunnels.insert(tunnel.id(), tunnel.writer());
+            handle_tunnel_data(tunnel);
         }
         Some("destroy") => {
             let tunnel_id = parts.next().unwrap().parse().unwrap();
-            onion.destroy_tunnel(tunnel_id);
+            tunnels.remove(&tunnel_id);
         }
         Some("data") => {
             let tunnel_id = parts.next().unwrap().parse().unwrap();
             let data = parts.next().unwrap().as_bytes();
-            onion.send_data(tunnel_id, data);
+            tunnels
+                .get(&tunnel_id)
+                .unwrap()
+                .write(data.to_vec().into())
+                .unwrap();
         }
         Some("peer") => {
             let peer_addr = parts.next().unwrap().parse().unwrap();
@@ -69,11 +87,11 @@ async fn parse_command(
         }
         Some("cover") => {
             let size = parts.next().unwrap().parse().unwrap();
-            onion.send_cover(size);
+            onion.send_cover(size).await.unwrap();
         }
         Some("help") => {
             println!("Available Commands:");
-            println!("  build <tunnel_id> <dest_addr> <n_hops>");
+            println!("  build <dest_addr> <n_hops>");
             println!("  destroy <tunnel_id>");
             println!("  data <tunnel_id> data");
             println!("  cover <size>");
@@ -81,4 +99,12 @@ async fn parse_command(
         }
         _ => println!("Unknown command!"),
     }
+}
+
+fn handle_tunnel_data(mut tunnel: OnionTunnel) {
+    tokio::spawn(async move {
+        while let Ok(data) = tunnel.read().await {
+            println!("Received data from tunnel {}: {:?}", tunnel.id(), data);
+        }
+    });
 }
