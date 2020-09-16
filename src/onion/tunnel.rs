@@ -4,7 +4,7 @@ use crate::onion::protocol::{
     CircuitOpaque, CircuitOpaqueBytes, TryFromBytesExt, TunnelRequest, VerifyKey,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::onionx::OnionTunnel;
+use crate::OnionTunnel;
 use crate::Peer;
 use crate::{PeerProvider, Result};
 use anyhow::{anyhow, Context};
@@ -254,7 +254,7 @@ pub fn random_id(rng: &rand::SystemRandom) -> TunnelId {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum TunnelDestination {
+pub enum TunnelDestination {
     Fixed(Peer),
     Random,
 }
@@ -415,7 +415,7 @@ impl TunnelHandler {
                         }
                     }
                 }
-                State::Ready { data_rx, data_tx } => {
+                State::Ready { data_rx, .. } => {
                     tokio::select! {
                         data = data_rx.recv() => {
                             self.handle_data(data).await?;
@@ -442,12 +442,14 @@ impl TunnelHandler {
         // no event in case of error
         msg.decrypt(self.tunnel.session_keys.iter().rev())?;
         let tunnel_msg = TunnelRequest::read_with_digest_from(&mut msg.payload.bytes);
-        match (tunnel_msg, &mut self.state) {
-            (Ok(TunnelRequest::Data(tunnel_id, data)), State::Ready { data_tx, .. }) => {
-                let _ = data_tx.send(data).await; // TODO handle closed
+        match tunnel_msg {
+            Ok(TunnelRequest::Data(tunnel_id, data)) if tunnel_id == self.tunnel.id => {
+                if let State::Ready { data_tx, .. } = &mut self.state {
+                    let _ = data_tx.send(data).await; // TODO handle closed
+                }
                 Ok(())
             }
-            (Ok(TunnelRequest::End(_tunnel_id)), _) => {
+            Ok(TunnelRequest::End(_tunnel_id)) => {
                 // maybe reconstruct tunnel
                 Err(anyhow!("Tunnel broke due to unexpected End"))
             }

@@ -4,8 +4,8 @@ use crate::onion::protocol::{
     TunnelProtocolError, TunnelRequest, TunnelTruncatedError, VerifyKey,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::onion::tunnel::{self, TunnelId};
-use crate::onionx::OnionTunnel;
+use crate::onion::tunnel::TunnelId;
+use crate::OnionTunnel;
 use crate::{Result, RsaPrivateKey};
 use anyhow::anyhow;
 use anyhow::Context;
@@ -181,9 +181,7 @@ impl CircuitHandler {
                     }
                 }
                 State::Endpoint {
-                    tunnel_id,
-                    data_tx,
-                    data_rx,
+                    tunnel_id, data_rx, ..
                 } => {
                     let tunnel_id = *tunnel_id;
                     tokio::select! {
