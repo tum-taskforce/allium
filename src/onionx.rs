@@ -10,6 +10,7 @@ use log::{info, trace, warn};
 use ring::rand;
 use std::cmp;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
@@ -18,6 +19,8 @@ use tokio::time::{self, Duration};
 
 const DATA_BUFFER_SIZE: usize = 100;
 const INCOMING_BUFFER_SIZE: usize = 100;
+
+static TUNNEL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub struct OnionTunnel {
     tunnel_id: TunnelId,
@@ -29,6 +32,7 @@ impl OnionTunnel {
     pub(crate) fn new(
         tunnel_id: TunnelId,
     ) -> (Self, mpsc::Sender<Bytes>, mpsc::UnboundedReceiver<Bytes>) {
+        TUNNEL_COUNT.fetch_add(1, Ordering::Relaxed);
         let (data_tx, data_rx2) = mpsc::unbounded_channel();
         let (data_tx2, data_rx) = mpsc::channel(DATA_BUFFER_SIZE);
         let tunnel = Self {
@@ -48,7 +52,7 @@ impl OnionTunnel {
 
     pub fn write(&self, buf: Bytes) -> Result<()> {
         while !buf.is_empty() {
-            let part = data.split_to(cmp::min(protocol::MAX_DATA_SIZE, buf.len()));
+            let part = buf.split_to(cmp::min(protocol::MAX_DATA_SIZE, buf.len()));
             self.data_tx
                 .send(part)
                 .map_err(|_| anyhow!("Connection closed."))?;
@@ -57,20 +61,26 @@ impl OnionTunnel {
     }
 }
 
+impl Drop for OnionTunnel {
+    fn drop(&mut self) {
+        TUNNEL_COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone)]
 pub struct OnionContext {
-    incoming: mpsc::Receiver<OnionTunnel>,
-    rng: rand::SystemRandom,
     peer_provider: PeerProvider,
     n_hops: usize,
     events: broadcast::Sender<tunnel::Event>,
+    rng: rand::SystemRandom,
 }
 
 impl OnionContext {
-    pub async fn build_tunnel(&mut self, peer: Peer) -> Result<OnionTunnel> {
+    pub async fn build_tunnel(&self, dest: TunnelDestination) -> Result<OnionTunnel> {
         let tunnel_id = tunnel::random_id(&self.rng);
         let mut builder = TunnelBuilder::new(
             tunnel_id,
-            TunnelDestination::Fixed(peer),
+            dest,
             self.n_hops,
             self.peer_provider.clone(),
             self.rng.clone(),
@@ -96,12 +106,35 @@ impl OnionContext {
         for _ in 0..packet_count {
             self.events
                 .send(tunnel::Event::KeepAlive)
-                .map_err(|_| anyhow!("No tunnel to send cover traffic on."))?
+                .map_err(|_| anyhow!("No tunnel to send cover traffic on."))?;
         }
         Ok(())
     }
 
-    pub async fn next_incoming(&mut self) -> OnionTunnel {
+    async fn ensure_cover_tunnel_exists(&mut self) {
+        let mut cover_tunnel = None;
+        let mut events = self.events.subscribe();
+        while let Ok(evt) = events.recv().await {
+            if evt != tunnel::Event::Switchover {
+                continue;
+            }
+            cover_tunnel = match (cover_tunnel.take(), TUNNEL_COUNT.load(Ordering::Relaxed)) {
+                (None, 0) => self.build_tunnel(TunnelDestination::Random).await.ok(),
+                (None, _) => None,
+                (Some(_), 0) => unreachable!(),
+                (Some(t), 1) => Some(t),
+                (Some(_), _) => None,
+            }
+        }
+    }
+}
+
+struct Incoming {
+    incoming: mpsc::Receiver<OnionTunnel>,
+}
+
+impl Incoming {
+    pub async fn next(&mut self) -> OnionTunnel {
         self.incoming.recv().await.expect("incoming channel closed")
     }
 }
@@ -225,7 +258,7 @@ impl OnionBuilder {
     }
 
     /// Returns the constructed instance.
-    pub fn start(self) -> OnionContext {
+    pub fn start(self) -> (OnionContext, Incoming) {
         let OnionBuilder {
             listen_addr,
             hostkey,
@@ -254,12 +287,21 @@ impl OnionBuilder {
             async move { listener.listen_addr(listen_addr).await }
         });
 
-        OnionContext {
-            incoming: incoming_rx,
+        let ctx = OnionContext {
             rng: rand::SystemRandom::new(),
             peer_provider,
             n_hops,
             events,
-        }
+        };
+
+        tokio::spawn({
+            let mut ctx = ctx.clone();
+            async move { ctx.ensure_cover_tunnel_exists() }
+        });
+
+        let incoming = Incoming {
+            incoming: incoming_rx,
+        };
+        (ctx, incoming)
     }
 }

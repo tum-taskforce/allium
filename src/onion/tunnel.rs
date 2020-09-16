@@ -48,7 +48,7 @@ impl From<OnionSocketError> for TunnelError {
 
 pub(crate) type TunnelResult<T> = std::result::Result<T, TunnelError>;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum Event {
     Switchover,
     Destroy,
