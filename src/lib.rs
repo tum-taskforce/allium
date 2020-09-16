@@ -120,11 +120,40 @@ impl OnionTunnel {
     pub fn id(&self) -> TunnelId {
         self.tunnel_id
     }
+
+    pub fn writer(&self) -> OnionTunnelWriter {
+        OnionTunnelWriter {
+            tunnel_id: self.tunnel_id,
+            data_tx: self.data_tx.clone(),
+        }
+    }
 }
 
 impl Drop for OnionTunnel {
     fn drop(&mut self) {
         TUNNEL_COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone)]
+pub struct OnionTunnelWriter {
+    tunnel_id: TunnelId,
+    data_tx: mpsc::UnboundedSender<Bytes>,
+}
+
+impl OnionTunnelWriter {
+    pub fn write(&self, mut buf: Bytes) -> Result<()> {
+        while !buf.is_empty() {
+            let part = buf.split_to(cmp::min(protocol::MAX_DATA_SIZE, buf.len()));
+            self.data_tx
+                .send(part)
+                .map_err(|_| anyhow!("Connection closed."))?;
+        }
+        Ok(())
+    }
+
+    pub fn id(&self) -> TunnelId {
+        self.tunnel_id
     }
 }
 
@@ -164,7 +193,7 @@ impl OnionContext {
         ready_rx.await?
     }
 
-    pub async fn send_cover(&mut self, size: u16) -> Result<()> {
+    pub async fn send_cover(&self, size: u16) -> Result<()> {
         let size = size as usize;
         let packet_count = (size + protocol::MAX_DATA_SIZE - 1) / protocol::MAX_DATA_SIZE;
         for _ in 0..packet_count {
@@ -199,8 +228,8 @@ pub struct Incoming {
 }
 
 impl Incoming {
-    pub async fn next(&mut self) -> OnionTunnel {
-        self.incoming.recv().await.expect("incoming channel closed")
+    pub async fn next(&mut self) -> Option<OnionTunnel> {
+        self.incoming.recv().await
     }
 }
 
