@@ -1,23 +1,24 @@
-use crate::onion::circuit::{self, CircuitHandler, CircuitId, IDLE_TIMEOUT};
+use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::protocol;
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel::{self, TunnelBuilder, TunnelDestination, TunnelHandler};
+use crate::onion::tunnel::{self, TunnelBuilder, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
-use log::{info, trace, warn};
+use log::{info, warn};
 use ring::rand;
-use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::{cmp, fmt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::Stream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{self, Duration};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
 pub use crate::onion::tunnel::random_id;
+pub use crate::onion::tunnel::TunnelDestination;
 pub use crate::onion::tunnel::TunnelId;
 
 mod onion;
@@ -27,6 +28,11 @@ pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
 const DEFAULT_ROUND_DURATION: Duration = Duration::from_secs(30);
 const DEFAULT_HOPS: usize = 2;
+
+const DATA_BUFFER_SIZE: usize = 100;
+const INCOMING_BUFFER_SIZE: usize = 100;
+
+static TUNNEL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// A remote peer characterized by its address, the port on which it is listening for onion
 /// connections and its public key. The public key is needed to verify the authenticity of
@@ -44,175 +50,6 @@ impl Peer {
 
     pub fn address(&self) -> SocketAddr {
         self.addr
-    }
-}
-
-/// Handled by the RoundHandler
-#[derive(Debug)]
-enum Request {
-    Build { tunnel_id: TunnelId, dest: Peer },
-    Data { tunnel_id: TunnelId, data: Bytes },
-    Destroy { tunnel_id: TunnelId },
-    Cover { size: u16 },
-}
-
-/// Events destined for the API
-#[derive(Debug, PartialEq)]
-pub enum Event {
-    Ready {
-        tunnel_id: TunnelId,
-    },
-    Incoming {
-        tunnel_id: TunnelId,
-    },
-    Data {
-        tunnel_id: TunnelId,
-        data: Bytes,
-    },
-    Error {
-        tunnel_id: TunnelId,
-        reason: ErrorReason,
-    },
-}
-
-#[derive(Debug, PartialEq, Copy, Clone)]
-pub enum ErrorReason {
-    Build,
-    Data,
-    Destroy,
-    Cover,
-}
-
-#[derive(Clone)]
-pub struct Onion {
-    requests: mpsc::UnboundedSender<Request>,
-}
-
-impl Onion {
-    /// Construct a new onion instance.
-    /// Returns a builder which allows further configuration.
-    pub fn new(
-        listen_addr: SocketAddr,
-        hostkey: RsaPrivateKey,
-        peer_provider: PeerProvider,
-    ) -> OnionBuilder {
-        OnionBuilder {
-            listen_addr,
-            hostkey,
-            peer_provider,
-            enable_cover: true,
-            n_hops: DEFAULT_HOPS,
-            round_duration: DEFAULT_ROUND_DURATION,
-        }
-    }
-
-    pub fn build_tunnel(&self, tunnel_id: TunnelId, dest: Peer) -> TunnelId {
-        self.requests
-            .send(Request::Build {
-                tunnel_id, // TODO maybe refactor to return tunnel_id with Ready
-                dest,
-            })
-            .map_err(|_| anyhow!("Failed to send build request"))
-            .unwrap();
-        tunnel_id
-    }
-
-    pub fn destroy_tunnel(&self, tunnel_id: TunnelId) {
-        self.requests
-            .send(Request::Destroy { tunnel_id })
-            .map_err(|_| anyhow!("Failed to send destroy request"))
-            .unwrap();
-    }
-
-    pub fn send_data(&self, tunnel_id: TunnelId, data: &[u8]) {
-        // big TODO don't allocate
-        self.requests
-            .send(Request::Data {
-                tunnel_id,
-                data: data.to_vec().into(),
-            })
-            .map_err(|_| anyhow!("Failed to send data request"))
-            .unwrap();
-    }
-
-    pub fn send_cover(&self, size: u16) {
-        self.requests
-            .send(Request::Cover { size })
-            .map_err(|_| anyhow!("Failed to send cover request"))
-            .unwrap();
-    }
-}
-
-pub struct OnionBuilder {
-    listen_addr: SocketAddr,
-    hostkey: RsaPrivateKey,
-    peer_provider: PeerProvider,
-    enable_cover: bool,
-    n_hops: usize,
-    round_duration: Duration,
-}
-
-impl OnionBuilder {
-    pub fn enable_cover_traffic(mut self, enable: bool) -> Self {
-        self.enable_cover = enable;
-        self
-    }
-
-    pub fn set_hops_per_tunnel(mut self, n_hops: usize) -> Self {
-        self.n_hops = n_hops;
-        self
-    }
-
-    pub fn set_round_duration(mut self, secs: u64) -> Self {
-        self.round_duration = Duration::from_secs(secs);
-        self
-    }
-
-    /// Returns the constructed instance and an event stream.
-    pub fn start(self) -> Result<(Onion, impl Stream<Item = Event>)> {
-        let OnionBuilder {
-            listen_addr,
-            hostkey,
-            peer_provider,
-            enable_cover,
-            n_hops,
-            round_duration,
-        } = self;
-
-        // create request channel for interaction from the API to the round handler
-        let (req_tx, req_rx) = mpsc::unbounded_channel();
-        // create event channel for propagating events back to the API
-        let (evt_tx, evt_rx) = mpsc::channel(100);
-        // shared map of all tunnels (incoming and outgoing)
-        let tunnels = Arc::new(Mutex::new(HashMap::new()));
-
-        // creates round handler task which receives requests on req_rx and sends events on evt_tx
-        tokio::spawn({
-            let events = evt_tx.clone();
-            let tunnels = tunnels.clone();
-            let mut round_handler = RoundHandler::new(
-                req_rx,
-                events,
-                peer_provider,
-                tunnels,
-                enable_cover,
-                n_hops,
-                round_duration,
-            );
-            async move { round_handler.handle().await }
-        });
-
-        // create task listening on p2p connections
-        // also sends events on evt_tx
-        tokio::spawn({
-            let events = evt_tx;
-            let tunnels = tunnels;
-            let mut listener = OnionListener::new(hostkey, events, tunnels);
-            async move { listener.listen_addr(listen_addr).await }
-        });
-
-        let onion = Onion { requests: req_tx };
-        Ok((onion, evt_rx))
     }
 }
 
@@ -242,269 +79,141 @@ impl PeerProvider {
     }
 }
 
-struct RoundHandler {
-    requests: mpsc::UnboundedReceiver<Request>,
-    events: mpsc::Sender<Event>,
-    rng: rand::SystemRandom,
-    peer_provider: PeerProvider,
-    tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
-    cover_tunnel: Option<mpsc::UnboundedSender<tunnel::Request>>,
-    enable_cover: bool,
-    n_hops: usize,
-    round_duration: Duration,
+pub struct OnionTunnel {
+    tunnel_id: TunnelId,
+    data_tx: mpsc::UnboundedSender<Bytes>,
+    data_rx: mpsc::Receiver<Bytes>,
 }
 
-impl RoundHandler {
+impl OnionTunnel {
     pub(crate) fn new(
-        requests: mpsc::UnboundedReceiver<Request>,
-        events: mpsc::Sender<Event>,
-        peer_provider: PeerProvider,
-        tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
-        enable_cover: bool,
-        n_hops: usize,
-        round_duration: Duration,
-    ) -> Self {
-        let rng = rand::SystemRandom::new();
-        RoundHandler {
-            requests,
-            events,
-            rng,
-            peer_provider,
-            tunnels,
-            cover_tunnel: None,
-            enable_cover,
-            n_hops,
-            round_duration,
-        }
+        tunnel_id: TunnelId,
+    ) -> (Self, mpsc::Sender<Bytes>, mpsc::UnboundedReceiver<Bytes>) {
+        TUNNEL_COUNT.fetch_add(1, Ordering::Relaxed);
+        let (data_tx, data_rx2) = mpsc::unbounded_channel();
+        let (data_tx2, data_rx) = mpsc::channel(DATA_BUFFER_SIZE);
+        let tunnel = Self {
+            tunnel_id,
+            data_tx,
+            data_rx,
+        };
+        (tunnel, data_tx2, data_rx2)
     }
 
-    pub(crate) async fn handle(&mut self) {
-        info!("Starting RoundHandler");
-        let mut round_timer = time::interval(self.round_duration);
-        let keep_alive_interval = IDLE_TIMEOUT / 3 * 2;
-        let mut keep_alive_timer = time::interval(keep_alive_interval);
-        loop {
-            tokio::select! {
-                Some(req) = self.requests.recv() => {
-                    self.handle_request(req).await;
-                }
-                _ = round_timer.tick() => {
-                    self.next_round().await;
-                }
-                _ = keep_alive_timer.tick() => {
-                    self.send_keep_alive().await;
-                }
-            }
-        }
-    }
-
-    async fn handle_request(&mut self, req: Request) {
-        trace!("RoundHandler: handling request {:?}", req);
-        match req {
-            Request::Build { tunnel_id, dest } => {
-                self.handle_build(tunnel_id, dest).await;
-            }
-            Request::Data { tunnel_id, data } => {
-                self.handle_data(tunnel_id, data).await;
-            }
-            Request::Destroy { tunnel_id } => {
-                self.handle_destroy(tunnel_id).await;
-            }
-            Request::Cover { size } => {
-                self.handle_cover(size).await;
-            }
-        }
-    }
-
-    /// Builds a new tunnel to `dest` over `n_hops` additional peers.
-    /// Performs a handshake with each hop and then spawns a task for handling incoming messages.
-    pub(crate) async fn handle_build(&mut self, tunnel_id: TunnelId, dest: Peer) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn({
-            let mut builder = TunnelBuilder::new(
-                tunnel_id,
-                TunnelDestination::Fixed(dest),
-                self.n_hops,
-                self.peer_provider.clone(),
-                self.rng.clone(),
-            );
-            let mut events = self.events.clone();
-            async move {
-                let first_tunnel = match builder.build().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        warn!("Failed to build tunnel: {}", e);
-                        let _ = events
-                            .send(Event::Error {
-                                tunnel_id,
-                                reason: ErrorReason::Build,
-                            })
-                            .await;
-                        return;
-                    }
-                };
-                let mut handler = TunnelHandler::new(first_tunnel, builder, rx, events);
-                handler.handle().await;
-            }
-        });
-        self.tunnels.lock().await.insert(tunnel_id, tx);
-    }
-
-    pub(crate) async fn handle_data(&mut self, tunnel_id: TunnelId, data: Bytes) {
-        if self.try_handle_data(tunnel_id, data).await.is_none() {
-            warn!("RoundHandler: handle_data failed");
-            let _ = self
-                .events
-                .send(Event::Error {
-                    tunnel_id,
-                    reason: ErrorReason::Data,
-                })
-                .await;
-        }
-    }
-
-    async fn try_handle_data(&mut self, tunnel_id: TunnelId, mut data: Bytes) -> Option<()> {
-        while !data.is_empty() {
-            let part = data.split_to(cmp::min(protocol::MAX_DATA_SIZE, data.len()));
-            self.tunnels
-                .lock()
-                .await
-                .get(&tunnel_id)?
-                .send(tunnel::Request::Data { data: part })
-                .ok()?;
-        }
-        Some(())
-    }
-
-    pub(crate) async fn handle_destroy(&mut self, tunnel_id: TunnelId) {
-        if self.try_handle_destroy(tunnel_id).await.is_none() {
-            warn!("RoundHandler: handle_destroy failed");
-            let _ = self
-                .events
-                .send(Event::Error {
-                    tunnel_id,
-                    reason: ErrorReason::Destroy,
-                })
-                .await;
-        }
-    }
-
-    async fn try_handle_destroy(&mut self, tunnel_id: TunnelId) -> Option<()> {
-        self.tunnels
-            .lock()
+    pub async fn read(&mut self) -> Result<Bytes> {
+        self.data_rx
+            .recv()
             .await
-            .get(&tunnel_id)?
-            .send(tunnel::Request::Destroy)
-            .ok()
+            .ok_or(anyhow!("Connection closed."))
     }
 
-    pub(crate) async fn handle_cover(&mut self, size: u16) {
-        if self.try_handle_cover(size).await.is_none() {
-            warn!("RoundHandler: handle_cover failed");
-            let _ = self
-                .events
-                .send(Event::Error {
-                    tunnel_id: 0,
-                    reason: ErrorReason::Cover,
-                })
-                .await;
+    pub fn write(&self, mut buf: Bytes) -> Result<()> {
+        while !buf.is_empty() {
+            let part = buf.split_to(cmp::min(protocol::MAX_DATA_SIZE, buf.len()));
+            self.data_tx
+                .send(part)
+                .map_err(|_| anyhow!("Connection closed."))?;
         }
+        Ok(())
     }
 
-    async fn try_handle_cover(&mut self, size: u16) -> Option<()> {
+    pub fn id(&self) -> TunnelId {
+        self.tunnel_id
+    }
+}
+
+impl Drop for OnionTunnel {
+    fn drop(&mut self) {
+        TUNNEL_COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone)]
+pub struct OnionContext {
+    peer_provider: PeerProvider,
+    n_hops: usize,
+    enable_cover: bool,
+    events: broadcast::Sender<tunnel::Event>,
+    rng: rand::SystemRandom,
+}
+
+impl OnionContext {
+    /// Builds a new tunnel to `dest` over `n_hops` additional peers.
+    /// Performs a handshake with each hop and then spawns a task for handling incoming messages
+    pub async fn build_tunnel(&self, dest: TunnelDestination) -> Result<OnionTunnel> {
+        let tunnel_id = tunnel::random_id(&self.rng);
+        let mut builder = TunnelBuilder::new(
+            tunnel_id,
+            dest,
+            self.n_hops,
+            self.peer_provider.clone(),
+            self.rng.clone(),
+        );
+
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut handler = TunnelHandler::new(
+            builder.build().await?,
+            builder,
+            self.events.subscribe(),
+            ready_tx,
+        );
+
+        tokio::spawn(async move {
+            handler.handle().await;
+        });
+        ready_rx.await?
+    }
+
+    pub async fn send_cover(&mut self, size: u16) -> Result<()> {
         let size = size as usize;
         let packet_count = (size + protocol::MAX_DATA_SIZE - 1) / protocol::MAX_DATA_SIZE;
-        if let Some(cover_tunnel) = &self.cover_tunnel {
-            for _ in 0..packet_count {
-                cover_tunnel.send(tunnel::Request::KeepAlive).ok()?
-            }
-            Some(())
-        } else {
-            None
+        for _ in 0..packet_count {
+            self.events
+                .send(tunnel::Event::KeepAlive)
+                .map_err(|_| anyhow!("No tunnel to send cover traffic on."))?;
         }
+        Ok(())
     }
 
-    /// Tunnels created in one period should be torn down and rebuilt for the next period.
-    /// However, Onion should ensure that this is done transparently to the modules, using these
-    /// tunnels. This could be achieved by creating a new tunnel before the end of a period and
-    /// seamlessly switching over the data stream to the new tunnel once at the end of the current
-    /// period. Since the destination peer of both old and new tunnel remains the same, the seamless
-    /// switch over is possible.
-    async fn next_round(&mut self) {
-        info!("next round");
-        if self.enable_cover && self.tunnels.lock().await.is_empty() {
-            if let Some(cover_tunnel) = &self.cover_tunnel {
-                let _ = cover_tunnel.send(tunnel::Request::Destroy);
+    async fn ensure_cover_tunnel_exists(&mut self) {
+        let mut cover_tunnel = None;
+        let mut events = self.events.subscribe();
+        while let Ok(evt) = events.recv().await {
+            if !self.enable_cover || evt != tunnel::Event::Switchover {
+                continue;
             }
-            info!(
-                "Constructing new cover tunnel ({:?} hops to destination)",
-                self.n_hops
-            );
-            let (tx, rx) = mpsc::unbounded_channel();
-            let (cover_events_tx, _) = mpsc::channel(1);
-            let tunnel_id = tunnel::random_id(&self.rng);
 
-            tokio::spawn({
-                let mut builder = TunnelBuilder::new(
-                    tunnel_id,
-                    TunnelDestination::Random,
-                    self.n_hops,
-                    self.peer_provider.clone(),
-                    self.rng.clone(),
-                );
-                async move {
-                    let cover_tunnel = match builder.build().await {
-                        Ok(t) => {
-                            trace!("Cover tunnel has been completed");
-                            t
-                        }
-                        Err(e) => {
-                            warn!("Failed to build cover tunnel: {}", e);
-                            return;
-                        }
-                    };
-                    let mut handler =
-                        TunnelHandler::new(cover_tunnel, builder, rx, cover_events_tx);
-                    handler.handle().await;
-                }
-            });
-
-            self.cover_tunnel = Some(tx);
-        } else {
-            self.cover_tunnel = None;
-            for tunnel in self.tunnels.lock().await.values_mut() {
-                let _ = tunnel.send(tunnel::Request::Switchover);
+            cover_tunnel = match (cover_tunnel.take(), TUNNEL_COUNT.load(Ordering::Relaxed)) {
+                (None, 0) => self.build_tunnel(TunnelDestination::Random).await.ok(),
+                (None, _) => None,
+                (Some(_), 0) => unreachable!(),
+                (Some(t), 1) => Some(t),
+                (Some(_), _) => None,
             }
         }
     }
+}
 
-    async fn send_keep_alive(&mut self) {
-        trace!("Sending keep alive");
-        if let Some(cover_tunnel) = &self.cover_tunnel {
-            let _ = cover_tunnel.send(tunnel::Request::KeepAlive);
-        }
-        for tunnel in self.tunnels.lock().await.values_mut() {
-            let _ = tunnel.send(tunnel::Request::KeepAlive);
-        }
+pub struct Incoming {
+    incoming: mpsc::Receiver<OnionTunnel>,
+}
+
+impl Incoming {
+    pub async fn next(&mut self) -> OnionTunnel {
+        self.incoming.recv().await.expect("incoming channel closed")
     }
 }
 
 struct OnionListener {
     hostkey: Arc<RsaPrivateKey>,
-    events: mpsc::Sender<Event>,
-    tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
+    incoming: mpsc::Sender<OnionTunnel>,
 }
 
 impl OnionListener {
-    fn new(
-        hostkey: RsaPrivateKey,
-        events: mpsc::Sender<Event>,
-        tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::UnboundedSender<tunnel::Request>>>>,
-    ) -> Self {
+    fn new(hostkey: RsaPrivateKey, incoming: mpsc::Sender<OnionTunnel>) -> Self {
         OnionListener {
             hostkey: Arc::new(hostkey),
-            events,
-            tunnels,
+            incoming,
         }
     }
 
@@ -519,25 +228,20 @@ impl OnionListener {
             listener.local_addr()
         );
         let mut incoming = listener.incoming();
-        let (events_tx, mut events_rx) = mpsc::channel(100);
-
-        loop {
-            tokio::select! {
-                Some(stream) = incoming.next() => self.handle_connection(stream?, events_tx.clone()).await,
-                Some(event) = events_rx.recv() => self.handle_event(event).await,
-                else => break,
-            }
+        while let Some(stream) = incoming.next().await {
+            self.handle_connection(stream?).await;
         }
         Ok(())
     }
 
-    async fn handle_connection(&self, stream: TcpStream, events_tx: mpsc::Sender<circuit::Event>) {
+    async fn handle_connection(&self, stream: TcpStream) {
         info!("Accepted connection from {:?}", stream.peer_addr().unwrap());
         let socket = OnionSocket::new(stream);
-        let hostkey = self.hostkey.clone();
+        let host_key = self.hostkey.clone();
+        let incoming = self.incoming.clone();
 
         tokio::spawn(async move {
-            let mut handler = match CircuitHandler::init(socket, &hostkey, events_tx).await {
+            let mut handler = match CircuitHandler::init(socket, &host_key, incoming).await {
                 Ok(handler) => handler,
                 Err(e) => {
                     warn!("{}", e);
@@ -550,40 +254,129 @@ impl OnionListener {
             }
         });
     }
+}
 
-    async fn handle_event(&mut self, event: circuit::Event) {
-        trace!("OnionListener: handling event {:?}", event);
-        match event {
-            circuit::Event::Incoming {
-                tunnel_id,
-                requests,
-            } => {
-                match self.tunnels.lock().await.insert(tunnel_id, requests) {
-                    None => {
-                        let _ = self.events.send(Event::Incoming { tunnel_id }).await;
-                    }
-                    Some(s) => {
-                        let _ = s.send(tunnel::Request::Destroy);
-                        // implicit drop of any old channel
-                    }
-                };
-            }
-            circuit::Event::Data { tunnel_id, data } => {
-                /* TODO We do not accept any incoming Data packets on the old socket, which me might
-                    opt to for less packet drop on switchover.
-                */
-                if self.tunnels.lock().await.contains_key(&tunnel_id) {
-                    let _ = self.events.send(Event::Data { tunnel_id, data }).await;
+/// Tunnels created in one period should be torn down and rebuilt for the next period.
+/// However, Onion should ensure that this is done transparently to the modules, using these
+/// tunnels. This could be achieved by creating a new tunnel before the end of a period and
+/// seamlessly switching over the data stream to the new tunnel once at the end of the current
+/// period. Since the destination peer of both old and new tunnel remains the same, the seamless
+/// switch over is possible.
+struct RoundHandler {
+    events: broadcast::Sender<tunnel::Event>,
+    round_duration: Duration,
+}
+
+impl RoundHandler {
+    async fn handle(&mut self) {
+        info!("Starting RoundHandler");
+        let mut round_timer = time::interval(self.round_duration);
+        let keep_alive_interval = circuit::IDLE_TIMEOUT / 3 * 2;
+        let mut keep_alive_timer = time::interval(keep_alive_interval);
+        loop {
+            tokio::select! {
+                _ = round_timer.tick() => {
+                    let _ = self.events.send(tunnel::Event::Switchover);
+                }
+                _ = keep_alive_timer.tick() => {
+                    let _ = self.events.send(tunnel::Event::KeepAlive);
                 }
             }
-            circuit::Event::End { .. } => {
-                /* TODO We never communicate this step to the API, nor do we need to. However, we
-                    need to clear up the map to prevent cluttering. Also, we do not limit old
-                    circuits to remain as zombie circuits on Alice's client since Alice expects an
-                    END response which we should send here.
-                */
-            }
         }
+    }
+}
+
+pub struct OnionBuilder {
+    listen_addr: SocketAddr,
+    hostkey: RsaPrivateKey,
+    peer_provider: PeerProvider,
+    enable_cover: bool,
+    n_hops: usize,
+    round_duration: Duration,
+}
+
+impl OnionBuilder {
+    /// Construct a new onion instance.
+    /// Returns a builder which allows further configuration.
+    pub fn new(
+        listen_addr: SocketAddr,
+        hostkey: RsaPrivateKey,
+        peer_provider: PeerProvider,
+    ) -> OnionBuilder {
+        OnionBuilder {
+            listen_addr,
+            hostkey,
+            peer_provider,
+            enable_cover: true,
+            n_hops: DEFAULT_HOPS,
+            round_duration: DEFAULT_ROUND_DURATION,
+        }
+    }
+
+    pub fn enable_cover_traffic(mut self, enable: bool) -> Self {
+        self.enable_cover = enable;
+        self
+    }
+
+    pub fn set_hops_per_tunnel(mut self, n_hops: usize) -> Self {
+        self.n_hops = n_hops;
+        self
+    }
+
+    pub fn set_round_duration(mut self, secs: u64) -> Self {
+        self.round_duration = Duration::from_secs(secs);
+        self
+    }
+
+    /// Returns the constructed instance.
+    pub fn start(self) -> (OnionContext, Incoming) {
+        let OnionBuilder {
+            listen_addr,
+            hostkey,
+            peer_provider,
+            enable_cover,
+            n_hops,
+            round_duration,
+        } = self;
+
+        let (events, _) = broadcast::channel(1);
+        let (incoming_tx, incoming_rx) = mpsc::channel(INCOMING_BUFFER_SIZE);
+
+        // creates round handler task
+        tokio::spawn({
+            let events = events.clone();
+            let mut round_handler = RoundHandler {
+                events,
+                round_duration,
+            };
+            async move { round_handler.handle().await }
+        });
+
+        // create task listening on p2p connections
+        tokio::spawn({
+            let mut listener = OnionListener::new(hostkey, incoming_tx);
+            async move { listener.listen_addr(listen_addr).await }
+        });
+
+        let ctx = OnionContext {
+            rng: rand::SystemRandom::new(),
+            peer_provider,
+            n_hops,
+            enable_cover,
+            events,
+        };
+
+        tokio::spawn({
+            let mut ctx = ctx.clone();
+            async move {
+                ctx.ensure_cover_tunnel_exists().await;
+            }
+        });
+
+        let incoming = Incoming {
+            incoming: incoming_rx,
+        };
+        (ctx, incoming)
     }
 }
 
