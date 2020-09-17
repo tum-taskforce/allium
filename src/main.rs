@@ -29,14 +29,11 @@ const MIN_HOPS: usize = 2;
 #[derive(Clone)]
 struct ApiTunnel {
     writer: OnionTunnelWriter,
-    destroyed: mpsc::UnboundedSender<()>,
-    // reader: broadcast::Sender<Bytes>,
+    destroyed: mpsc::UnboundedSender<SocketAddr>,
 }
 
 impl ApiTunnel {
-    pub fn new(tunnel: &OnionTunnel) -> Self {
-        // let (reader, _) = broadcast::channel(1);
-        let (destroyed, _) = mpsc::unbounded_channel();
+    pub fn new(tunnel: &OnionTunnel, destroyed: mpsc::UnboundedSender<SocketAddr>) -> Self {
         ApiTunnel {
             writer: tunnel.writer(),
             destroyed,
@@ -45,14 +42,35 @@ impl ApiTunnel {
 }
 
 struct ApiHandler {
+    client_addr: SocketAddr,
     socket: ApiSocket<TcpStream>,
     ctx: OnionContext,
     incoming: broadcast::Receiver<ApiTunnel>,
     tunnels: HashMap<TunnelId, ApiTunnel>,
+    data_tx: mpsc::UnboundedSender<DataEvent>,
+    data_rx: mpsc::UnboundedReceiver<DataEvent>,
 }
 
 impl ApiHandler {
+    pub fn new(
+        stream: TcpStream,
+        ctx: OnionContext,
+        incoming: broadcast::Receiver<ApiTunnel>,
+    ) -> Self {
+        let (data_tx, data_rx) = mpsc::unbounded_channel();
+        ApiHandler {
+            client_addr: stream.peer_addr().unwrap(),
+            socket: ApiSocket::new(stream),
+            ctx,
+            incoming,
+            tunnels: Default::default(),
+            data_tx,
+            data_rx,
+        }
+    }
+
     async fn handle(&mut self) -> Result<()> {
+        trace!("Accepted API connection from: {}", self.client_addr);
         loop {
             tokio::select! {
                 req = self.socket.read_next::<OnionRequest>() => {
@@ -60,6 +78,9 @@ impl ApiHandler {
                 }
                 Ok(tunnel) = self.incoming.recv() => {
                     self.handle_incoming(tunnel).await?;
+                }
+                Some(evt) = self.data_rx.recv() => {
+                    self.handle_data(evt).await?;
                 }
             }
         }
@@ -80,11 +101,16 @@ impl ApiHandler {
                         .write(OnionResponse::Ready(tunnel_id, dst_hostkey))
                         .await?;
 
-                    let api_tunnel = ApiTunnel::new(&tunnel);
+                    let (destroyed_tx, destroyed_rx) = mpsc::unbounded_channel();
+                    let api_tunnel = ApiTunnel::new(&tunnel, destroyed_tx);
                     let prev = self.tunnels.insert(tunnel_id, api_tunnel);
                     assert!(prev.is_none());
 
-                // TODO handle tunnel data
+                    let mut tunnel_handler = TunnelHandler::new(tunnel, destroyed_rx);
+                    tunnel_handler.subscribe(self.client_addr, self.data_tx.clone());
+                    tokio::spawn(async move {
+                        tunnel_handler.handle().await;
+                    });
                 } else {
                     self.socket
                         .write(OnionResponse::Error(ErrorReason::Build, 0))
@@ -93,7 +119,7 @@ impl ApiHandler {
             }
             OnionRequest::Destroy(tunnel_id) => {
                 if let Some(tunnel) = self.tunnels.remove(&tunnel_id) {
-                    tunnel.destroyed.send(());
+                    tunnel.destroyed.send(self.client_addr);
                 } else {
                     self.socket
                         .write(OnionResponse::Error(ErrorReason::Destroy, tunnel_id))
@@ -134,6 +160,13 @@ impl ApiHandler {
         }
         Ok(())
     }
+
+    async fn handle_data(&mut self, evt: DataEvent) -> Result<()> {
+        self.socket
+            .write(OnionResponse::Data(evt.tunnel_id, evt.data))
+            .await?;
+        Ok(())
+    }
 }
 
 pub async fn start(
@@ -148,27 +181,19 @@ pub async fn start(
     );
     let mut api_incoming = listener.incoming();
 
-    // initialize onion module listening on API connections
     let (incoming, _) = broadcast::channel(1);
-
     loop {
         tokio::select! {
             Some(client) = api_incoming.next() => {
-                let client = client?;
-                trace!("Accepted API connection from: {}", client.peer_addr()?);
-                let mut handler = ApiHandler {
-                    socket: ApiSocket::new(client),
-                    ctx: ctx.clone(),
-                    incoming: incoming.subscribe(),
-                    tunnels: Default::default(),
-                };
+                let mut handler = ApiHandler::new(client?, ctx.clone(), incoming.subscribe());
 
                 tokio::spawn(async move {
                     handler.handle().await;
                 });
             }
             Some(tunnel) = onion_incoming.next() => {
-                let api_tunnel = ApiTunnel::new(&tunnel);
+                let (destroyed_tx, destroyed_rx) = mpsc::unbounded_channel();
+                let api_tunnel = ApiTunnel::new(&tunnel, destroyed_tx);
                 let _ = incoming.send(api_tunnel);
 
                 // tokio::spawn(async move {
@@ -181,6 +206,57 @@ pub async fn start(
         }
     }
     Ok(())
+}
+
+#[derive(Clone)]
+struct DataEvent {
+    tunnel_id: TunnelId,
+    data: Bytes,
+}
+
+impl DataEvent {
+    pub fn new(tunnel_id: TunnelId, data: Bytes) -> Self {
+        DataEvent { tunnel_id, data }
+    }
+}
+
+struct TunnelHandler {
+    tunnel: OnionTunnel,
+    clients: HashMap<SocketAddr, mpsc::UnboundedSender<DataEvent>>,
+    destroyed: mpsc::UnboundedReceiver<SocketAddr>,
+}
+
+impl TunnelHandler {
+    pub fn new(tunnel: OnionTunnel, destroyed: mpsc::UnboundedReceiver<SocketAddr>) -> Self {
+        TunnelHandler {
+            tunnel,
+            clients: Default::default(),
+            destroyed,
+        }
+    }
+
+    pub fn subscribe(&mut self, client_addr: SocketAddr, events: mpsc::UnboundedSender<DataEvent>) {
+        self.clients.insert(client_addr, events);
+    }
+
+    pub async fn handle(&mut self) -> Result<()> {
+        while !self.clients.is_empty() {
+            tokio::select! {
+                data = self.tunnel.read() => {
+                    let data = data?;
+                    let tunnel_id = self.tunnel.id();
+                    let evt = DataEvent::new(tunnel_id, data);
+                    for client in self.clients.values() {
+                        client.send(evt.clone());
+                    }
+                }
+                Some(client) = self.destroyed.recv() => {
+                    self.clients.remove(&client);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Command line arguments:
