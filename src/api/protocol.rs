@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use crate::utils::{self, FromBytes, ToBytes};
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use onion::{ErrorReason, Result};
+use onion::Result;
 use serde::export::Formatter;
 use std::fmt;
 use std::net::SocketAddr;
@@ -137,6 +137,14 @@ pub enum OnionResponse {
     /// Error conditions trigger upon correct usage of API. API violations are to be handled by
     /// terminating the connection to the misbehaving client.
     Error(ErrorReason, /* tunnel_id */ u32),
+}
+
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum ErrorReason {
+    Build,
+    Data,
+    Destroy,
+    Cover,
 }
 
 impl ToBytes for OnionResponse {
