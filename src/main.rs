@@ -18,6 +18,7 @@ use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::Stream;
 use tokio::sync::Mutex;
+use tokio::sync::{broadcast, mpsc};
 
 mod api;
 mod utils;
@@ -25,179 +26,161 @@ mod utils;
 // for security reasons there should always be at least two hops per tunnel
 const MIN_HOPS: usize = 2;
 
-struct OnionModule {
-    connections: Mutex<HashMap<SocketAddr, ApiSocket<OwnedWriteHalf>>>,
-    tunnels: Mutex<HashMap<TunnelId, Vec<SocketAddr>>>,
-    hostkeys: Mutex<HashMap<TunnelId, Bytes>>,
-    rng: rand::SystemRandom,
+#[derive(Clone)]
+struct ApiTunnel {
+    writer: OnionTunnelWriter,
+    destroyed: mpsc::UnboundedSender<()>,
+    // reader: broadcast::Sender<Bytes>,
 }
 
-impl OnionModule {
-    pub fn new() -> Self {
-        OnionModule {
-            connections: Default::default(),
-            tunnels: Default::default(),
-            hostkeys: Default::default(),
-            rng: rand::SystemRandom::new(),
+impl ApiTunnel {
+    pub fn new(tunnel: &OnionTunnel) -> Self {
+        // let (reader, _) = broadcast::channel(1);
+        let (destroyed, _) = mpsc::unbounded_channel();
+        ApiTunnel {
+            writer: tunnel.writer(),
+            destroyed,
         }
     }
+}
 
-    async fn listen_api(self: Arc<Self>, addr: SocketAddr, onion: Onion) -> Result<()> {
-        let mut listener = TcpListener::bind(addr).await?;
-        info!(
-            "Listening for API connections on {:?}",
-            listener.local_addr()
-        );
-        let mut incoming = listener.incoming();
-        while let Some(stream) = incoming.next().await {
-            let handler = self.clone();
-            let stream = stream?;
-            let onion = onion.clone();
-            tokio::spawn(async move {
-                handler.handle_api(stream, onion).await.unwrap();
-            });
-        }
+struct ApiHandler {
+    socket: ApiSocket<TcpStream>,
+    ctx: OnionContext,
+    incoming: broadcast::Receiver<ApiTunnel>,
+    tunnels: HashMap<TunnelId, ApiTunnel>,
+}
 
-        Ok(())
-    }
-
-    /// Translates API request to the corresponding methods on the onion handle.
-    async fn handle_api(&self, stream: TcpStream, onion: Onion) -> Result<()> {
-        let client_addr = stream.peer_addr()?;
-        trace!("Accepted API connection from: {}", client_addr);
-        let (read_stream, write_stream) = stream.into_split();
-        self.connections
-            .lock()
-            .await
-            .insert(client_addr, ApiSocket::new(write_stream));
-        let mut socket = ApiSocket::new(read_stream);
-
+impl ApiHandler {
+    async fn handle(&mut self) -> Result<()> {
         loop {
-            let msg = socket.read_next::<OnionRequest>().await?;
-            trace!("Handling {:?}", msg);
-            let _msg_id = msg.id();
-            match msg {
-                OnionRequest::Build(dst_addr, dst_hostkey) => {
-                    let dest_public_key = RsaPublicKey::from_subject_info(dst_hostkey.as_ref());
-                    let dest = Peer::new(dst_addr, dest_public_key);
-                    let tunnel_id = loop {
-                        let tunnel_id = random_id(&self.rng);
-                        if !self.tunnels.lock().await.contains_key(&tunnel_id) {
-                            break tunnel_id;
-                        }
-                    };
-
-                    onion.build_tunnel(tunnel_id, dest);
-
-                    self.tunnels
-                        .lock()
-                        .await
-                        .insert(tunnel_id, vec![client_addr]);
-
-                    self.hostkeys.lock().await.insert(tunnel_id, dst_hostkey);
+            tokio::select! {
+                req = self.socket.read_next::<OnionRequest>() => {
+                    self.handle_request(req?).await?;
                 }
-                OnionRequest::Destroy(tunnel_id) => {
-                    let mut tunnels = self.tunnels.lock().await;
-                    if let Some(clients) = tunnels.get_mut(&tunnel_id) {
-                        clients.retain(|x| x != &client_addr);
-                        if clients.is_empty() {
-                            onion.destroy_tunnel(tunnel_id);
-                        }
-                    } else {
-                        self.write_to_client(
-                            &client_addr,
-                            OnionResponse::Error(ErrorReason::Destroy, tunnel_id),
-                        )
-                        .await?;
-                    }
-                }
-                OnionRequest::Data(tunnel_id, tunnel_data) => {
-                    if self.tunnels.lock().await.contains_key(&tunnel_id) {
-                        onion.send_data(tunnel_id, &tunnel_data);
-                    } else {
-                        self.write_to_client(
-                            &client_addr,
-                            OnionResponse::Error(ErrorReason::Data, tunnel_id),
-                        )
-                        .await?;
-                    }
-                }
-                OnionRequest::Cover(cover_size) => {
-                    onion.send_cover(cover_size);
+                Ok(tunnel) = self.incoming.recv() => {
+                    self.handle_incoming(tunnel).await?;
                 }
             }
         }
     }
 
-    /// Handles P2P protocol events and notifies interested API clients
-    async fn handle_events<E>(&self, mut events: E) -> Result<()>
-    where
-        E: Stream<Item = Event> + Unpin,
-    {
-        while let Some(event) = events.next().await {
-            match event {
-                Event::Ready { tunnel_id } => {
-                    for client in self.clients_for_tunnel(&tunnel_id).await {
-                        self.write_to_client(
-                            &client,
-                            OnionResponse::Ready(
-                                tunnel_id,
-                                self.hostkeys.lock().await.remove(&tunnel_id).unwrap(),
-                            ),
-                        )
+    async fn handle_request(&mut self, req: OnionRequest) -> Result<()> {
+        trace!("Handling {:?}", req);
+        match req {
+            OnionRequest::Build(dst_addr, dst_hostkey) => {
+                let dest_public_key = RsaPublicKey::from_subject_info(dst_hostkey.as_ref());
+                let dest = Peer::new(dst_addr, dest_public_key);
+
+                let tunnel = self.ctx.build_tunnel(TunnelDestination::Fixed(dest)).await;
+
+                if let Ok(tunnel) = tunnel {
+                    let tunnel_id = tunnel.id();
+                    self.socket
+                        .write(OnionResponse::Ready(tunnel_id, dst_hostkey))
                         .await?;
-                    }
-                }
-                Event::Incoming { tunnel_id } => {
-                    let all_conns = self.connections.lock().await.keys().cloned().collect();
-                    self.tunnels.lock().await.insert(tunnel_id, all_conns);
 
-                    for client in self.clients_for_tunnel(&tunnel_id).await {
-                        self.write_to_client(&client, OnionResponse::Incoming(tunnel_id))
-                            .await?;
-                    }
-                }
-                Event::Data { tunnel_id, data } => {
-                    for client in self.clients_for_tunnel(&tunnel_id).await {
-                        self.write_to_client(&client, OnionResponse::Data(tunnel_id, data.clone()))
-                            .await?;
-                    }
-                }
-                Event::Error { tunnel_id, reason } => {
-                    for client in self.clients_for_tunnel(&tunnel_id).await {
-                        self.write_to_client(&client, OnionResponse::Error(reason, tunnel_id))
-                            .await?;
+                    let api_tunnel = ApiTunnel::new(&tunnel);
+                    let prev = self.tunnels.insert(tunnel_id, api_tunnel);
+                    assert!(prev.is_none());
 
-                        if reason == ErrorReason::Build {
-                            self.tunnels.lock().await.remove(&tunnel_id);
-                            self.hostkeys.lock().await.remove(&tunnel_id);
-                        }
-                    }
+                // TODO handle tunnel data
+                } else {
+                    self.socket
+                        .write(OnionResponse::Error(ErrorReason::Build, 0))
+                        .await?;
+                }
+            }
+            OnionRequest::Destroy(tunnel_id) => {
+                if let Some(tunnel) = self.tunnels.remove(&tunnel_id) {
+                    tunnel.destroyed.send(());
+                } else {
+                    self.socket
+                        .write(OnionResponse::Error(ErrorReason::Destroy, tunnel_id))
+                        .await?;
+                }
+            }
+            OnionRequest::Data(tunnel_id, tunnel_data) => {
+                if let Some(tunnel) = self.tunnels.get_mut(&tunnel_id) {
+                    tunnel.writer.write(tunnel_data);
+                } else {
+                    self.socket
+                        .write(OnionResponse::Error(ErrorReason::Data, tunnel_id))
+                        .await?;
+                }
+            }
+            OnionRequest::Cover(cover_size) => {
+                if self.ctx.send_cover(cover_size).await.is_err() {
+                    self.socket
+                        .write(OnionResponse::Error(ErrorReason::Cover, 0))
+                        .await?;
                 }
             }
         }
         Ok(())
     }
 
-    async fn clients_for_tunnel(&self, tunnel_id: &TunnelId) -> Vec<SocketAddr> {
-        self.tunnels
-            .lock()
-            .await
-            .get(tunnel_id)
-            .iter()
-            .flat_map(|x| x.iter().cloned())
-            .collect::<Vec<SocketAddr>>()
-    }
+    async fn handle_incoming(&mut self, tunnel: ApiTunnel) -> Result<()> {
+        let tunnel_id = tunnel.writer.id();
+        if !self.tunnels.contains_key(&tunnel_id) {
+            self.socket
+                .write(OnionResponse::Incoming(tunnel_id))
+                .await?;
+            self.tunnels.insert(tunnel_id, tunnel);
 
-    async fn write_to_client<M: ToBytes>(&self, client: &SocketAddr, msg: M) -> Result<()> {
-        self.connections
-            .lock()
-            .await
-            .get_mut(client)
-            .unwrap()
-            .write(msg)
-            .await
+            // TODO handle data
+            // let mut data_rx = tunnel.reader.subscribe();
+            // tokio::spawn(async move { while let Ok(data) = data_rx.recv().await {} });
+        }
+        Ok(())
     }
+}
+
+pub async fn start(
+    api_addr: SocketAddr,
+    ctx: OnionContext,
+    mut onion_incoming: Incoming,
+) -> Result<()> {
+    let mut listener = TcpListener::bind(api_addr).await?;
+    info!(
+        "Listening for API connections on {:?}",
+        listener.local_addr()
+    );
+    let mut api_incoming = listener.incoming();
+
+    // initialize onion module listening on API connections
+    let (incoming, _) = broadcast::channel(1);
+
+    loop {
+        tokio::select! {
+            Some(client) = api_incoming.next() => {
+                let client = client?;
+                trace!("Accepted API connection from: {}", client.peer_addr()?);
+                let mut handler = ApiHandler {
+                    socket: ApiSocket::new(client),
+                    ctx: ctx.clone(),
+                    incoming: incoming.subscribe(),
+                    tunnels: Default::default(),
+                };
+
+                tokio::spawn(async move {
+                    handler.handle().await;
+                });
+            }
+            Some(tunnel) = onion_incoming.next() => {
+                let api_tunnel = ApiTunnel::new(&tunnel);
+                let _ = incoming.send(api_tunnel);
+
+                // tokio::spawn(async move {
+                //     while let Ok(data) = tunnel.read().await {
+                //         data_tx.send(data);
+                //     }
+                // });
+            }
+            else => break,
+        }
+    }
+    Ok(())
 }
 
 /// Command line arguments:
@@ -240,33 +223,11 @@ async fn main() -> Result<()> {
 
     // initialize onion, start listening on p2p port
     // events is a stream of events from the p2p protocol which should notify API clients
-    let (onion, events) = Onion::new(onion_addr, hostkey, peer_provider)
+    let (ctx, onion_incoming) = OnionBuilder::new(onion_addr, hostkey, peer_provider)
         .enable_cover_traffic(config.onion.cover_traffic.unwrap_or(true))
         .set_hops_per_tunnel(config.onion.hops)
-        .start()?;
+        .start();
 
-    // initialize onion module listening on API connections
-    let onion_module = Arc::new(OnionModule::new());
-    let api_listen_task = tokio::spawn({
-        let api_handler = onion_module.clone();
-        let api_addr = config.onion.api_address;
-        async move {
-            if let Err(e) = api_handler.listen_api(api_addr, onion).await {
-                error!("API handler failed: {}", e);
-            }
-        }
-    });
-
-    // TODO maybe one task for incoming and events (select), no mutex on connections required?
-    let event_task = tokio::spawn({
-        let event_handler = onion_module.clone();
-        async move {
-            if let Err(e) = event_handler.handle_events(events).await {
-                error!("Event handler failed: {}", e);
-            }
-        }
-    });
-
-    let (_, _) = join!(api_listen_task, event_task);
+    start(config.onion.api_address, ctx, onion_incoming).await?;
     Ok(())
 }
