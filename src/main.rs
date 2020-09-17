@@ -46,7 +46,7 @@ enum TunnelEvent {
 enum ApiEvent {
     Subscribe {
         client_addr: SocketAddr,
-        data: mpsc::UnboundedSender<TunnelEvent>,
+        events: mpsc::UnboundedSender<TunnelEvent>,
     },
     Unsubscribe {
         client_addr: SocketAddr,
@@ -169,7 +169,7 @@ impl ApiHandler {
 
             let _ = tunnel.events.send(ApiEvent::Subscribe {
                 client_addr: self.client_addr,
-                data: self.events_tx.clone(),
+                events: self.events_tx.clone(),
             });
 
             self.tunnels.insert(tunnel_id, tunnel);
@@ -246,8 +246,8 @@ impl TunnelHandler {
                                 break;
                             }
                         }
-                        ApiEvent::Subscribe { client_addr, data } => {
-                            self.subscribe(client_addr, data);
+                        ApiEvent::Subscribe { client_addr, events } => {
+                            self.subscribe(client_addr, events);
                         }
                     }
 
@@ -266,41 +266,51 @@ impl Drop for TunnelHandler {
     }
 }
 
-pub async fn start(
-    api_addr: SocketAddr,
+pub struct OnionModule {
     ctx: OnionContext,
-    mut onion_incoming: Incoming,
-) -> Result<()> {
-    let mut listener = TcpListener::bind(api_addr).await?;
-    info!(
-        "Listening for API connections on {:?}",
-        listener.local_addr()
-    );
-    let mut api_incoming = listener.incoming();
+    onion_incoming: Incoming,
+}
 
-    let (incoming, _) = broadcast::channel(1);
-    loop {
-        tokio::select! {
-            Some(client) = api_incoming.next() => {
-                let mut api_handler = ApiHandler::new(client?, ctx.clone(), incoming.subscribe());
-                tokio::spawn(async move {
-                    api_handler.handle().await;
-                });
-            }
-            Some(tunnel) = onion_incoming.next() => {
-                let (events_tx, events_rx) = mpsc::unbounded_channel();
-                let api_tunnel = ApiTunnel::new(&tunnel, events_tx);
-                let _ = incoming.send(api_tunnel);
-
-                let mut tunnel_handler = TunnelHandler::new(tunnel, events_rx);
-                tokio::spawn(async move {
-                    tunnel_handler.handle().await;
-                });
-            }
-            else => break,
+impl OnionModule {
+    pub fn new(ctx: OnionContext, incoming: Incoming) -> Self {
+        OnionModule {
+            ctx,
+            onion_incoming: incoming,
         }
     }
-    Ok(())
+
+    pub async fn listen_api(&mut self, api_addr: SocketAddr) -> Result<()> {
+        let mut listener = TcpListener::bind(api_addr).await?;
+        info!(
+            "Listening for API connections on {:?}",
+            listener.local_addr()
+        );
+        let mut api_incoming = listener.incoming();
+
+        let (incoming, _) = broadcast::channel(1);
+        loop {
+            tokio::select! {
+                Some(client) = api_incoming.next() => {
+                    let mut api_handler = ApiHandler::new(client?, self.ctx.clone(), incoming.subscribe());
+                    tokio::spawn(async move {
+                        api_handler.handle().await;
+                    });
+                }
+                Some(tunnel) = self.onion_incoming.next() => {
+                    let (events_tx, events_rx) = mpsc::unbounded_channel();
+                    let api_tunnel = ApiTunnel::new(&tunnel, events_tx);
+                    let _ = incoming.send(api_tunnel);
+
+                    let mut tunnel_handler = TunnelHandler::new(tunnel, events_rx);
+                    tokio::spawn(async move {
+                        tunnel_handler.handle().await;
+                    });
+                }
+                else => break,
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Command line arguments:
@@ -348,6 +358,7 @@ async fn main() -> Result<()> {
         .set_hops_per_tunnel(config.onion.hops)
         .start();
 
-    start(config.onion.api_address, ctx, onion_incoming).await?;
+    let mut onion = OnionModule::new(ctx, onion_incoming);
+    onion.listen_api(config.onion.api_address).await?;
     Ok(())
 }
