@@ -188,6 +188,21 @@ pub struct OnionContext {
 }
 
 impl OnionContext {
+    fn new(
+        events: broadcast::Sender<tunnel::Event>,
+        peer_provider: PeerProvider,
+        n_hops: usize,
+        enable_cover: bool,
+    ) -> Self {
+        OnionContext {
+            rng: rand::SystemRandom::new(),
+            peer_provider,
+            n_hops,
+            enable_cover,
+            events,
+        }
+    }
+
     /// Builds a new tunnel to `dest` over `n_hops` additional peers.
     /// Performs a handshake with each hop and then spawns a task for handling incoming messages
     pub async fn build_tunnel(&self, dest: Peer) -> Result<OnionTunnel> {
@@ -416,14 +431,7 @@ impl OnionBuilder {
             async move { listener.listen_addr(listen_addr).await }
         });
 
-        let ctx = OnionContext {
-            rng: rand::SystemRandom::new(),
-            peer_provider,
-            n_hops,
-            enable_cover,
-            events,
-        };
-
+        let ctx = OnionContext::new(events, peer_provider, n_hops, enable_cover);
         tokio::spawn({
             let mut ctx = ctx.clone();
             async move {
