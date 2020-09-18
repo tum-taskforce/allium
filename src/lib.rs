@@ -1,7 +1,7 @@
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::protocol;
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel::{self, TunnelBuilder, TunnelHandler};
+use crate::onion::tunnel::{self, TunnelBuilder, TunnelDestination, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -18,7 +18,6 @@ use tokio::time::{self, Duration};
 
 pub use crate::onion::crypto::{RsaPrivateKey, RsaPublicKey};
 pub use crate::onion::tunnel::random_id;
-pub use crate::onion::tunnel::TunnelDestination;
 pub use crate::onion::tunnel::TunnelId;
 
 mod onion;
@@ -50,6 +49,12 @@ impl Peer {
 
     pub fn address(&self) -> SocketAddr {
         self.addr
+    }
+}
+
+impl fmt::Debug for Peer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Peer").field(&self.addr).finish()
     }
 }
 
@@ -129,6 +134,14 @@ impl OnionTunnel {
     }
 }
 
+impl fmt::Debug for OnionTunnel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnionTunnel")
+            .field("id", &self.tunnel_id)
+            .finish()
+    }
+}
+
 impl Drop for OnionTunnel {
     fn drop(&mut self) {
         TUNNEL_COUNT.fetch_sub(1, Ordering::Relaxed);
@@ -157,6 +170,14 @@ impl OnionTunnelWriter {
     }
 }
 
+impl fmt::Debug for OnionTunnelWriter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnionTunnelWriter")
+            .field("id", &self.tunnel_id)
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct OnionContext {
     peer_provider: PeerProvider,
@@ -169,7 +190,12 @@ pub struct OnionContext {
 impl OnionContext {
     /// Builds a new tunnel to `dest` over `n_hops` additional peers.
     /// Performs a handshake with each hop and then spawns a task for handling incoming messages
-    pub async fn build_tunnel(&self, dest: TunnelDestination) -> Result<OnionTunnel> {
+    pub async fn build_tunnel(&self, dest: Peer) -> Result<OnionTunnel> {
+        self.build_tunnel_internal(TunnelDestination::Fixed(dest))
+            .await
+    }
+
+    async fn build_tunnel_internal(&self, dest: TunnelDestination) -> Result<OnionTunnel> {
         let tunnel_id = tunnel::random_id(&self.rng);
         let mut builder = TunnelBuilder::new(
             tunnel_id,
@@ -193,7 +219,7 @@ impl OnionContext {
         ready_rx.await?
     }
 
-    pub async fn send_cover(&self, size: u16) -> Result<()> {
+    pub fn send_cover(&self, size: u16) -> Result<()> {
         let size = size as usize;
         let packet_count = (size + protocol::MAX_DATA_SIZE - 1) / protocol::MAX_DATA_SIZE;
         for _ in 0..packet_count {
@@ -213,7 +239,10 @@ impl OnionContext {
             }
 
             cover_tunnel = match (cover_tunnel.take(), TUNNEL_COUNT.load(Ordering::Relaxed)) {
-                (None, 0) => self.build_tunnel(TunnelDestination::Random).await.ok(),
+                (None, 0) => self
+                    .build_tunnel_internal(TunnelDestination::Random)
+                    .await
+                    .ok(),
                 (None, _) => None,
                 (Some(_), 0) => unreachable!(),
                 (Some(t), 1) => Some(t),
@@ -406,11 +435,5 @@ impl OnionBuilder {
             incoming: incoming_rx,
         };
         (ctx, incoming)
-    }
-}
-
-impl fmt::Debug for Peer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Peer").field(&self.addr).finish()
     }
 }

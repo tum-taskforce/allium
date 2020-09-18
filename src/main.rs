@@ -26,7 +26,7 @@ struct ApiTunnel {
 }
 
 impl ApiTunnel {
-    pub fn new(tunnel: &OnionTunnel, events: mpsc::UnboundedSender<ApiEvent>) -> Self {
+    fn new(tunnel: &OnionTunnel, events: mpsc::UnboundedSender<ApiEvent>) -> Self {
         ApiTunnel {
             writer: tunnel.writer(),
             events,
@@ -64,11 +64,7 @@ struct ApiHandler {
 }
 
 impl ApiHandler {
-    pub fn new(
-        stream: TcpStream,
-        ctx: OnionContext,
-        incoming: broadcast::Receiver<ApiTunnel>,
-    ) -> Self {
+    fn new(stream: TcpStream, ctx: OnionContext, incoming: broadcast::Receiver<ApiTunnel>) -> Self {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         ApiHandler {
             client_addr: stream.peer_addr().unwrap(),
@@ -105,7 +101,7 @@ impl ApiHandler {
                 let dest_public_key = RsaPublicKey::from_subject_info(dst_hostkey.as_ref());
                 let dest = Peer::new(dst_addr, dest_public_key);
 
-                let tunnel = self.ctx.build_tunnel(TunnelDestination::Fixed(dest)).await;
+                let tunnel = self.ctx.build_tunnel(dest).await;
 
                 if let Ok(tunnel) = tunnel {
                     let tunnel_id = tunnel.id();
@@ -150,7 +146,7 @@ impl ApiHandler {
                 }
             }
             OnionRequest::Cover(cover_size) => {
-                if self.ctx.send_cover(cover_size).await.is_err() {
+                if self.ctx.send_cover(cover_size).is_err() {
                     self.socket
                         .write(OnionResponse::Error(ErrorReason::Cover, 0))
                         .await?;
@@ -209,7 +205,7 @@ struct TunnelHandler {
 }
 
 impl TunnelHandler {
-    pub fn new(tunnel: OnionTunnel, events: mpsc::UnboundedReceiver<ApiEvent>) -> Self {
+    fn new(tunnel: OnionTunnel, events: mpsc::UnboundedReceiver<ApiEvent>) -> Self {
         TunnelHandler {
             tunnel,
             clients: Default::default(),
@@ -217,11 +213,11 @@ impl TunnelHandler {
         }
     }
 
-    pub fn subscribe(&mut self, client_addr: SocketAddr, data: mpsc::UnboundedSender<TunnelEvent>) {
+    fn subscribe(&mut self, client_addr: SocketAddr, data: mpsc::UnboundedSender<TunnelEvent>) {
         self.clients.insert(client_addr, data);
     }
 
-    pub async fn handle(&mut self) {
+    async fn handle(&mut self) {
         loop {
             tokio::select! {
                 data = self.tunnel.read() => {
@@ -250,7 +246,6 @@ impl TunnelHandler {
                             self.subscribe(client_addr, events);
                         }
                     }
-
                 }
             }
         }
