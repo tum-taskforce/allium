@@ -7,8 +7,9 @@ use tokio::stream;
 use tokio::time;
 
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(42000);
+const ROUND_DURATION: Duration = Duration::from_secs(5);
 const ERROR_TIMEOUT: Duration = Duration::from_secs(4);
-const ROUND_TIMEOUT: Duration = Duration::from_secs(45);
+const ROUND_TIMEOUT: Duration = Duration::from_secs(7);
 const DELAY_TIMEOUT: Duration = Duration::from_secs(2);
 const TEST_DATA: Bytes = Bytes::from_static(b"test");
 const LONG_DATA: Bytes = Bytes::from_static(&[13; 4098]);
@@ -41,6 +42,7 @@ async fn spawn_peer(peers: Vec<Peer>, cover: bool, hops: usize) -> TestPeer {
     let (ctx, incoming) = OnionBuilder::new(peer.address(), hostkey, peer_provider)
         .enable_cover_traffic(cover)
         .set_hops_per_tunnel(hops)
+        .set_round_duration(ROUND_DURATION.as_secs())
         .start();
     TestPeer {
         peer,
@@ -275,8 +277,7 @@ async fn test_data_error_disconnected_source() {
     assert_eq!(incoming.id(), ready.id());
 
     drop(ready);
-    time::delay_for(DELAY_TIMEOUT).await;
-    time::timeout(ERROR_TIMEOUT, incoming.read())
+    time::timeout(ROUND_TIMEOUT, incoming.read())
         .await
         .unwrap()
         .unwrap_err();
