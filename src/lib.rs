@@ -1,7 +1,7 @@
 use crate::onion::circuit::{self, CircuitHandler, CircuitId};
 use crate::onion::protocol;
 use crate::onion::socket::OnionSocket;
-use crate::onion::tunnel::{self, TunnelBuilder, TunnelDestination, TunnelHandler};
+use crate::onion::tunnel::{self, Target, TunnelBuilder, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -206,11 +206,11 @@ impl OnionContext {
     /// Builds a new tunnel to `dest` over `n_hops` additional peers.
     /// Performs a handshake with each hop and then spawns a task for handling incoming messages
     pub async fn build_tunnel(&self, dest: Peer) -> Result<OnionTunnel> {
-        self.build_tunnel_internal(TunnelDestination::Fixed(dest))
-            .await
+        self.build_tunnel_internal(Target::Peer(dest)).await
     }
 
-    async fn build_tunnel_internal(&self, dest: TunnelDestination) -> Result<OnionTunnel> {
+    async fn build_tunnel_internal(&self, dest: Target) -> Result<OnionTunnel> {
+        info!("Building tunnel to {:?}", dest);
         let tunnel_id = tunnel::random_id(&self.rng);
         let mut builder = TunnelBuilder::new(
             tunnel_id,
@@ -254,10 +254,7 @@ impl OnionContext {
             }
 
             cover_tunnel = match (cover_tunnel.take(), TUNNEL_COUNT.load(Ordering::Relaxed)) {
-                (None, 0) => self
-                    .build_tunnel_internal(TunnelDestination::Random)
-                    .await
-                    .ok(),
+                (None, 0) => self.build_tunnel_internal(Target::Random).await.ok(),
                 (None, _) => None,
                 (Some(_), 0) => unreachable!(),
                 (Some(t), 1) => Some(t),

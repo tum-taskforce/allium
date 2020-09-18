@@ -15,8 +15,8 @@ const LONG_DATA: Bytes = Bytes::from_static(&[13; 4098]);
 
 struct TestPeer {
     peer: Peer,
-    onion: OnionContext,
-    events: Incoming,
+    ctx: OnionContext,
+    incoming: Incoming,
 }
 
 fn new_unique_peer() -> (Peer, RsaPrivateKey) {
@@ -44,8 +44,8 @@ async fn spawn_peer(peers: Vec<Peer>, cover: bool, hops: usize) -> TestPeer {
         .start();
     TestPeer {
         peer,
-        onion: ctx,
-        events: incoming,
+        ctx,
+        incoming,
     }
 }
 
@@ -59,32 +59,32 @@ async fn test_idle() {
 }
 
 #[tokio::test]
-async fn test_cover() {
+async fn test_cover_success() {
     pretty_env_logger::init();
     let peer1 = spawn_simple_peer().await;
     let peer2 = spawn_peer(vec![peer1.peer], true, 0).await;
     time::delay_for(DELAY_TIMEOUT).await;
-    peer2.onion.send_cover(1).unwrap();
+    peer2.ctx.send_cover(1).unwrap();
 }
 
 #[tokio::test]
 async fn test_cover_error() {
     let peer1 = spawn_simple_peer().await;
-    peer1.onion.send_cover(1).unwrap_err();
+    peer1.ctx.send_cover(1).unwrap_err();
 }
 
 #[tokio::test]
-async fn test_build() {
+async fn test_build_success() {
     let peer1 = spawn_simple_peer().await;
     let mut peer2 = spawn_simple_peer().await;
 
-    let ready_fut = peer1.onion.build_tunnel(peer2.peer);
+    let ready_fut = peer1.ctx.build_tunnel(peer2.peer);
     let ready_id = time::timeout(ROUND_TIMEOUT, ready_fut)
         .await
         .unwrap()
         .unwrap()
         .id();
-    let incoming_id = time::timeout(ERROR_TIMEOUT, peer2.events.next())
+    let incoming_id = time::timeout(ERROR_TIMEOUT, peer2.incoming.next())
         .await
         .unwrap()
         .unwrap()
@@ -97,7 +97,7 @@ async fn test_build_error() {
     let peer1 = spawn_simple_peer().await;
     let (peer2, _) = new_unique_peer();
 
-    let ready_fut = peer1.onion.build_tunnel(peer2);
+    let ready_fut = peer1.ctx.build_tunnel(peer2);
     time::timeout(ERROR_TIMEOUT, ready_fut)
         .await
         .unwrap()
@@ -113,13 +113,13 @@ async fn test_build_unstable_success() {
     let peer1 = spawn_peer(hop_candidates, false, 1).await;
     let mut peer3 = spawn_simple_peer().await;
 
-    let ready_fut = peer1.onion.build_tunnel(peer3.peer);
+    let ready_fut = peer1.ctx.build_tunnel(peer3.peer);
     let ready_id = time::timeout(ROUND_TIMEOUT, ready_fut)
         .await
         .unwrap()
         .unwrap()
         .id();
-    let incoming_id = time::timeout(ERROR_TIMEOUT, peer3.events.next())
+    let incoming_id = time::timeout(ERROR_TIMEOUT, peer3.incoming.next())
         .await
         .unwrap()
         .unwrap()
@@ -135,7 +135,7 @@ async fn test_build_unstable_error() {
     let peer1 = spawn_peer(hop_candidates, false, 1).await;
     let peer3 = spawn_simple_peer().await;
 
-    let ready_fut = peer1.onion.build_tunnel(peer3.peer);
+    let ready_fut = peer1.ctx.build_tunnel(peer3.peer);
     time::timeout(ERROR_TIMEOUT, ready_fut)
         .await
         .unwrap()
@@ -147,13 +147,13 @@ async fn test_data() {
     let peer1 = spawn_simple_peer().await;
     let mut peer2 = spawn_simple_peer().await;
 
-    let ready_fut = peer1.onion.build_tunnel(peer2.peer);
+    let ready_fut = peer1.ctx.build_tunnel(peer2.peer);
     let ready = time::timeout(ROUND_TIMEOUT, ready_fut)
         .await
         .unwrap()
         .unwrap();
 
-    let mut incoming = time::timeout(ERROR_TIMEOUT, peer2.events.next())
+    let mut incoming = time::timeout(ERROR_TIMEOUT, peer2.incoming.next())
         .await
         .unwrap()
         .unwrap();
@@ -172,13 +172,13 @@ async fn test_long_data() {
     let peer1 = spawn_simple_peer().await;
     let mut peer2 = spawn_simple_peer().await;
 
-    let ready_fut = peer1.onion.build_tunnel(peer2.peer);
+    let ready_fut = peer1.ctx.build_tunnel(peer2.peer);
     let ready = time::timeout(ROUND_TIMEOUT, ready_fut)
         .await
         .unwrap()
         .unwrap();
 
-    let mut incoming = time::timeout(ERROR_TIMEOUT, peer2.events.next())
+    let mut incoming = time::timeout(ERROR_TIMEOUT, peer2.incoming.next())
         .await
         .unwrap()
         .unwrap();
@@ -211,13 +211,13 @@ async fn test_long_data_two_hops() {
     let peer1 = spawn_peer(hops, false, 2).await;
     let mut peer2 = spawn_simple_peer().await;
 
-    let ready_fut = peer1.onion.build_tunnel(peer2.peer);
+    let ready_fut = peer1.ctx.build_tunnel(peer2.peer);
     let ready = time::timeout(ROUND_TIMEOUT, ready_fut)
         .await
         .unwrap()
         .unwrap();
 
-    let mut incoming = time::timeout(ERROR_TIMEOUT, peer2.events.next())
+    let mut incoming = time::timeout(ERROR_TIMEOUT, peer2.incoming.next())
         .await
         .unwrap()
         .unwrap();
@@ -240,13 +240,13 @@ async fn test_data_error_disconnected_destination() {
     let peer1 = spawn_simple_peer().await;
     let mut peer2 = spawn_simple_peer().await;
 
-    let ready_fut = peer1.onion.build_tunnel(peer2.peer);
+    let ready_fut = peer1.ctx.build_tunnel(peer2.peer);
     let ready = time::timeout(ROUND_TIMEOUT, ready_fut)
         .await
         .unwrap()
         .unwrap();
 
-    let incoming = time::timeout(ERROR_TIMEOUT, peer2.events.next())
+    let incoming = time::timeout(ERROR_TIMEOUT, peer2.incoming.next())
         .await
         .unwrap()
         .unwrap();
@@ -262,13 +262,13 @@ async fn test_data_error_disconnected_source() {
     let peer1 = spawn_simple_peer().await;
     let mut peer2 = spawn_simple_peer().await;
 
-    let ready_fut = peer1.onion.build_tunnel(peer2.peer);
+    let ready_fut = peer1.ctx.build_tunnel(peer2.peer);
     let ready = time::timeout(ROUND_TIMEOUT, ready_fut)
         .await
         .unwrap()
         .unwrap();
 
-    let mut incoming = time::timeout(ERROR_TIMEOUT, peer2.events.next())
+    let mut incoming = time::timeout(ERROR_TIMEOUT, peer2.incoming.next())
         .await
         .unwrap()
         .unwrap();
