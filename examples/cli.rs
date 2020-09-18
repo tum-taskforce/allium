@@ -1,6 +1,6 @@
 use onion::{
     OnionBuilder, OnionContext, OnionTunnel, OnionTunnelWriter, Peer, PeerProvider, RsaPrivateKey,
-    RsaPublicKey, TunnelDestination, TunnelId,
+    RsaPublicKey, TunnelId,
 };
 use std::collections::HashMap;
 use std::env;
@@ -59,10 +59,7 @@ async fn parse_command(
         Some("build") => {
             let dest_addr = parts.next().unwrap_or(DEFAULT_ADDR).parse().unwrap();
             let dest = Peer::new(dest_addr, hostkey.clone());
-            let tunnel = onion
-                .build_tunnel(TunnelDestination::Fixed(dest))
-                .await
-                .unwrap();
+            let tunnel = onion.build_tunnel(dest).await.unwrap();
             println!("Built tunnel with ID {}", tunnel.id());
             tunnels.insert(tunnel.id(), tunnel.writer());
             handle_tunnel_data(tunnel);
@@ -87,7 +84,7 @@ async fn parse_command(
         }
         Some("cover") => {
             let size = parts.next().unwrap().parse().unwrap();
-            onion.send_cover(size).await.unwrap();
+            onion.send_cover(size).unwrap();
         }
         Some("help") => {
             println!("Available Commands:");
