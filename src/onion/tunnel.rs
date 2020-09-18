@@ -525,6 +525,7 @@ impl TunnelHandler {
                 State::Ready { data_tx, data_rx }
             }
             (Event::Switchover, State::Destroying) => {
+                self.tunnel.end(&self.builder.rng).await?;
                 self.tunnel.unbuild(&self.builder.rng).await;
                 if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
                     next_tunnel.unbuild(&self.builder.rng).await;
