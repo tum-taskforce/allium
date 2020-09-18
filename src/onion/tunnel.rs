@@ -254,15 +254,15 @@ pub fn random_id(rng: &rand::SystemRandom) -> TunnelId {
 }
 
 #[derive(Clone, Debug)]
-pub enum TunnelDestination {
-    Fixed(Peer),
+pub enum Target {
+    Peer(Peer),
     Random,
 }
 
 #[derive(Clone)]
 pub(crate) struct TunnelBuilder {
     tunnel_id: TunnelId,
-    dest: TunnelDestination,
+    dest: Target,
     n_hops: usize,
     peer_provider: PeerProvider,
     rng: rand::SystemRandom,
@@ -271,7 +271,7 @@ pub(crate) struct TunnelBuilder {
 impl TunnelBuilder {
     pub(crate) fn new(
         tunnel_id: TunnelId,
-        dest: TunnelDestination,
+        dest: Target,
         n_hops: usize,
         peer_provider: PeerProvider,
         rng: rand::SystemRandom,
@@ -302,7 +302,7 @@ impl TunnelBuilder {
         let mut tunnel = None;
         for _ in 0..MAX_PEER_FAILURES {
             tunnel = match (tunnel.take(), &self.dest) {
-                (None, TunnelDestination::Fixed(peer)) if self.n_hops == 0 => {
+                (None, Target::Peer(peer)) if self.n_hops == 0 => {
                     Tunnel::init(self.tunnel_id, peer, &self.rng)
                         .await
                         .map_err(|e| warn!("Error while building tunnel: {:?}", e))
@@ -319,9 +319,7 @@ impl TunnelBuilder {
                         .map_err(|e| warn!("Error while building tunnel: {:?}", e))
                         .ok()
                 }
-                (Some(mut tunnel), TunnelDestination::Fixed(peer))
-                    if tunnel.len() == self.n_hops =>
-                {
+                (Some(mut tunnel), Target::Peer(peer)) if tunnel.len() == self.n_hops => {
                     match tunnel.extend(peer, &self.rng).await {
                         Err(TunnelError::Broken(e)) => {
                             warn!("Error while building tunnel: {:?}", e);
