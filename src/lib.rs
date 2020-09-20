@@ -5,7 +5,7 @@ use crate::onion::tunnel::{self, Target, TunnelBuilder, TunnelHandler};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
-use log::{info, warn};
+use log::{info, trace, warn};
 use ring::rand;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -182,8 +182,8 @@ impl fmt::Debug for OnionTunnelWriter {
 pub struct OnionContext {
     peer_provider: PeerProvider,
     n_hops: usize,
-    enable_cover: bool,
     events: broadcast::Sender<tunnel::Event>,
+    cover_tunnel: OnionTunnelWriter,
     rng: rand::SystemRandom,
 }
 
@@ -194,13 +194,31 @@ impl OnionContext {
         n_hops: usize,
         enable_cover: bool,
     ) -> Self {
-        OnionContext {
+        let (cover_tx, cover_rx) = mpsc::unbounded_channel();
+        let ctx = OnionContext {
             rng: rand::SystemRandom::new(),
             peer_provider,
             n_hops,
-            enable_cover,
             events,
+            cover_tunnel: OnionTunnelWriter {
+                tunnel_id: 0,
+                data_tx: cover_tx,
+            },
+        };
+
+        if enable_cover {
+            let mut cover_handler = CoverHandler {
+                cover_rx,
+                ctx: ctx.clone(),
+                cover_tunnel: None,
+            };
+
+            tokio::spawn(async move {
+                cover_handler.handle().await;
+            });
         }
+
+        ctx
     }
 
     /// Builds a new tunnel to `dest` over `n_hops` additional peers.
@@ -235,31 +253,60 @@ impl OnionContext {
     }
 
     pub fn send_cover(&self, size: u16) -> Result<()> {
-        let size = size as usize;
-        let packet_count = (size + protocol::MAX_DATA_SIZE - 1) / protocol::MAX_DATA_SIZE;
+        let packet_count = (size as usize + protocol::MAX_DATA_SIZE - 1) / protocol::MAX_DATA_SIZE;
         for _ in 0..packet_count {
-            self.events
-                .send(tunnel::Event::KeepAlive)
-                .map_err(|_| anyhow!("No tunnel to send cover traffic on."))?;
+            self.cover_tunnel
+                .write(Bytes::new())
+                .map_err(|_| anyhow!("Cover traffic is disabled"))?;
         }
         Ok(())
     }
+}
 
-    async fn ensure_cover_tunnel_exists(&mut self) {
-        let mut cover_tunnel = None;
-        let mut events = self.events.subscribe();
-        while let Ok(evt) = events.recv().await {
-            if !self.enable_cover || evt != tunnel::Event::Switchover {
-                continue;
-            }
+struct CoverHandler {
+    cover_rx: mpsc::UnboundedReceiver<Bytes>,
+    ctx: OnionContext,
+    cover_tunnel: Option<OnionTunnel>,
+}
 
-            cover_tunnel = match (cover_tunnel.take(), TUNNEL_COUNT.load(Ordering::Relaxed)) {
-                (None, 0) => self.build_tunnel_internal(Target::Random).await.ok(),
-                (None, _) => None,
-                (Some(_), 0) => unreachable!(),
-                (Some(t), 1) => Some(t),
-                (Some(_), _) => None,
+impl CoverHandler {
+    async fn handle(&mut self) {
+        let mut events = self.ctx.events.subscribe();
+        loop {
+            tokio::select! {
+                Ok(evt) = events.recv() => {
+                    if evt == tunnel::Event::Switchover {
+                        self.update_tunnel().await;
+                    }
+                }
+                Some(data) = self.cover_rx.recv() => {
+                    // FIXME errors in case cover_tunnel is None or write fails are not propagated
+                    // to send_cover.
+                    // Potential fix: store Arc<Mutex<Option<OnionTunnel>>> in OnionContext which
+                    // is updated by update_tunnel.
+                    if let Some(tunnel) = &self.cover_tunnel {
+                        tunnel.write(data);
+                    }
+                }
+                else => break,
             }
+        }
+    }
+
+    async fn update_tunnel(&mut self) {
+        self.cover_tunnel = match (
+            self.cover_tunnel.take(),
+            TUNNEL_COUNT.load(Ordering::Relaxed),
+        ) {
+            (None, 0) => self
+                .ctx
+                .build_tunnel_internal(tunnel::Target::Random)
+                .await
+                .ok(),
+            (None, _) => None,
+            (Some(_), 0) => unreachable!(),
+            (Some(t), 1) => Some(t),
+            (Some(_), _) => None,
         }
     }
 }
@@ -346,6 +393,7 @@ impl RoundHandler {
         loop {
             tokio::select! {
                 _ = round_timer.tick() => {
+                    info!("next round");
                     let _ = self.events.send(tunnel::Event::Switchover);
                 }
                 _ = keep_alive_timer.tick() => {
@@ -409,18 +457,9 @@ impl OnionBuilder {
             round_duration,
         } = self;
 
-        let (events, _) = broadcast::channel(1);
+        // capacity = 2 so both initial switch-over and keep-alive are received
+        let (events, _) = broadcast::channel(2);
         let (incoming_tx, incoming_rx) = mpsc::channel(INCOMING_BUFFER_SIZE);
-
-        // creates round handler task
-        tokio::spawn({
-            let events = events.clone();
-            let mut round_handler = RoundHandler {
-                events,
-                round_duration,
-            };
-            async move { round_handler.handle().await }
-        });
 
         // create task listening on p2p connections
         tokio::spawn({
@@ -428,12 +467,15 @@ impl OnionBuilder {
             async move { listener.listen_addr(listen_addr).await }
         });
 
-        let ctx = OnionContext::new(events, peer_provider, n_hops, enable_cover);
+        let ctx = OnionContext::new(events.clone(), peer_provider, n_hops, enable_cover);
+
+        // creates round handler task
         tokio::spawn({
-            let mut ctx = ctx.clone();
-            async move {
-                ctx.ensure_cover_tunnel_exists().await;
-            }
+            let mut round_handler = RoundHandler {
+                events,
+                round_duration,
+            };
+            async move { round_handler.handle().await }
         });
 
         let incoming = Incoming {
