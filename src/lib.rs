@@ -7,12 +7,14 @@ use bytes::Bytes;
 use futures::stream::StreamExt;
 use log::{info, trace, warn};
 use ring::rand;
+use std::collections::{hash_map, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::{cmp, fmt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::Stream;
+use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{self, Duration};
 
@@ -321,9 +323,11 @@ impl Incoming {
     }
 }
 
+#[derive(Clone)]
 struct OnionListener {
     hostkey: Arc<RsaPrivateKey>,
     incoming: mpsc::Sender<OnionTunnel>,
+    tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::Sender<OnionTunnel>>>>,
 }
 
 impl OnionListener {
@@ -331,6 +335,7 @@ impl OnionListener {
         OnionListener {
             hostkey: Arc::new(hostkey),
             incoming,
+            tunnels: Default::default(),
         }
     }
 
@@ -346,30 +351,66 @@ impl OnionListener {
         );
         let mut incoming = listener.incoming();
         while let Some(stream) = incoming.next().await {
-            self.handle_connection(stream?).await;
+            let stream = stream?;
+            info!("Accepted connection from {:?}", stream.peer_addr().unwrap());
+            let mut handler = self.clone();
+            tokio::spawn(async move {
+                handler.handle_connection(stream).await;
+            });
         }
         Ok(())
     }
 
-    async fn handle_connection(&self, stream: TcpStream) {
-        info!("Accepted connection from {:?}", stream.peer_addr().unwrap());
+    async fn handle_connection(&mut self, stream: TcpStream) {
         let socket = OnionSocket::new(stream);
-        let host_key = self.hostkey.clone();
-        let incoming = self.incoming.clone();
+        let (incoming_tx, mut incoming_rx) = mpsc::channel(1); // maybe convert to oneshot
+        let mut handler = match CircuitHandler::init(socket, &*self.hostkey, incoming_tx).await {
+            Ok(handler) => handler,
+            Err(e) => {
+                warn!("{}", e);
+                return;
+            }
+        };
 
         tokio::spawn(async move {
-            let mut handler = match CircuitHandler::init(socket, &host_key, incoming).await {
-                Ok(handler) => handler,
-                Err(e) => {
-                    warn!("{}", e);
-                    return;
-                }
-            };
-
             if let Err(e) = handler.handle().await {
                 warn!("{}", e);
             }
         });
+
+        if let Some(tunnel) = incoming_rx.recv().await {
+            self.handle_incoming(tunnel).await;
+        }
+    }
+
+    async fn handle_incoming(&mut self, tunnel: OnionTunnel) {
+        let mut tunnels = self.tunnels.lock().await;
+        match tunnels.entry(tunnel.id()) {
+            hash_map::Entry::Occupied(mut e) => {
+                // FIXME replace entry if send fails
+                e.get_mut().send(tunnel).await;
+            }
+            hash_map::Entry::Vacant(e) => {
+                let (tunnel_tx, mut tunnel_rx) = mpsc::channel(1);
+                // FIXME tunnels are never removed from the map
+                e.insert(tunnel_tx);
+
+                let (e_tunnel, mut e_data_tx, mut e_data_rx) = OnionTunnel::new(tunnel.id());
+                self.incoming.send(e_tunnel).await;
+
+                tokio::spawn(async move {
+                    let mut i_tunnel = tunnel;
+                    loop {
+                        tokio::select! {
+                            Some(t) = tunnel_rx.recv() => i_tunnel = t,
+                            Ok(d) = i_tunnel.read() => e_data_tx.send(d).await.unwrap(),
+                            Some(d) = e_data_rx.recv() => i_tunnel.write(d).unwrap(),
+                            else => break,
+                        }
+                    }
+                });
+            }
+        }
     }
 }
 
