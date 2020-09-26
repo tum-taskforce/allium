@@ -497,7 +497,7 @@ impl TunnelHandler {
         self.state = match (evt, state) {
             (Event::Switchover, State::Building { ready }) => {
                 self.tunnel.begin(&self.builder.rng).await?;
-                let (tunnel, data_tx, data_rx) = OnionTunnel::new(self.tunnel.id);
+                let (tunnel, data_tx, data_rx) = OnionTunnel::new(self.tunnel.id, true);
                 let _ = ready.send(Ok(tunnel)); // TODO handle closed
                 self.spawn_next_tunnel_task();
                 State::Ready { data_tx, data_rx }

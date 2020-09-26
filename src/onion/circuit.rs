@@ -346,7 +346,8 @@ impl CircuitHandler {
                 state
             }
             (TunnelRequest::Begin(tunnel_id), State::Default) => {
-                let (tunnel, tx, rx) = OnionTunnel::new(tunnel_id);
+                // counted = false because these tunnels will be mapped to counted tunnels by the OnionListener
+                let (tunnel, tx, rx) = OnionTunnel::new(tunnel_id, false);
                 if self.incoming.try_send(tunnel).is_ok() {
                     State::Endpoint {
                         tunnel_id,
