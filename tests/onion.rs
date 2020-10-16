@@ -65,7 +65,7 @@ async fn test_cover_success() {
     pretty_env_logger::init();
     let peer1 = spawn_simple_peer().await;
     let peer2 = spawn_peer(vec![peer1.peer], true, 0).await;
-    time::delay_for(DELAY_TIMEOUT).await;
+    time::sleep(DELAY_TIMEOUT).await;
     peer2.ctx.send_cover(1).unwrap();
 }
 
@@ -255,7 +255,7 @@ async fn test_data_error_disconnected_destination() {
     assert_eq!(incoming.id(), ready.id());
 
     drop(incoming);
-    time::delay_for(DELAY_TIMEOUT).await;
+    time::sleep(DELAY_TIMEOUT).await;
     ready.write(TEST_DATA).unwrap_err();
 }
 

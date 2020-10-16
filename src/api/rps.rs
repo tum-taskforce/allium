@@ -46,7 +46,7 @@ impl RpsModule {
     }
 
     pub fn into_stream(mut self) -> impl Stream<Item = Peer> {
-        let (mut peer_tx, peer_rx) = mpsc::channel(PEER_BUFFER_SIZE);
+        let (peer_tx, peer_rx) = mpsc::channel(PEER_BUFFER_SIZE);
         tokio::spawn(async move {
             loop {
                 let peer = self.query().await.unwrap();

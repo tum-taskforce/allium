@@ -18,12 +18,12 @@ pub(crate) fn read_rsa_keypair<P: AsRef<Path>>(path: P) -> Result<(RsaPrivateKey
     Ok((private_key, public_key))
 }
 
-async fn listen(mut listener: TcpListener, host_key: &RsaPrivateKey) -> Result<()> {
+async fn listen(listener: TcpListener, host_key: &RsaPrivateKey) -> Result<()> {
     println!(
         "Listening for P2P connections on {}",
         listener.local_addr()?
     );
-    let stream = listener.incoming().next().await.unwrap()?;
+    let (stream, _) = listener.accept().await?;
     let socket = OnionSocket::new(stream);
     let (incoming, _) = mpsc::channel(1);
     let mut handler = CircuitHandler::init(socket, host_key, incoming).await?;
@@ -251,7 +251,7 @@ async fn test_timeout() -> Result<()> {
         .unwrap();
     assert_eq!(ready.id(), tunnel_id);
 
-    let mut delay = time::delay_for(circuit::IDLE_TIMEOUT + ERROR_TIMEOUT);
+    let mut delay = time::sleep(circuit::IDLE_TIMEOUT + ERROR_TIMEOUT);
     tokio::select! {
         _ = handler_task => Ok(()),
         _ = &mut delay => {

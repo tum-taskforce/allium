@@ -158,7 +158,7 @@ impl CircuitHandler {
 
     async fn try_handle(&mut self) -> Result<()> {
         loop {
-            let mut delay = time::delay_for(IDLE_TIMEOUT);
+            let mut delay = time::sleep(IDLE_TIMEOUT);
 
             match &mut self.state {
                 State::Default => {
@@ -375,7 +375,7 @@ impl CircuitHandler {
                 TunnelRequest::Data(req_tunnel_id, data),
                 State::Endpoint {
                     tunnel_id,
-                    mut data_tx,
+                    data_tx,
                     data_rx,
                 },
             ) => {

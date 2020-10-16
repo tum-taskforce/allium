@@ -1,7 +1,6 @@
 use crate::Result;
 use anyhow::anyhow;
-use ini::ini::Properties;
-use ini::Ini;
+use ini::{Ini, Properties};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;

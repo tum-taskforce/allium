@@ -143,7 +143,7 @@ impl OnionTunnel {
     async fn forward_data(
         mut self,
         mut tunnel_rx: mpsc::Receiver<OnionTunnel>,
-        mut data_tx: mpsc::Sender<Bytes>,
+        data_tx: mpsc::Sender<Bytes>,
         mut data_rx: mpsc::UnboundedReceiver<Bytes>,
     ) -> Option<()> {
         loop {
@@ -369,21 +369,20 @@ impl OnionListener {
         self.listen(listener).await
     }
 
-    async fn listen(&mut self, mut listener: TcpListener) -> Result<()> {
+    async fn listen(&mut self, listener: TcpListener) -> Result<()> {
         info!(
             "Listening for P2P connections on {:?}",
             listener.local_addr()
         );
-        let mut incoming = listener.incoming();
-        while let Some(stream) = incoming.next().await {
-            let stream = stream?;
-            info!("Accepted connection from {:?}", stream.peer_addr().unwrap());
+
+        loop {
+            let (stream, peer_addr) = listener.accept().await?;
+            info!("Accepted connection from {:?}", peer_addr);
             let mut handler = self.clone();
             tokio::spawn(async move {
                 handler.handle_connection(stream).await;
             });
         }
-        Ok(())
     }
 
     async fn handle_connection(&mut self, stream: TcpStream) {

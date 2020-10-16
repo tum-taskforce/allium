@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
-use tokio::time::{timeout, Duration, Elapsed};
+use tokio::time::{error::Elapsed, timeout, Duration};
 
 /// timeout applied during a read on the socket
 const READ_TIMEOUT: Duration = Duration::from_secs(5);

@@ -11,18 +11,18 @@ edition = "2018"
 name = "onion"
 
 [dependencies]
-tokio = { version = "0.2", features = ["full"] }
+tokio = { version = "0.3", features = ["full"] }
 futures = "0.3"
 ring = { version = "0.16.15", features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.5"
 anyhow = "1.0"
 thiserror = "1.0"
-base64 = "0.12"
+base64 = "0.13"
 bytes = "0.5"
 log = "0.4"
 pretty_env_logger = "0.4"
-rust-ini = "0.15"
+rust-ini = "0.16"
 
 [patch.crates-io]
 ring = { git = "https://github.com/voidc/ring", branch = "open-no-tag" }

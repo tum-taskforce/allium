@@ -275,12 +275,12 @@ impl OnionModule {
     }
 
     pub async fn listen_api(&mut self, api_addr: SocketAddr) -> Result<()> {
-        let mut listener = TcpListener::bind(api_addr).await?;
+        let listener = TcpListener::bind(api_addr).await?;
         info!(
             "Listening for API connections on {:?}",
             listener.local_addr()
         );
-        let mut api_incoming = listener.incoming();
+        let mut api_incoming = listener;
 
         let (incoming, _) = broadcast::channel(1);
         loop {
