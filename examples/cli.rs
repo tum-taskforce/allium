@@ -1,4 +1,4 @@
-use onion::{
+use allium::{
     OnionBuilder, OnionContext, OnionTunnel, OnionTunnelWriter, Peer, PeerProvider, RsaPrivateKey,
     RsaPublicKey, TunnelId,
 };

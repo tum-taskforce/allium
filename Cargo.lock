@@ -16,6 +16,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "allium"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "futures",
+ "log",
+ "pretty_env_logger",
+ "ring",
+ "rust-ini",
+ "serde",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -723,24 +741,6 @@ name = "untrusted"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
-
-[[package]]
-name = "voidphone-onion"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "bytes",
- "futures",
- "log",
- "pretty_env_logger",
- "ring",
- "rust-ini",
- "serde",
- "thiserror",
- "tokio",
- "toml",
-]
 
 [[package]]
 name = "wasi"

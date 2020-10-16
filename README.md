@@ -1,5 +1,5 @@
-Voidphone Onion Module
-======================
+Allium
+======
 
 ## Building and Running
 Rust and Cargo (version 1.45.0 or newer) are required for building.

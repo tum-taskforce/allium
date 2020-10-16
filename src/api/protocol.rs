@@ -1,9 +1,9 @@
 use std::net::IpAddr;
 
 use crate::utils::{self, FromBytes, ToBytes};
+use allium::Result;
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use onion::Result;
 use serde::export::Formatter;
 use std::fmt;
 use std::net::SocketAddr;

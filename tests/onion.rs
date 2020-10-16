@@ -1,5 +1,5 @@
+use allium::{Incoming, OnionBuilder, OnionContext, Peer, PeerProvider, RsaPrivateKey};
 use bytes::Bytes;
-use onion::{Incoming, OnionBuilder, OnionContext, Peer, PeerProvider, RsaPrivateKey};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU16, Ordering};
 use time::Duration;

@@ -1,14 +1,24 @@
 [package]
-name = "voidphone-onion"
+name = "allium"
 version = "0.1.0"
 authors = [
     "Dominik Stolz <d.stolz@tum.de>",
     "Oliver Jacobsen <oliver.jacobsen@tum.de>"
 ]
+license = "MIT"
+description = "Allium is a Rust library for onion routing."
+repository = "https://github.com/tum-taskforce/allium"
+categories = ["network-programming"]
 edition = "2018"
+exclude = [
+    "docs/*",
+    "*.ini",
+    "*.pem",
+]
 
-[lib]
-name = "onion"
+[[bin]]
+name = "allium-deamon"
+path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "0.3", features = ["full"] }
