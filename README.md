@@ -1,3 +1,6 @@
+[![crates.io](https://img.shields.io/crates/v/allium.svg)](https://crates.io/crates/allium)
+[![docs](https://docs.rs/allium/badge.svg)](https://docs.rs/allium)
+
 Allium
 ======
 
