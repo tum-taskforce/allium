@@ -1,6 +1,12 @@
 Allium
 ======
 
+> Allium is a genus of monocotyledonous flowering plants that includes hundreds of species, including the cultivated onion, garlic, scallion, shallot, leek, and chives.
+> — [Wikipedia](https://en.wikipedia.org/wiki/Allium)
+
+Allium is a onion routing library written in Rust.
+It allows the communication over tunnels constructed with layered encryption across peers chosen from a provided pool. 
+
 ## Building and Running
 Rust and Cargo (version 1.45.0 or newer) are required for building.
 If not installed already, install both with [rustup](https://rustup.rs/).
