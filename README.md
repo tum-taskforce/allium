@@ -8,7 +8,8 @@ Allium
 > — [Wikipedia](https://en.wikipedia.org/wiki/Allium)
 
 Allium is a onion routing library written in Rust.
-It allows the communication over tunnels constructed with layered encryption across peers chosen from a provided pool. 
+It allows the communication over tunnels constructed with layered encryption across peers chosen from a provided pool.
+Apart from being used as a Rust library, Allium can also be run as a stand-alone daemon controlled over a unix socket. 
 
 ## Building and Running
 Rust and Cargo (version 1.45.0 or newer) are required for building.
@@ -21,7 +22,7 @@ $ cargo run --release -- [ARGS]
 Alternatively the steps of building and running can be done separately with:
 ```
 $ cargo build --release
-$ target/release/voidphone-onion [ARGS]
+$ target/release/allium-daemon [ARGS]
 ```
 
 Substitute `[ARGS]` with the following command line parameters:
@@ -93,9 +94,6 @@ cargo install --path .
 * We don't sanitize the output from the RPS, so tunnels with loops or random cover tunnels with ourselves as destination might be possible, depending on the implementation of the RPS.
 
 ## Future Work
-* Revise the public interface of the library to make it more socket-like
-    * `build` returns `TunnelSocket` which provides `read` and `write` methods
-* Publish the library to the crates.io registry
 * Write benchmarks and tune the performance
     * Reduce the number of allocations and copy operations
 * Tunnels are generally torn down forcefully instead of being deconstructed iteratively, despite the necessary functionality being partially implemented
