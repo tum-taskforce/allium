@@ -20,15 +20,20 @@ exclude = [
 name = "allium-daemon"
 path = "src/main.rs"
 
+[features]
+crypto_ring = ["ring", "base64", "once_cell"]
+
 [dependencies]
 tokio = { version = "0.3", features = ["full"] }
 futures = "0.3"
-ring = { version = "0.16.15", features = ["std"] }
+ring = { version = "0.16.15", features = ["std"], optional = true }
+openssl = { version = "0.10" }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.5"
 anyhow = "1.0"
 thiserror = "1.0"
-base64 = "0.13"
+base64 = { version = "0.13", optional = true }
+once_cell = { version = "1.5.2", optional = true }
 bytes = "0.5"
 log = "0.4"
 pretty_env_logger = "0.4"

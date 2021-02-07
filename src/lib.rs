@@ -6,7 +6,6 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use futures::stream::StreamExt;
 use log::{debug, info, trace, warn};
-use ring::rand;
 use std::collections::{hash_map, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -211,7 +210,6 @@ pub struct OnionContext {
     n_hops: usize,
     events: broadcast::Sender<tunnel::Event>,
     cover_tunnel: OnionTunnelWriter,
-    rng: rand::SystemRandom,
 }
 
 impl OnionContext {
@@ -223,7 +221,6 @@ impl OnionContext {
     ) -> Self {
         let (cover_tx, cover_rx) = mpsc::unbounded_channel();
         let ctx = OnionContext {
-            rng: rand::SystemRandom::new(),
             peer_provider,
             n_hops,
             events,
@@ -256,14 +253,9 @@ impl OnionContext {
 
     async fn build_tunnel_internal(&self, dest: Target) -> Result<OnionTunnel> {
         info!("Building tunnel to {:?}", dest);
-        let tunnel_id = tunnel::random_id(&self.rng);
-        let mut builder = TunnelBuilder::new(
-            tunnel_id,
-            dest,
-            self.n_hops,
-            self.peer_provider.clone(),
-            self.rng.clone(),
-        );
+        let tunnel_id = tunnel::random_id();
+        let mut builder =
+            TunnelBuilder::new(tunnel_id, dest, self.n_hops, self.peer_provider.clone());
 
         let (ready_tx, ready_rx) = oneshot::channel();
         let mut handler = TunnelHandler::new(

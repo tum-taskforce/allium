@@ -49,11 +49,10 @@ async fn spawn_n_peers(n: usize) -> Vec<Peer> {
 }
 
 async fn build_tunnel_n_peers(n: usize) -> Result<Tunnel> {
-    let rng = rand::SystemRandom::new();
     let peers = spawn_n_peers(n).await;
-    let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
+    let mut tunnel = Tunnel::init(0, &peers[0]).await?;
     for i in 1..n {
-        tunnel.extend(&peers[i], &rng).await?;
+        tunnel.extend(&peers[i]).await?;
     }
     Ok(tunnel)
 }
@@ -81,13 +80,12 @@ async fn test_handshake_three_peers() -> Result<()> {
 
 #[tokio::test]
 async fn test_truncate_zero_peers() -> Result<()> {
-    let rng = rand::SystemRandom::new();
     let peers = spawn_n_peers(2).await;
-    let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
+    let mut tunnel = Tunnel::init(0, &peers[0]).await?;
     for i in 1..2 {
-        tunnel.extend(&peers[i], &rng).await?;
+        tunnel.extend(&peers[i]).await?;
     }
-    match tunnel.truncate(0, &rng).await {
+    match tunnel.truncate(0).await {
         Err(TunnelError::Incomplete) => {
             assert_eq!(tunnel.len(), 2);
             Ok(())
@@ -100,27 +98,25 @@ async fn test_truncate_zero_peers() -> Result<()> {
 
 #[tokio::test]
 async fn test_truncate_one_peer() -> Result<()> {
-    let rng = rand::SystemRandom::new();
     let peers = spawn_n_peers(2).await;
-    let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
+    let mut tunnel = Tunnel::init(0, &peers[0]).await?;
     for i in 1..2 {
-        tunnel.extend(&peers[i], &rng).await?;
+        tunnel.extend(&peers[i]).await?;
     }
-    tunnel.truncate(1, &rng).await?;
+    tunnel.truncate(1).await?;
     assert_eq!(tunnel.len(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn test_truncate_two_peers() -> Result<()> {
-    let rng = rand::SystemRandom::new();
     let peers = spawn_n_peers(3).await;
-    let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
+    let mut tunnel = Tunnel::init(0, &peers[0]).await?;
     for i in 1..3 {
-        tunnel.extend(&peers[i], &rng).await?;
+        tunnel.extend(&peers[i]).await?;
     }
     assert_eq!(tunnel.len(), 3);
-    tunnel.truncate(2, &rng).await?;
+    tunnel.truncate(2).await?;
     assert_eq!(tunnel.len(), 1);
     Ok(())
 }
@@ -200,14 +196,13 @@ async fn test_data_bidirectional() -> Result<()> {
 
 #[tokio::test]
 async fn test_keep_alive() -> Result<()> {
-    let rng = rand::SystemRandom::new();
     let peers = spawn_n_peers(3).await;
-    let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
+    let mut tunnel = Tunnel::init(0, &peers[0]).await?;
     for i in 1..3 {
-        tunnel.extend(&peers[i], &rng).await?;
+        tunnel.extend(&peers[i]).await?;
     }
     assert_eq!(tunnel.len(), 3);
-    tunnel.keep_alive(&rng).await?;
+    tunnel.keep_alive().await?;
     assert_eq!(tunnel.len(), 3);
     Ok(())
 }
@@ -215,23 +210,16 @@ async fn test_keep_alive() -> Result<()> {
 #[tokio::test]
 #[ignore = "takes very long to complete"]
 async fn test_timeout() -> Result<()> {
-    let rng = rand::SystemRandom::new();
     let peers = spawn_n_peers(3).await;
-    let mut tunnel = Tunnel::init(0, &peers[0], &rng).await?;
+    let mut tunnel = Tunnel::init(0, &peers[0]).await?;
     for i in 1..2 {
-        tunnel.extend(&peers[i], &rng).await?;
+        tunnel.extend(&peers[i]).await?;
     }
     assert_eq!(tunnel.len(), 2);
 
     let tunnel_id = tunnel.id;
     let peer_provider = PeerProvider::from_stream(stream::iter(vec![peers[2].clone()]));
-    let builder = TunnelBuilder::new(
-        tunnel.id,
-        Target::Peer(peers[1].clone()),
-        1,
-        peer_provider,
-        rng,
-    );
+    let builder = TunnelBuilder::new(tunnel.id, Target::Peer(peers[1].clone()), 1, peer_provider);
 
     let (events_tx, events_rx) = broadcast::channel(1);
     let (ready_tx, ready_rx) = oneshot::channel();

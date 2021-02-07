@@ -12,8 +12,6 @@ use anyhow::Context;
 use bytes::Bytes;
 use log::trace;
 use log::warn;
-use ring::rand;
-use ring::rand::SecureRandom;
 use std::fmt;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
@@ -51,10 +49,10 @@ impl Circuit {
         self.socket().await.accept_opaque().await
     }
 
-    pub(crate) async fn teardown_with_timeout(&self, rng: &rand::SystemRandom) {
+    pub(crate) async fn teardown_with_timeout(&self) {
         match time::timeout(TEARDOWN_TIMEOUT, {
             // NOTE: Ignore any errors
-            self.socket().await.teardown(self.id, rng)
+            self.socket().await.teardown(self.id)
         })
         .await
         {
@@ -65,10 +63,10 @@ impl Circuit {
     }
 
     /// Generates a random circuit ID which is assumed to be unique.
-    pub(crate) fn random_id(rng: &rand::SystemRandom) -> CircuitId {
+    pub(crate) fn random_id() -> CircuitId {
         // FIXME an attacker may fill up all ids
         let mut id_buf = [0u8; 2];
-        rng.fill(&mut id_buf).unwrap();
+        crypto::fill_random(&mut id_buf);
         u16::from_le_bytes(id_buf)
     }
 }
@@ -84,7 +82,6 @@ pub(crate) struct CircuitHandler {
     in_circuit: Circuit,
     session_key: [SessionKey; 1],
     incoming: mpsc::Sender<OnionTunnel>,
-    rng: rand::SystemRandom,
     state: State,
 }
 
@@ -115,12 +112,11 @@ impl CircuitHandler {
             .await
             .context("Handshake with new connection failed")?;
 
-        let rng = rand::SystemRandom::new();
-        let (private_key, key) = crypto::generate_ephemeral_keypair(&rng);
-        let key = SignKey::sign(&key, host_key, &rng);
+        let (private_key, key) = crypto::generate_ephemeral_keypair();
+        let key = SignKey::sign(&key, host_key);
 
         socket
-            .finalize_handshake(circuit_id, key, &rng)
+            .finalize_handshake(circuit_id, key)
             .await
             .context("Could not finalize handshake")?;
 
@@ -130,12 +126,11 @@ impl CircuitHandler {
                 in_circuit,
                 session_key: [secret],
                 incoming,
-                rng,
                 state: State::Default,
             })
         } else {
             trace!("Incoming handshake failed post-handshake: unable to derive key");
-            let _ = time::timeout(TEARDOWN_TIMEOUT, socket.teardown(circuit_id, &rng)).await;
+            let _ = time::timeout(TEARDOWN_TIMEOUT, socket.teardown(circuit_id)).await;
             Err(anyhow!(
                 "Incoming handshake failed post-handshake: unable to derive key"
             ))
@@ -224,7 +219,7 @@ impl CircuitHandler {
                             out_circuit
                                 .socket()
                                 .await
-                                .forward_opaque(out_circuit.id, msg.payload, &self.rng)
+                                .forward_opaque(out_circuit.id, msg.payload)
                                 .await?;
                             Ok(())
                         } else {
@@ -281,7 +276,6 @@ impl CircuitHandler {
                                 self.in_circuit.id,
                                 peer_key,
                                 &self.session_key,
-                                &self.rng,
                             )
                             .await?;
                         State::Router { out_circuit }
@@ -290,12 +284,7 @@ impl CircuitHandler {
                         self.in_circuit
                             .socket()
                             .await
-                            .reject_tunnel_handshake(
-                                self.in_circuit.id,
-                                &self.session_key,
-                                e,
-                                &self.rng,
-                            )
+                            .reject_tunnel_handshake(self.in_circuit.id, &self.session_key, e)
                             .await?;
                         return Ok(());
                     }
@@ -313,7 +302,6 @@ impl CircuitHandler {
                         self.in_circuit.id,
                         &self.session_key,
                         TunnelExtendedError::BranchingDetected,
-                        &self.rng,
                     )
                     .await?;
 
@@ -326,7 +314,7 @@ impl CircuitHandler {
                 self.in_circuit
                     .socket()
                     .await
-                    .finalize_tunnel_truncate(self.in_circuit.id, &self.session_key, &self.rng)
+                    .finalize_tunnel_truncate(self.in_circuit.id, &self.session_key)
                     .await?;
 
                 State::Default
@@ -339,7 +327,6 @@ impl CircuitHandler {
                         self.in_circuit.id,
                         &self.session_key,
                         TunnelTruncatedError::NoNextHop,
-                        &self.rng,
                     )
                     .await?;
 
@@ -413,11 +400,11 @@ impl CircuitHandler {
 
         let mut relay_socket = OnionSocket::new(stream);
         let peer_key = relay_socket
-            .initiate_handshake(self.in_circuit.id, key, &self.rng)
+            .initiate_handshake(self.in_circuit.id, key)
             .await
             .map_err(|_| TunnelExtendedError::PeerUnreachable)?;
 
-        let out_circuit = Circuit::new(Circuit::random_id(&self.rng), relay_socket);
+        let out_circuit = Circuit::new(Circuit::random_id(), relay_socket);
 
         Ok((out_circuit, peer_key))
     }
@@ -437,7 +424,7 @@ impl CircuitHandler {
                 self.in_circuit
                     .socket()
                     .await
-                    .forward_opaque(self.in_circuit.id, msg.payload, &self.rng)
+                    .forward_opaque(self.in_circuit.id, msg.payload)
                     .await?;
                 Ok(())
             }
@@ -473,7 +460,7 @@ impl CircuitHandler {
                 self.in_circuit
                     .socket()
                     .await
-                    .send_data(circuit_id, tunnel_id, data, &self.session_key, &self.rng)
+                    .send_data(circuit_id, tunnel_id, data, &self.session_key)
                     .await?;
             }
             None => {
@@ -481,7 +468,7 @@ impl CircuitHandler {
                 self.in_circuit
                     .socket()
                     .await
-                    .end(circuit_id, tunnel_id, &self.session_key, &self.rng)
+                    .end(circuit_id, tunnel_id, &self.session_key)
                     .await?;
                 self.state = State::Default;
             }
@@ -509,12 +496,12 @@ impl CircuitHandler {
     }
 
     async fn teardown_in_circuit(&mut self) {
-        self.in_circuit.teardown_with_timeout(&self.rng).await;
+        self.in_circuit.teardown_with_timeout().await;
     }
 
     async fn teardown_out_circuit(&mut self) {
         if let State::Router { out_circuit } = &self.state {
-            out_circuit.teardown_with_timeout(&self.rng).await;
+            out_circuit.teardown_with_timeout().await;
         }
     }
 }

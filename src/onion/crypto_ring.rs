@@ -2,11 +2,17 @@ use crate::Result;
 use anyhow::anyhow;
 use anyhow::Context;
 use bytes::Bytes;
+use once_cell::sync::Lazy;
+use ring::rand::SecureRandom;
 use ring::signature::KeyPair;
-use ring::{aead, agreement, rand, signature};
+use ring::{aead, agreement, digest, rand, signature};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::ops::Deref;
 use std::path::Path;
+
+static GLOBAL_RNG: Lazy<rand::SystemRandom> = Lazy::new(|| rand::SystemRandom::new());
+pub(crate) const NONCE_LEN: usize = aead::NONCE_LEN;
 
 pub(crate) struct EphemeralPrivateKey(agreement::EphemeralPrivateKey);
 pub(crate) struct EphemeralPublicKey(agreement::UnparsedPublicKey<Bytes>);
@@ -16,9 +22,20 @@ pub struct RsaPrivateKey(signature::RsaKeyPair);
 pub(crate) struct SessionKey(aead::LessSafeKey);
 // TODO consider storing generic B: AsRef<[u8]> instead of Bytes (-> avoid allocations)
 
+pub(crate) fn fill_random(buf: &mut [u8]) {
+    GLOBAL_RNG.fill(buf).unwrap()
+}
+
+pub(crate) fn digest(buf: &[u8]) -> impl AsRef<[u8]> {
+    digest::digest(&digest::SHA256, buf)
+}
+
 impl EphemeralPrivateKey {
-    pub(crate) fn generate(rng: &rand::SystemRandom) -> Self {
-        Self(agreement::EphemeralPrivateKey::generate(&agreement::X25519, rng).unwrap())
+    pub(crate) fn generate() -> Self {
+        Self(
+            agreement::EphemeralPrivateKey::generate(&agreement::X25519, GLOBAL_RNG.deref())
+                .unwrap(),
+        )
     }
 
     pub(crate) fn public_key(&self) -> EphemeralPublicKey {
@@ -41,10 +58,8 @@ impl EphemeralPublicKey {
     }
 }
 
-pub(crate) fn generate_ephemeral_keypair(
-    rng: &rand::SystemRandom,
-) -> (EphemeralPrivateKey, EphemeralPublicKey) {
-    let private_key = EphemeralPrivateKey::generate(rng);
+pub(crate) fn generate_ephemeral_keypair() -> (EphemeralPrivateKey, EphemeralPublicKey) {
+    let private_key = EphemeralPrivateKey::generate();
     let public_key = private_key.public_key();
     (private_key, public_key)
 }
@@ -73,14 +88,13 @@ impl RsaPrivateKey {
         RsaPublicKey(public_key)
     }
 
-    pub(crate) fn sign(
-        &self,
-        rng: &rand::SystemRandom,
-        data: &[u8],
-        signature: &mut [u8],
-    ) -> Result<()> {
-        self.0
-            .sign(&signature::RSA_PKCS1_SHA256, rng, data, signature)?;
+    pub(crate) fn sign(&self, data: &[u8], signature: &mut [u8]) -> Result<()> {
+        self.0.sign(
+            &signature::RSA_PKCS1_SHA256,
+            GLOBAL_RNG.deref(),
+            data,
+            signature,
+        )?;
         Ok(())
     }
 }
@@ -125,7 +139,7 @@ impl SessionKey {
         Ok(SessionKey(aead::LessSafeKey::new(unbound)))
     }
 
-    pub(crate) fn encrypt(&self, nonce: [u8; aead::NONCE_LEN], data: &mut [u8]) -> Result<()> {
+    pub(crate) fn encrypt(&self, nonce: [u8; NONCE_LEN], data: &mut [u8]) -> Result<()> {
         let nonce = aead::Nonce::assume_unique_for_key(nonce);
         let _tag = self
             .0
@@ -133,7 +147,7 @@ impl SessionKey {
         Ok(())
     }
 
-    pub(crate) fn decrypt(&self, nonce: [u8; aead::NONCE_LEN], data: &mut [u8]) -> Result<()> {
+    pub(crate) fn decrypt(&self, nonce: [u8; NONCE_LEN], data: &mut [u8]) -> Result<()> {
         let nonce = aead::Nonce::assume_unique_for_key(nonce);
         self.0
             .open_in_place_no_tag(nonce, aead::Aad::empty(), data)?;

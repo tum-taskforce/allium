@@ -1,11 +1,9 @@
-use crate::onion::crypto::{EphemeralPublicKey, SessionKey};
+use crate::onion::crypto::{self, EphemeralPublicKey, SessionKey};
 use crate::utils::{self, FromBytes, ToBytes, TryFromBytes};
 use crate::{CircuitId, TunnelId};
 use crate::{Result, RsaPrivateKey, RsaPublicKey};
 use anyhow::{anyhow, Context};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use ring::rand::SecureRandom;
-use ring::{aead, digest, rand};
 use std::fmt;
 use std::net::SocketAddr;
 use thiserror::Error;
@@ -34,7 +32,7 @@ const SIGNATURE_LEN: usize = 512;
 const KEY_LEN: usize = 32;
 
 pub(crate) const MESSAGE_SIZE: usize = 1024;
-pub(crate) const MAX_DATA_SIZE: usize = MESSAGE_SIZE - 4 - aead::NONCE_LEN - DIGEST_LEN - 8;
+pub(crate) const MAX_DATA_SIZE: usize = MESSAGE_SIZE - 4 - crypto::NONCE_LEN - DIGEST_LEN - 8;
 
 #[derive(Error, Debug)]
 pub(crate) enum CircuitProtocolError {
@@ -63,7 +61,6 @@ pub(crate) type Key = EphemeralPublicKey;
 pub(crate) struct SignKey<'a> {
     key: &'a Key,
     key_pair: &'a RsaPrivateKey,
-    rng: &'a rand::SystemRandom,
 }
 
 pub(crate) struct VerifyKey {
@@ -121,13 +118,12 @@ pub(crate) struct CircuitOpaque<P> {
 
 pub(crate) struct CircuitOpaquePayload<'a, M> {
     pub(crate) msg: &'a M,
-    pub(crate) rng: &'a rand::SystemRandom,
     pub(crate) encrypt_keys: &'a [SessionKey],
 }
 
 pub(crate) struct CircuitOpaqueBytes {
     pub(crate) bytes: BytesMut,
-    nonce: [u8; aead::NONCE_LEN],
+    nonce: [u8; crypto::NONCE_LEN],
 }
 
 /// A message exchanged between onion peers.
@@ -212,7 +208,7 @@ pub(crate) trait TryFromBytesExt<E: fmt::Debug>:
     where
         Self: Sized,
     {
-        let digest = digest::digest(&digest::SHA256, &buf[DIGEST_LEN..]);
+        let digest = crypto::digest(&buf[DIGEST_LEN..]);
         if digest.as_ref()[..DIGEST_LEN] == buf[..DIGEST_LEN] {
             buf.advance(DIGEST_LEN);
             Self::try_read_from(buf)
@@ -225,19 +221,19 @@ pub(crate) trait TryFromBytesExt<E: fmt::Debug>:
 impl<T, E: fmt::Debug> TryFromBytesExt<E> for T where T: TryFromBytes<TunnelProtocolError<E>> {}
 
 pub(crate) trait ToBytesExt: ToBytes {
-    fn write_with_digest_to(&self, buf: &mut BytesMut, rng: &rand::SystemRandom, pad_size: usize) {
+    fn write_with_digest_to(&self, buf: &mut BytesMut, pad_size: usize) {
         let digest_start = buf.len();
         let payload_start = digest_start + DIGEST_LEN;
         buf.resize(payload_start, 0);
         let mut payload_buf = buf.split_off(payload_start);
-        self.write_padded_to(&mut payload_buf, rng, pad_size - DIGEST_LEN);
+        self.write_padded_to(&mut payload_buf, pad_size - DIGEST_LEN);
         // digest must include padding as size is unknown during verification
-        let digest = digest::digest(&digest::SHA256, &payload_buf[..]);
+        let digest = crypto::digest(&payload_buf[..]);
         buf[digest_start..payload_start].copy_from_slice(&digest.as_ref()[..DIGEST_LEN]);
         buf.unsplit(payload_buf);
     }
 
-    fn write_padded_to(&self, buf: &mut BytesMut, rng: &rand::SystemRandom, pad_size: usize) {
+    fn write_padded_to(&self, buf: &mut BytesMut, pad_size: usize) {
         self.write_to(buf);
         let msg_len = buf.len();
         assert!(
@@ -247,7 +243,7 @@ pub(crate) trait ToBytesExt: ToBytes {
             pad_size
         );
         buf.resize(pad_size, 0);
-        rng.fill(&mut buf.as_mut()[msg_len..]).unwrap();
+        crypto::fill_random(&mut buf.as_mut()[msg_len..]);
     }
 }
 
@@ -359,8 +355,8 @@ impl FromBytes for CircuitProtocolResult<CircuitOpaque<CircuitOpaqueBytes>> {
             CIRCUIT_OPAQUE => {
                 buf.get_u8();
                 let circuit_id = buf.get_u16();
-                let mut nonce = [0u8; aead::NONCE_LEN];
-                buf.split_to(aead::NONCE_LEN).copy_to_slice(&mut nonce);
+                let mut nonce = [0u8; crypto::NONCE_LEN];
+                buf.split_to(crypto::NONCE_LEN).copy_to_slice(&mut nonce);
                 let payload = buf.split_off(0);
                 Ok(CircuitOpaque {
                     circuit_id,
@@ -396,7 +392,7 @@ impl ToBytes for CircuitOpaque<CircuitOpaqueBytes> {
 }
 
 impl<'a, M: ToBytes> CircuitOpaque<CircuitOpaquePayload<'a, M>> {
-    fn encrypt(&self, buf: &mut BytesMut, nonce: [u8; aead::NONCE_LEN]) -> Result<()> {
+    fn encrypt(&self, buf: &mut BytesMut, nonce: [u8; crypto::NONCE_LEN]) -> Result<()> {
         for key in self.payload.encrypt_keys.iter() {
             key.encrypt(nonce, buf.as_mut())
                 .context("Failed to encrypt message")?;
@@ -414,15 +410,13 @@ impl<'a, M: ToBytes> ToBytes for CircuitOpaque<CircuitOpaquePayload<'a, M>> {
         buf.put_u8(CIRCUIT_OPAQUE);
         buf.put_u8(0);
         buf.put_u16(self.circuit_id);
-        let mut nonce = [0u8; aead::NONCE_LEN];
-        self.payload.rng.fill(&mut nonce).unwrap(); // TODO maybe use counter instead
+        let mut nonce = [0u8; crypto::NONCE_LEN];
+        crypto::fill_random(&mut nonce); // TODO maybe use counter instead
         buf.extend_from_slice(&nonce);
         let mut payload_buf = buf.split_off(buf.len());
-        self.payload.msg.write_with_digest_to(
-            &mut payload_buf,
-            self.payload.rng,
-            MESSAGE_SIZE - 4 - aead::NONCE_LEN,
-        );
+        self.payload
+            .msg
+            .write_with_digest_to(&mut payload_buf, MESSAGE_SIZE - 4 - crypto::NONCE_LEN);
         self.encrypt(&mut payload_buf, nonce).unwrap();
         buf.unsplit(payload_buf);
     }
@@ -701,42 +695,32 @@ impl ToBytes for SignKey<'_> {
         buf.resize(sig_end, 0);
         buf.put(self.key.bytes().as_ref());
         self.key_pair
-            .sign(
-                self.rng,
-                self.key.bytes().as_ref(),
-                &mut buf[sig_start..sig_end],
-            )
+            .sign(self.key.bytes().as_ref(), &mut buf[sig_start..sig_end])
             .unwrap();
     }
 }
 
 impl<'a> SignKey<'a> {
-    pub(crate) fn sign(
-        key: &'a Key,
-        key_pair: &'a RsaPrivateKey,
-        rng: &'a rand::SystemRandom,
-    ) -> Self {
-        SignKey { key, key_pair, rng }
+    pub(crate) fn sign(key: &'a Key, key_pair: &'a RsaPrivateKey) -> Self {
+        SignKey { key, key_pair }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::onion::crypto::EphemeralPrivateKey;
+    use crate::onion::crypto::{self, EphemeralPrivateKey};
     use crate::onion::tests::read_rsa_keypair;
-    use ring::rand;
 
     #[test]
     fn test_circuit_create() -> Result<()> {
-        let rng = rand::SystemRandom::new();
-        let key = EphemeralPrivateKey::generate(&rng).public_key();
+        let key = EphemeralPrivateKey::generate().public_key();
         let key_bytes = key.bytes().clone();
 
         let circuit_id = 0;
         let msg = CircuitCreate { circuit_id, key };
         let mut buf = BytesMut::with_capacity(msg.size());
-        msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        msg.write_padded_to(&mut buf, MESSAGE_SIZE);
         let read_msg = CircuitCreate::try_read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
@@ -747,17 +731,16 @@ mod tests {
 
     #[test]
     fn test_circuit_created() -> Result<()> {
-        let rng = rand::SystemRandom::new();
-        let key = EphemeralPrivateKey::generate(&rng).public_key();
+        let key = EphemeralPrivateKey::generate().public_key();
         let key_bytes = key.bytes().clone();
 
         let (rsa_private, rsa_public) = read_rsa_keypair("testkey.pem")?;
-        let key = SignKey::sign(&key, &rsa_private, &rng);
+        let key = SignKey::sign(&key, &rsa_private);
 
         let circuit_id = 0;
         let msg = CircuitCreated { circuit_id, key };
         let mut buf = BytesMut::with_capacity(msg.size());
-        msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        msg.write_padded_to(&mut buf, MESSAGE_SIZE);
         let read_msg = CircuitCreated::try_read_from(&mut buf)?;
 
         assert_eq!(circuit_id, read_msg.circuit_id);
@@ -769,11 +752,10 @@ mod tests {
 
     #[test]
     fn test_tunnel_extend() -> Result<()> {
-        let rng = rand::SystemRandom::new();
-        let key = EphemeralPrivateKey::generate(&rng).public_key();
+        let key = EphemeralPrivateKey::generate().public_key();
         let key_bytes = key.bytes().clone();
 
-        let aes_keys = generate_aes_keys(&rng)?;
+        let aes_keys = generate_aes_keys()?;
 
         let dest = "127.0.0.1:4201".parse().unwrap();
         let tunnel_msg = TunnelRequest::Extend(dest, key);
@@ -782,13 +764,12 @@ mod tests {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_msg,
-                rng: &rng,
                 encrypt_keys: &aes_keys,
             },
         };
 
         let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
-        //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        //msg.write_padded_to(&mut buf, MESSAGE_SIZE);
         msg.write_to(&mut buf);
         assert_eq!(buf.len(), MESSAGE_SIZE);
         let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
@@ -807,14 +788,13 @@ mod tests {
 
     #[test]
     fn test_tunnel_extended_success() -> Result<()> {
-        let rng = rand::SystemRandom::new();
-        let key = EphemeralPrivateKey::generate(&rng).public_key();
+        let key = EphemeralPrivateKey::generate().public_key();
         let key_bytes = key.bytes().clone();
 
         let (rsa_private, rsa_public) = read_rsa_keypair("testkey.pem")?;
-        let key = SignKey::sign(&key, &rsa_private, &rng);
+        let key = SignKey::sign(&key, &rsa_private);
 
-        let aes_keys = generate_aes_keys(&rng)?;
+        let aes_keys = generate_aes_keys()?;
 
         let tunnel_msg = TunnelResponseExtended { peer_key: key };
         let circuit_id = 0;
@@ -822,13 +802,12 @@ mod tests {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_msg,
-                rng: &rng,
                 encrypt_keys: &aes_keys,
             },
         };
 
         let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
-        //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        //msg.write_padded_to(&mut buf, MESSAGE_SIZE);
         msg.write_to(&mut buf);
         assert_eq!(buf.len(), MESSAGE_SIZE);
         let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
@@ -845,8 +824,7 @@ mod tests {
 
     #[test]
     fn test_tunnel_extended_error() -> Result<()> {
-        let rng = rand::SystemRandom::new();
-        let aes_keys = generate_aes_keys(&rng)?;
+        let aes_keys = generate_aes_keys()?;
 
         let tunnel_msg = TunnelExtendedError::PeerUnreachable;
         let circuit_id = 0;
@@ -854,13 +832,12 @@ mod tests {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_msg,
-                rng: &rng,
                 encrypt_keys: &aes_keys,
             },
         };
 
         let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
-        //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        //msg.write_padded_to(&mut buf, MESSAGE_SIZE);
         msg.write_to(&mut buf);
         assert_eq!(buf.len(), MESSAGE_SIZE);
         let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
@@ -880,9 +857,7 @@ mod tests {
 
     #[test]
     fn test_tunnel_truncated_success() -> Result<()> {
-        let rng = rand::SystemRandom::new();
-
-        let aes_keys = generate_aes_keys(&rng)?;
+        let aes_keys = generate_aes_keys()?;
 
         let tunnel_msg = TunnelResponseTruncated;
         let circuit_id = 0;
@@ -890,13 +865,12 @@ mod tests {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_msg,
-                rng: &rng,
                 encrypt_keys: &aes_keys,
             },
         };
 
         let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
-        //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        //msg.write_padded_to(&mut buf, MESSAGE_SIZE);
         msg.write_to(&mut buf);
         assert_eq!(buf.len(), MESSAGE_SIZE);
         let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
@@ -909,9 +883,7 @@ mod tests {
 
     #[test]
     fn test_tunnel_truncated_error() -> Result<()> {
-        let rng = rand::SystemRandom::new();
-
-        let aes_keys = generate_aes_keys(&rng)?;
+        let aes_keys = generate_aes_keys()?;
 
         let tunnel_msg = TunnelTruncatedError::NoNextHop;
         let circuit_id = 0;
@@ -919,13 +891,12 @@ mod tests {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_msg,
-                rng: &rng,
                 encrypt_keys: &aes_keys,
             },
         };
 
         let mut buf = BytesMut::with_capacity(MESSAGE_SIZE);
-        //msg.write_padded_to(&mut buf, &rng, MESSAGE_SIZE);
+        //msg.write_padded_to(&mut buf, MESSAGE_SIZE);
         msg.write_to(&mut buf);
         assert_eq!(buf.len(), MESSAGE_SIZE);
         let mut read_msg = CircuitOpaque::try_read_from(&mut buf)?;
@@ -946,9 +917,9 @@ mod tests {
         Ok(())
     }
 
-    fn generate_aes_keys(rng: &rand::SystemRandom) -> Result<[SessionKey; 1]> {
+    fn generate_aes_keys() -> Result<[SessionKey; 1]> {
         let mut aes_key_bytes = [0u8; 16];
-        rng.fill(&mut aes_key_bytes)?;
+        crypto::fill_random(&mut aes_key_bytes);
         Ok([SessionKey::from_bytes(&aes_key_bytes)?])
     }
 }

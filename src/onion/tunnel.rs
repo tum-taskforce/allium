@@ -10,8 +10,6 @@ use crate::{PeerProvider, Result};
 use anyhow::{anyhow, Context};
 use bytes::Bytes;
 use log::{trace, warn};
-use ring::rand;
-use ring::rand::SecureRandom;
 use std::fmt;
 use std::mem;
 use std::ops::Deref;
@@ -65,17 +63,17 @@ pub(crate) struct Tunnel {
 
 impl Tunnel {
     /// Performs a circuit handshake with the first hop (peer).
-    pub(crate) async fn init(id: TunnelId, peer: &Peer, rng: &rand::SystemRandom) -> Result<Self> {
+    pub(crate) async fn init(id: TunnelId, peer: &Peer) -> Result<Self> {
         trace!("Creating tunnel {} to peer {}", id, &peer.addr);
-        let (private_key, key) = crypto::generate_ephemeral_keypair(rng);
+        let (private_key, key) = crypto::generate_ephemeral_keypair();
 
-        let circuit_id = Circuit::random_id(rng);
+        let circuit_id = Circuit::random_id();
         let stream = TcpStream::connect(peer.addr)
             .await
             .context("Could not connect to peer")?;
         let mut socket = OnionSocket::new(stream);
         let peer_key = socket
-            .initiate_handshake(circuit_id, key, rng)
+            .initiate_handshake(circuit_id, key)
             .await
             .context("Handshake failed while initializing new tunnel")?;
 
@@ -107,19 +105,15 @@ impl Tunnel {
     }
 
     /// Performs a key exchange with the given peer and extends the tunnel with a new hop
-    pub(crate) async fn extend(
-        &mut self,
-        peer: &Peer,
-        rng: &rand::SystemRandom,
-    ) -> TunnelResult<()> {
+    pub(crate) async fn extend(&mut self, peer: &Peer) -> TunnelResult<()> {
         trace!("Extending tunnel {} to peer {}", self.id, &peer.addr);
-        let (private_key, key) = crypto::generate_ephemeral_keypair(rng);
+        let (private_key, key) = crypto::generate_ephemeral_keypair();
 
         let peer_key = self
             .out_circuit
             .socket()
             .await
-            .initiate_tunnel_handshake(self.out_circuit.id, peer.addr, key, &self.session_keys, rng)
+            .initiate_tunnel_handshake(self.out_circuit.id, peer.addr, key, &self.session_keys)
             .await?;
 
         // Any failure because of any incorrect secret answer should not cause our tunnel to become corrupted
@@ -129,7 +123,7 @@ impl Tunnel {
         } else {
             // key derivation failed, the final hop needs to be truncated
             // if the truncate fails too, the tunnel is broken
-            self.truncate(0, rng)
+            self.truncate(0)
                 .await
                 .map_err(|_| TunnelError::Broken(None))?;
             Err(TunnelError::Incomplete)
@@ -140,11 +134,7 @@ impl Tunnel {
     /// an error code, `Incomplete` will be returned.
     ///
     /// Returns `Incomplete` if the resulting hop count would be less than one.
-    pub(crate) async fn truncate(
-        &mut self,
-        n: usize,
-        rng: &rand::SystemRandom,
-    ) -> TunnelResult<()> {
+    pub(crate) async fn truncate(&mut self, n: usize) -> TunnelResult<()> {
         if n >= self.session_keys.len() {
             return Err(TunnelError::Incomplete);
         }
@@ -152,7 +142,7 @@ impl Tunnel {
         self.out_circuit
             .socket()
             .await
-            .truncate_tunnel(self.out_circuit.id, &self.session_keys[n..], rng)
+            .truncate_tunnel(self.out_circuit.id, &self.session_keys[n..])
             .await?;
 
         for _ in 0..n {
@@ -176,21 +166,21 @@ impl Tunnel {
     /// before tearing down the old tunnel. Be aware that the other endpoint peer should not be
     /// allowed to use the old tunnel indefinitely despite receiving a `TUNNEL END` packet. Any old
     /// tunnel that has been replaced should only have finite lifetime.
-    pub(crate) async fn begin(&self, rng: &rand::SystemRandom) -> TunnelResult<()> {
+    pub(crate) async fn begin(&self) -> TunnelResult<()> {
         self.out_circuit
             .socket()
             .await
-            .begin(self.out_circuit.id, self.id, &self.session_keys, rng)
+            .begin(self.out_circuit.id, self.id, &self.session_keys)
             .await?;
         Ok(())
     }
 
     /// Ends a data connection with the last hop in the tunnel
-    pub(crate) async fn end(&self, rng: &rand::SystemRandom) -> TunnelResult<()> {
+    pub(crate) async fn end(&self) -> TunnelResult<()> {
         self.out_circuit
             .socket()
             .await
-            .end(self.out_circuit.id, self.id, &self.session_keys, rng)
+            .end(self.out_circuit.id, self.id, &self.session_keys)
             .await?;
         Ok(())
     }
@@ -201,24 +191,20 @@ impl Tunnel {
     /// This can be used to prevent a tunnel from timing out or to send cover traffic to the final
     /// hop. This may also be used to check the integrity, since any failure would cause the hops
     /// to initiate a teardown on the tunnel.
-    pub(crate) async fn keep_alive(&self, rng: &rand::SystemRandom) -> TunnelResult<()> {
+    pub(crate) async fn keep_alive(&self) -> TunnelResult<()> {
         self.out_circuit
             .socket()
             .await
-            .send_keep_alive(self.out_circuit.id, &self.session_keys, rng)
+            .send_keep_alive(self.out_circuit.id, &self.session_keys)
             .await?;
         Ok(())
     }
 
-    pub(crate) async fn _truncate_to_length(
-        &mut self,
-        n_hops: usize,
-        rng: &rand::SystemRandom,
-    ) -> TunnelResult<()> {
+    pub(crate) async fn _truncate_to_length(&mut self, n_hops: usize) -> TunnelResult<()> {
         let mut num_fails = 0;
 
         while self.session_keys.len() > n_hops + 1 {
-            match self.truncate(1, rng).await {
+            match self.truncate(1).await {
                 Err(TunnelError::Broken(e)) => {
                     // do not try to fix this error to prevent endless looping
                     return Err(TunnelError::Broken(e));
@@ -236,20 +222,20 @@ impl Tunnel {
         Ok(())
     }
 
-    async fn unbuild(&self, rng: &rand::SystemRandom) {
+    async fn unbuild(&self) {
         // TODO graceful deconstruction
-        self.teardown(rng).await;
+        self.teardown().await;
     }
 
-    async fn teardown(&self, rng: &rand::SystemRandom) {
-        self.out_circuit.teardown_with_timeout(rng).await;
+    async fn teardown(&self) {
+        self.out_circuit.teardown_with_timeout().await;
     }
 }
 
-pub fn random_id(rng: &rand::SystemRandom) -> TunnelId {
+pub fn random_id() -> TunnelId {
     // FIXME an attacker may fill up all ids
     let mut id_buf = [0u8; 4];
-    rng.fill(&mut id_buf).unwrap();
+    crypto::fill_random(&mut id_buf);
     u32::from_le_bytes(id_buf)
 }
 
@@ -265,7 +251,6 @@ pub(crate) struct TunnelBuilder {
     dest: Target,
     n_hops: usize,
     peer_provider: PeerProvider,
-    rng: rand::SystemRandom,
 }
 
 impl TunnelBuilder {
@@ -274,14 +259,12 @@ impl TunnelBuilder {
         dest: Target,
         n_hops: usize,
         peer_provider: PeerProvider,
-        rng: rand::SystemRandom,
     ) -> Self {
         TunnelBuilder {
             tunnel_id,
             dest,
             n_hops,
             peer_provider,
-            rng,
         }
     }
 
@@ -303,7 +286,7 @@ impl TunnelBuilder {
         for _ in 0..MAX_PEER_FAILURES {
             tunnel = match (tunnel.take(), &self.dest) {
                 (None, Target::Peer(peer)) if self.n_hops == 0 => {
-                    Tunnel::init(self.tunnel_id, peer, &self.rng)
+                    Tunnel::init(self.tunnel_id, peer)
                         .await
                         .map_err(|e| warn!("Error while building tunnel: {:?}", e))
                         .ok()
@@ -314,16 +297,16 @@ impl TunnelBuilder {
                         .random_peer()
                         .await
                         .context(anyhow!("Failed to get random peer"))?;
-                    Tunnel::init(self.tunnel_id, &peer, &self.rng)
+                    Tunnel::init(self.tunnel_id, &peer)
                         .await
                         .map_err(|e| warn!("Error while building tunnel: {:?}", e))
                         .ok()
                 }
                 (Some(mut tunnel), Target::Peer(peer)) if tunnel.len() == self.n_hops => {
-                    match tunnel.extend(peer, &self.rng).await {
+                    match tunnel.extend(peer).await {
                         Err(TunnelError::Broken(e)) => {
                             warn!("Error while building tunnel: {:?}", e);
-                            tunnel.teardown(&self.rng).await;
+                            tunnel.teardown().await;
                             None
                         }
                         Err(TunnelError::Incomplete) => Some(tunnel),
@@ -337,10 +320,10 @@ impl TunnelBuilder {
                         .await
                         .context(anyhow!("Failed to get random peer"))?;
 
-                    match tunnel.extend(&peer, &self.rng).await {
+                    match tunnel.extend(&peer).await {
                         Err(TunnelError::Broken(e)) => {
                             warn!("Error while building tunnel: {:?}", e);
-                            tunnel.teardown(&self.rng).await;
+                            tunnel.teardown().await;
                             None
                         }
                         Err(TunnelError::Incomplete) => Some(tunnel),
@@ -399,7 +382,7 @@ impl TunnelHandler {
         if let Err(e) = self.try_handle().await {
             warn!("Error in TunnelHandler: {}", e);
             self.state = State::Destroyed;
-            self.tunnel.teardown(&self.builder.rng).await;
+            self.tunnel.teardown().await;
         }
     }
 
@@ -472,13 +455,7 @@ impl TunnelHandler {
                     .out_circuit
                     .socket()
                     .await
-                    .send_data(
-                        circuit_id,
-                        tunnel_id,
-                        data,
-                        &self.tunnel.session_keys,
-                        &self.builder.rng,
-                    )
+                    .send_data(circuit_id, tunnel_id, data, &self.tunnel.session_keys)
                     .await?;
             }
             None => self.state = State::Destroying,
@@ -496,7 +473,7 @@ impl TunnelHandler {
         std::mem::swap(&mut self.state, &mut state);
         self.state = match (evt, state) {
             (Event::Switchover, State::Building { ready }) => {
-                self.tunnel.begin(&self.builder.rng).await?;
+                self.tunnel.begin().await?;
                 let (tunnel, data_tx, data_rx) = OnionTunnel::new(self.tunnel.id, true);
                 let _ = ready.send(Ok(tunnel)); // TODO handle closed
                 self.spawn_next_tunnel_task();
@@ -512,32 +489,29 @@ impl TunnelHandler {
 
                 mem::swap(&mut self.tunnel, &mut new_tunnel);
                 let old_tunnel = new_tunnel;
-                self.tunnel.begin(&self.builder.rng).await?;
-                old_tunnel.end(&self.builder.rng).await?;
+                self.tunnel.begin().await?;
+                old_tunnel.end().await?;
 
                 self.spawn_next_tunnel_task();
-                tokio::spawn({
-                    let rng = self.builder.rng.clone();
-                    async move {
-                        old_tunnel.unbuild(&rng).await;
-                    }
+                tokio::spawn(async move {
+                    old_tunnel.unbuild().await;
                 });
                 State::Ready { data_tx, data_rx }
             }
             (Event::Switchover, State::Destroying) => {
-                self.tunnel.end(&self.builder.rng).await?;
-                self.tunnel.unbuild(&self.builder.rng).await;
+                self.tunnel.end().await?;
+                self.tunnel.unbuild().await;
                 if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
-                    next_tunnel.unbuild(&self.builder.rng).await;
+                    next_tunnel.unbuild().await;
                 }
                 State::Destroyed
             }
             (Event::Destroy, State::Ready { .. }) => State::Destroying,
             (Event::KeepAlive, State::Destroyed) => State::Destroyed, // ignore this event
             (Event::KeepAlive, state) => {
-                self.tunnel.keep_alive(&self.builder.rng).await?;
+                self.tunnel.keep_alive().await?;
                 if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
-                    next_tunnel.keep_alive(&self.builder.rng).await?;
+                    next_tunnel.keep_alive().await?;
                 }
                 state
             } // ignore this event

@@ -3,7 +3,6 @@ use crate::onion::protocol::*;
 use crate::utils::{ToBytes, TryFromBytes};
 use crate::{CircuitId, Result, TunnelId};
 use bytes::{Bytes, BytesMut};
-use ring::rand;
 use std::fmt;
 use std::net::SocketAddr;
 use thiserror::Error;
@@ -140,14 +139,12 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: u16,
         session_keys: &[SessionKey],
-        rng: &rand::SystemRandom,
         tunnel_res: K,
     ) -> SocketResult<()> {
         let req = CircuitOpaque {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_res,
-                rng,
                 encrypt_keys: session_keys,
             },
         };
@@ -159,7 +156,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     }
 
     /// Sends a `CIRCUIT CREATED` reply message to the connected peer with the given `circuit_id`
-    /// and `key`. The `rng` will be used for randomly generated message padding.
+    /// and `key`.
     ///
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
@@ -168,11 +165,10 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         key: SignKey<'_>,
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let res = CircuitCreated { circuit_id, key };
-        res.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
+        res.write_padded_to(&mut self.buf, MESSAGE_SIZE);
         self.write_buf_to_stream().await?;
         Ok(())
     }
@@ -187,11 +183,10 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         key: VerifyKey,
         session_keys: &[SessionKey],
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_res = TunnelResponseExtended { peer_key: key };
-        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
@@ -207,10 +202,9 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         session_keys: &[SessionKey],
         error: TunnelExtendedError,
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, error)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, error)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
@@ -224,11 +218,10 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         session_keys: &[SessionKey],
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_res = TunnelResponseTruncated;
-        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_res)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Truncated>")?;
     }
@@ -244,10 +237,9 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         session_keys: &[SessionKey],
         error: TunnelTruncatedError,
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
-        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, error)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, error)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
     }
@@ -261,7 +253,6 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         payload: CircuitOpaqueBytes,
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let msg = CircuitOpaque {
@@ -269,7 +260,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
             payload,
         };
 
-        msg.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
+        msg.write_padded_to(&mut self.buf, MESSAGE_SIZE);
         // FIXME Do we want to apply the timeout here? Generally: no, but what do we do instead?
         self.write_buf_to_stream().await?;
         //.context("Error while writing CircuitOpaque")?;
@@ -281,14 +272,10 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
     /// - `StreamTimeout` -  The stream operations timed out
-    pub(crate) async fn teardown(
-        &mut self,
-        circuit_id: CircuitId,
-        rng: &rand::SystemRandom,
-    ) -> SocketResult<()> {
+    pub(crate) async fn teardown(&mut self, circuit_id: CircuitId) -> SocketResult<()> {
         self.buf.clear();
         let res = CircuitTeardown { circuit_id };
-        res.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
+        res.write_padded_to(&mut self.buf, MESSAGE_SIZE);
         // NOTE: A timeout needs to be applied here
         self.write_buf_to_stream().await?;
         Ok(())
@@ -308,11 +295,10 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         tunnel_id: TunnelId,
         session_keys: &[SessionKey],
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_res = TunnelRequest::Begin(tunnel_id);
-        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_res)
             .await
     }
 
@@ -322,11 +308,10 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         tunnel_id: TunnelId,
         data: Bytes,
         session_keys: &[SessionKey],
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_req = TunnelRequest::Data(tunnel_id, data);
-        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_req)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_req)
             .await
     }
 
@@ -342,11 +327,10 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         tunnel_id: TunnelId,
         session_keys: &[SessionKey],
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_res = TunnelRequest::End(tunnel_id);
-        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_res)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_res)
             .await
     }
 
@@ -354,11 +338,10 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         session_keys: &[SessionKey],
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_req = TunnelRequest::KeepAlive;
-        self.encrypt_and_send_opaque(circuit_id, session_keys, rng, tunnel_req)
+        self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_req)
             .await
     }
 }
@@ -379,12 +362,11 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         key: Key,
-        rng: &rand::SystemRandom,
     ) -> SocketResult<VerifyKey> {
         self.buf.clear();
         let req = CircuitCreate { circuit_id, key };
 
-        req.write_padded_to(&mut self.buf, rng, MESSAGE_SIZE);
+        req.write_padded_to(&mut self.buf, MESSAGE_SIZE);
         self.write_buf_to_stream().await?;
 
         self.read_buf_from_stream().await?;
@@ -405,8 +387,6 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     /// To encrypt the `OPAQUE` message, `aes_keys` will be used. The keys in `aes_keys` are
     /// expected to be in encrypt order.
     ///
-    /// The `rng` will be used for randomly generated message padding.
-    ///
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
     /// - `StreamTimeout` -  The stream operations timed out
@@ -418,7 +398,6 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         peer_addr: SocketAddr,
         key: Key,
         session_keys: &[SessionKey],
-        rng: &rand::SystemRandom,
     ) -> SocketResult<VerifyKey> {
         self.buf.clear();
         let tunnel_req = TunnelRequest::Extend(peer_addr, key);
@@ -426,7 +405,6 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_req,
-                rng,
                 encrypt_keys: session_keys,
             },
         };
@@ -461,8 +439,6 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
     /// To encrypt the `OPAQUE` message, `aes_keys` will be used. The keys in `aes_keys` are
     /// expected to be in encrypt order.
     ///
-    /// The `rng` will be used for randomly generated message padding.
-    ///
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
     /// - `StreamTimeout` -  The stream operations timed out
@@ -472,7 +448,6 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         &mut self,
         circuit_id: CircuitId,
         session_keys: &[SessionKey],
-        rng: &rand::SystemRandom,
     ) -> SocketResult<()> {
         self.buf.clear();
         let tunnel_req = TunnelRequest::Truncate;
@@ -480,7 +455,6 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             circuit_id,
             payload: CircuitOpaquePayload {
                 msg: &tunnel_req,
-                rng,
                 encrypt_keys: session_keys,
             },
         };
