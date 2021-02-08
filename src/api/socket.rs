@@ -1,7 +1,7 @@
 use crate::utils::{ToBytes, TryFromBytes};
 use crate::Result;
 use bytes::BytesMut;
-use tokio::prelude::*;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub struct ApiSocket<S> {
     stream: S,

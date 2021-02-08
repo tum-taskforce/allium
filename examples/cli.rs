@@ -4,10 +4,9 @@ use allium::{
 };
 use std::collections::HashMap;
 use std::env;
-use tokio::io::{self, BufReader};
-use tokio::prelude::*;
-use tokio::stream::StreamExt;
+use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:4200";
 
@@ -23,6 +22,7 @@ async fn main() {
     let hostkey = RsaPrivateKey::from_pem_file("testkey.pem").unwrap();
     let public_key = hostkey.public_key();
     let (mut peer_tx, peer_rx) = mpsc::unbounded_channel();
+    let peer_rx = UnboundedReceiverStream::new(peer_rx);
     let (onion, mut incoming) =
         OnionBuilder::new(onion_addr, hostkey, PeerProvider::from_stream(peer_rx))
             .enable_cover_traffic(cover_enabled)
@@ -39,7 +39,7 @@ async fn main() {
                 tunnels.insert(tunnel.id(), tunnel.writer());
                 handle_tunnel_data(tunnel);
             }
-            Some(line) = stdin.next() => {
+            Ok(line) = stdin.next_line() => {
                 parse_command(line.unwrap(), &onion, &mut tunnels, &public_key, &mut peer_tx).await;
             }
             else => break,

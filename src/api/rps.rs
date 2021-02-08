@@ -4,13 +4,14 @@ use crate::api::socket::ApiSocket;
 use crate::Result;
 use allium::{Peer, RsaPrivateKey, RsaPublicKey};
 use anyhow::anyhow;
-use futures::Stream;
 use log::info;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio::time::Duration;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::Stream;
 
 const PEER_BUFFER_SIZE: usize = 20;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -53,7 +54,7 @@ impl RpsModule {
                 peer_tx.send(peer).await.unwrap();
             }
         });
-        peer_rx
+        ReceiverStream::new(peer_rx)
     }
 }
 

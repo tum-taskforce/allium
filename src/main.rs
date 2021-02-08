@@ -5,7 +5,6 @@ use allium::*;
 use anyhow::Context;
 use api::protocol::*;
 use bytes::Bytes;
-use futures::stream::StreamExt;
 use log::{info, trace, warn};
 use std::collections::HashMap;
 use std::env;
@@ -280,13 +279,14 @@ impl OnionModule {
             "Listening for API connections on {:?}",
             listener.local_addr()
         );
-        let mut api_incoming = listener;
+        let api_incoming = listener;
 
         let (incoming, _) = broadcast::channel(1);
         loop {
             tokio::select! {
-                Some(client) = api_incoming.next() => {
-                    let mut api_handler = ApiHandler::new(client?, self.ctx.clone(), incoming.subscribe());
+                client = api_incoming.accept() => {
+                    let (client, _) = client?;
+                    let mut api_handler = ApiHandler::new(client, self.ctx.clone(), incoming.subscribe());
                     tokio::spawn(async move {
                         api_handler.handle().await;
                     });

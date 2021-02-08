@@ -153,7 +153,8 @@ impl CircuitHandler {
 
     async fn try_handle(&mut self) -> Result<()> {
         loop {
-            let mut delay = time::sleep(IDLE_TIMEOUT);
+            let delay = time::sleep(IDLE_TIMEOUT);
+            tokio::pin!(delay);
 
             match &mut self.state {
                 State::Default => {

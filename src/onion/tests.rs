@@ -5,7 +5,7 @@ use crate::*;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::sync::atomic::{AtomicU16, Ordering};
-use tokio::stream;
+use tokio_stream as stream;
 
 const TEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(42000);
@@ -239,7 +239,8 @@ async fn test_timeout() -> Result<()> {
         .unwrap();
     assert_eq!(ready.id(), tunnel_id);
 
-    let mut delay = time::sleep(circuit::IDLE_TIMEOUT + ERROR_TIMEOUT);
+    let delay = time::sleep(circuit::IDLE_TIMEOUT + ERROR_TIMEOUT);
+    tokio::pin!(delay);
     tokio::select! {
         _ = handler_task => Ok(()),
         _ = &mut delay => {

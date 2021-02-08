@@ -1,11 +1,10 @@
 use crate::Result;
 use anyhow::anyhow;
-use anyhow::Context;
 use bytes::Bytes;
 use openssl::{derive, pkey, rand, rsa, sha, symm};
 use std::convert::TryInto;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::Path;
 
 const AES_128_GCM_KEY_LEN: usize = 16;

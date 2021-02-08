@@ -6,8 +6,8 @@ use bytes::{Bytes, BytesMut};
 use std::fmt;
 use std::net::SocketAddr;
 use thiserror::Error;
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::prelude::*;
 use tokio::time::{error::Elapsed, timeout, Duration};
 
 /// timeout applied during a read on the socket

@@ -3,8 +3,8 @@ use bytes::Bytes;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU16, Ordering};
 use time::Duration;
-use tokio::stream;
 use tokio::time;
+use tokio_stream as stream;
 
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(42000);
 const ROUND_DURATION: Duration = Duration::from_secs(5);
