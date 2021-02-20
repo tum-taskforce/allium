@@ -1,6 +1,6 @@
-use crate::api::config::{PeerConfig, RpsConfig};
-use crate::api::protocol::{Module, RpsRequest, RpsResponse};
-use crate::api::socket::ApiSocket;
+use crate::daemon::config::{PeerConfig, RpsConfig};
+use crate::daemon::protocol::{Module, RpsRequest, RpsResponse};
+use crate::daemon::socket::DaemonSocket;
 use crate::Result;
 use allium::{Peer, RsaPrivateKey, RsaPublicKey};
 use anyhow::anyhow;
@@ -64,14 +64,14 @@ fn peer_from_config(config: &PeerConfig) -> Option<Peer> {
 }
 
 pub struct SocketRpsModule {
-    socket: ApiSocket<TcpStream>,
+    socket: DaemonSocket<TcpStream>,
 }
 
 impl SocketRpsModule {
     async fn connect(api_address: &SocketAddr) -> Result<Self> {
         let stream = TcpStream::connect(api_address).await?;
         info!("Connected to RPS module at {:?}", stream.peer_addr());
-        let socket = ApiSocket::new(stream);
+        let socket = DaemonSocket::new(stream);
         Ok(SocketRpsModule { socket })
     }
 
@@ -98,8 +98,8 @@ impl SocketRpsModule {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::config::RpsConfig;
-    use crate::api::rps::RpsModule;
+    use crate::daemon::config::RpsConfig;
+    use crate::daemon::rps::RpsModule;
 
     #[tokio::test]
     #[ignore = "requires a running RPS instance listening on 127.0.0.1:7101"]

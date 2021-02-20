@@ -18,7 +18,7 @@ exclude = [
 
 [[bin]]
 name = "allium-daemon"
-path = "src/main.rs"
+path = "src/allium_daemon.rs"
 
 [features]
 crypto_ring = ["ring", "base64", "once_cell"]

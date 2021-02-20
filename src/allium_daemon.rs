@@ -1,10 +1,10 @@
-use crate::api::config::Config;
-use crate::api::rps::RpsModule;
-use crate::api::socket::ApiSocket;
+use crate::daemon::config::Config;
+use crate::daemon::rps::RpsModule;
+use crate::daemon::socket::DaemonSocket;
 use allium::*;
 use anyhow::Context;
-use api::protocol::*;
 use bytes::Bytes;
+use daemon::protocol::*;
 use log::{info, trace, warn};
 use std::collections::HashMap;
 use std::env;
@@ -12,21 +12,21 @@ use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 
-mod api;
+mod daemon;
 mod utils;
 
 // for security reasons there should always be at least two hops per tunnel
 const MIN_HOPS: usize = 2;
 
 #[derive(Clone)]
-struct ApiTunnel {
+struct DaemonTunnel {
     writer: OnionTunnelWriter,
-    events: mpsc::UnboundedSender<ApiEvent>,
+    events: mpsc::UnboundedSender<DaemonEvent>,
 }
 
-impl ApiTunnel {
-    fn new(tunnel: &OnionTunnel, events: mpsc::UnboundedSender<ApiEvent>) -> Self {
-        ApiTunnel {
+impl DaemonTunnel {
+    fn new(tunnel: &OnionTunnel, events: mpsc::UnboundedSender<DaemonEvent>) -> Self {
+        DaemonTunnel {
             writer: tunnel.writer(),
             events,
         }
@@ -42,7 +42,7 @@ enum TunnelEvent {
 
 // Sent from the ApiHandler to the TunnelHandler
 #[derive(Clone)]
-enum ApiEvent {
+enum DaemonEvent {
     Subscribe {
         client_addr: SocketAddr,
         events: mpsc::UnboundedSender<TunnelEvent>,
@@ -52,22 +52,26 @@ enum ApiEvent {
     },
 }
 
-struct ApiHandler {
+struct DaemonHandler {
     client_addr: SocketAddr,
-    socket: ApiSocket<TcpStream>,
+    socket: DaemonSocket<TcpStream>,
     ctx: OnionContext,
-    incoming: broadcast::Receiver<ApiTunnel>,
-    tunnels: HashMap<TunnelId, ApiTunnel>,
+    incoming: broadcast::Receiver<DaemonTunnel>,
+    tunnels: HashMap<TunnelId, DaemonTunnel>,
     events_tx: mpsc::UnboundedSender<TunnelEvent>,
     events_rx: mpsc::UnboundedReceiver<TunnelEvent>,
 }
 
-impl ApiHandler {
-    fn new(stream: TcpStream, ctx: OnionContext, incoming: broadcast::Receiver<ApiTunnel>) -> Self {
+impl DaemonHandler {
+    fn new(
+        stream: TcpStream,
+        ctx: OnionContext,
+        incoming: broadcast::Receiver<DaemonTunnel>,
+    ) -> Self {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        ApiHandler {
+        DaemonHandler {
             client_addr: stream.peer_addr().unwrap(),
-            socket: ApiSocket::new(stream),
+            socket: DaemonSocket::new(stream),
             ctx,
             incoming,
             tunnels: Default::default(),
@@ -109,7 +113,7 @@ impl ApiHandler {
                         .await?;
 
                     let (events_tx, events_rx) = mpsc::unbounded_channel();
-                    let api_tunnel = ApiTunnel::new(&tunnel, events_tx);
+                    let api_tunnel = DaemonTunnel::new(&tunnel, events_tx);
                     let prev = self.tunnels.insert(tunnel_id, api_tunnel);
                     assert!(prev.is_none());
 
@@ -126,7 +130,7 @@ impl ApiHandler {
             }
             OnionRequest::Destroy(tunnel_id) => {
                 if let Some(tunnel) = self.tunnels.remove(&tunnel_id) {
-                    let _ = tunnel.events.send(ApiEvent::Unsubscribe {
+                    let _ = tunnel.events.send(DaemonEvent::Unsubscribe {
                         client_addr: self.client_addr,
                     });
                 } else {
@@ -155,14 +159,14 @@ impl ApiHandler {
         Ok(())
     }
 
-    async fn handle_incoming(&mut self, tunnel: ApiTunnel) -> Result<()> {
+    async fn handle_incoming(&mut self, tunnel: DaemonTunnel) -> Result<()> {
         let tunnel_id = tunnel.writer.id();
         if !self.tunnels.contains_key(&tunnel_id) {
             self.socket
                 .write(OnionResponse::Incoming(tunnel_id))
                 .await?;
 
-            let _ = tunnel.events.send(ApiEvent::Subscribe {
+            let _ = tunnel.events.send(DaemonEvent::Subscribe {
                 client_addr: self.client_addr,
                 events: self.events_tx.clone(),
             });
@@ -187,10 +191,10 @@ impl ApiHandler {
     }
 }
 
-impl Drop for ApiHandler {
+impl Drop for DaemonHandler {
     fn drop(&mut self) {
         for tunnel in self.tunnels.values() {
-            let _ = tunnel.events.send(ApiEvent::Unsubscribe {
+            let _ = tunnel.events.send(DaemonEvent::Unsubscribe {
                 client_addr: self.client_addr,
             });
         }
@@ -200,11 +204,11 @@ impl Drop for ApiHandler {
 struct TunnelHandler {
     tunnel: OnionTunnel,
     clients: HashMap<SocketAddr, mpsc::UnboundedSender<TunnelEvent>>,
-    events: mpsc::UnboundedReceiver<ApiEvent>,
+    events: mpsc::UnboundedReceiver<DaemonEvent>,
 }
 
 impl TunnelHandler {
-    fn new(tunnel: OnionTunnel, events: mpsc::UnboundedReceiver<ApiEvent>) -> Self {
+    fn new(tunnel: OnionTunnel, events: mpsc::UnboundedReceiver<DaemonEvent>) -> Self {
         TunnelHandler {
             tunnel,
             clients: Default::default(),
@@ -234,14 +238,14 @@ impl TunnelHandler {
                 }
                 Some(evt) = self.events.recv() => {
                     match evt {
-                        ApiEvent::Unsubscribe { client_addr } => {
+                        DaemonEvent::Unsubscribe { client_addr } => {
                             self.clients.remove(&client_addr);
 
                             if self.clients.is_empty() {
                                 break;
                             }
                         }
-                        ApiEvent::Subscribe { client_addr, events } => {
+                        DaemonEvent::Subscribe { client_addr, events } => {
                             self.subscribe(client_addr, events);
                         }
                     }
@@ -286,14 +290,14 @@ impl OnionModule {
             tokio::select! {
                 client = api_incoming.accept() => {
                     let (client, _) = client?;
-                    let mut api_handler = ApiHandler::new(client, self.ctx.clone(), incoming.subscribe());
+                    let mut api_handler = DaemonHandler::new(client, self.ctx.clone(), incoming.subscribe());
                     tokio::spawn(async move {
                         api_handler.handle().await;
                     });
                 }
                 Some(tunnel) = self.onion_incoming.next() => {
                     let (events_tx, events_rx) = mpsc::unbounded_channel();
-                    let api_tunnel = ApiTunnel::new(&tunnel, events_tx);
+                    let api_tunnel = DaemonTunnel::new(&tunnel, events_tx);
                     let _ = incoming.send(api_tunnel);
 
                     let mut tunnel_handler = TunnelHandler::new(tunnel, events_rx);
