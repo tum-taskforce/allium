@@ -29,7 +29,7 @@ const TUNNEL_ERROR: u8 = 0x2f;
 /// Must not be greater than `digest::SHA256_OUTPUT_LEN` (= 32)
 pub(crate) const DIGEST_LEN: usize = 12;
 const SIGNATURE_LEN: usize = 512;
-const KEY_LEN: usize = 32;
+const KEY_LEN: usize = crypto::KEY_LEN;
 
 pub(crate) const MESSAGE_SIZE: usize = 1024;
 pub(crate) const MAX_DATA_SIZE: usize = MESSAGE_SIZE - 4 - crypto::NONCE_LEN - DIGEST_LEN - 8;

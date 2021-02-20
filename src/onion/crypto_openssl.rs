@@ -1,22 +1,28 @@
 use crate::Result;
 use anyhow::anyhow;
 use bytes::Bytes;
-use openssl::{derive, pkey, rand, rsa, sha, symm};
+use openssl::{derive, hash, pkey, rand, rsa, sha, sign, symm};
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-const AES_128_GCM_KEY_LEN: usize = 16;
-const AES_128_GCM_IV_LEN: usize = 12;
-pub(crate) const NONCE_LEN: usize = AES_128_GCM_IV_LEN;
+const AES_128_CTR_KEY_LEN: usize = 16;
+const AES_128_CTR_IV_LEN: usize = 16;
+pub(crate) const NONCE_LEN: usize = AES_128_CTR_IV_LEN;
+
+/// Length of EphemeralPublicKey in bytes
+pub(crate) const KEY_LEN: usize = 44;
+
+// 4096 / 8
+pub(crate) const SIGNATURE_LEN: usize = 512;
 
 pub(crate) struct EphemeralPrivateKey(pkey::PKey<pkey::Private>);
 pub(crate) struct EphemeralPublicKey(Bytes);
 #[derive(Clone)]
 pub struct RsaPublicKey(Bytes);
 pub struct RsaPrivateKey(pkey::PKey<pkey::Private>);
-pub(crate) struct SessionKey([u8; AES_128_GCM_KEY_LEN]);
+pub(crate) struct SessionKey([u8; AES_128_CTR_KEY_LEN]);
 // TODO consider storing generic B: AsRef<[u8]> instead of Bytes (-> avoid allocations)
 
 pub(crate) fn fill_random(buf: &mut [u8]) {
@@ -31,10 +37,11 @@ pub(crate) fn digest(buf: &[u8]) -> impl AsRef<[u8]> {
 
 impl EphemeralPrivateKey {
     pub(crate) fn generate() -> Self {
-        Self(pkey::PKey::generate_ed25519().unwrap())
+        Self(pkey::PKey::generate_x25519().unwrap())
     }
 
     pub(crate) fn public_key(&self) -> EphemeralPublicKey {
+        // TODO: maybe use EVP_PKEY_get_raw_public_key
         EphemeralPublicKey::new(self.0.public_key_to_der().unwrap().into())
     }
 }
@@ -71,13 +78,8 @@ impl RsaPrivateKey {
     }
 
     pub(crate) fn sign(&self, data: &[u8], signature: &mut [u8]) -> Result<()> {
-        let mut hasher = sha::Sha256::new();
-        hasher.update(data);
-        let hash = hasher.finish();
-        self.0
-            .rsa()
-            .unwrap()
-            .private_encrypt(&hash, signature, rsa::Padding::PKCS1)?;
+        let mut signer = sign::Signer::new(hash::MessageDigest::sha256(), &self.0)?;
+        signer.sign_oneshot(signature, data)?;
         Ok(())
     }
 }
@@ -93,17 +95,10 @@ impl RsaPublicKey {
     }
 
     pub(crate) fn verify(&self, data: &[u8], signature: &[u8]) -> Result<()> {
-        let mut hasher = sha::Sha256::new();
-        hasher.update(data);
-        let hash = hasher.finish();
-
-        let mut hash2 = [0u8; 32];
         let pkey = pkey::PKey::public_key_from_der(self.0.as_ref())?;
-        pkey.rsa()
-            .unwrap()
-            .public_decrypt(signature, &mut hash2, rsa::Padding::PKCS1)?;
+        let mut verifier = sign::Verifier::new(hash::MessageDigest::sha256(), &pkey)?;
 
-        if hash == hash2 {
+        if verifier.verify_oneshot(signature, data)? {
             Ok(())
         } else {
             Err(anyhow!("Could not verify signature"))
@@ -120,8 +115,8 @@ impl SessionKey {
         let pkey = pkey::PKey::public_key_from_der(peer_key.0.as_ref())?;
         deriver.set_peer(&pkey)?;
 
-        let mut key = [0u8; AES_128_GCM_KEY_LEN];
-        if deriver.derive(&mut key)? == AES_128_GCM_KEY_LEN {
+        let mut key = [0u8; AES_128_CTR_KEY_LEN];
+        if deriver.derive(&mut key)? >= AES_128_CTR_KEY_LEN {
             Ok(SessionKey(key))
         } else {
             Err(anyhow!("Insufficient keying material"))
@@ -133,13 +128,13 @@ impl SessionKey {
     }
 
     pub(crate) fn encrypt(&self, nonce: [u8; NONCE_LEN], data: &mut [u8]) -> Result<()> {
-        let encrypted = symm::encrypt(symm::Cipher::aes_128_gcm(), &self.0, Some(&nonce), &data)?;
+        let encrypted = symm::encrypt(symm::Cipher::aes_128_ctr(), &self.0, Some(&nonce), &data)?;
         data.copy_from_slice(&encrypted);
         Ok(())
     }
 
     pub(crate) fn decrypt(&self, nonce: [u8; NONCE_LEN], data: &mut [u8]) -> Result<()> {
-        let decrypted = symm::decrypt(symm::Cipher::aes_128_gcm(), &self.0, Some(&nonce), &data)?;
+        let decrypted = symm::decrypt(symm::Cipher::aes_128_ctr(), &self.0, Some(&nonce), &data)?;
         data.copy_from_slice(&decrypted);
         Ok(())
     }
@@ -148,7 +143,7 @@ impl SessionKey {
 #[cfg(test)]
 mod tests {
     use super::RsaPrivateKey;
-    use super::{AES_128_GCM_IV_LEN, AES_128_GCM_KEY_LEN};
+    use super::{AES_128_CTR_IV_LEN, AES_128_CTR_KEY_LEN};
 
     #[test]
     fn test_read_hostkey() {
@@ -157,8 +152,14 @@ mod tests {
 
     #[test]
     fn test_aes_cipher() {
-        let cipher = openssl::symm::Cipher::aes_128_gcm();
-        assert_eq!(cipher.key_len(), AES_128_GCM_KEY_LEN);
-        assert_eq!(cipher.iv_len(), Some(AES_128_GCM_IV_LEN));
+        let cipher = openssl::symm::Cipher::aes_128_ctr();
+        assert_eq!(cipher.key_len(), AES_128_CTR_KEY_LEN);
+        assert_eq!(cipher.iv_len(), Some(AES_128_CTR_IV_LEN));
+    }
+
+    #[test]
+    fn test_rsa_size() {
+        let key = openssl::rsa::Rsa::generate(4096).unwrap();
+        assert_eq!(key.size() as usize, super::SIGNATURE_LEN);
     }
 }

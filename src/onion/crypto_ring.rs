@@ -1,11 +1,11 @@
 use crate::Result;
 use anyhow::anyhow;
-use anyhow::Context;
 use bytes::Bytes;
 use once_cell::sync::Lazy;
+use ring::hkdf::KeyType;
 use ring::rand::SecureRandom;
 use ring::signature::KeyPair;
-use ring::{aead, agreement, digest, rand, signature};
+use ring::{aead, agreement, digest, hkdf, rand, signature};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::ops::Deref;
@@ -13,6 +13,8 @@ use std::path::Path;
 
 static GLOBAL_RNG: Lazy<rand::SystemRandom> = Lazy::new(|| rand::SystemRandom::new());
 pub(crate) const NONCE_LEN: usize = aead::NONCE_LEN;
+/// Length of EphemeralPublicKey in bytes
+pub(crate) const KEY_LEN: usize = 32;
 
 pub(crate) struct EphemeralPrivateKey(agreement::EphemeralPrivateKey);
 pub(crate) struct EphemeralPublicKey(agreement::UnparsedPublicKey<Bytes>);
@@ -124,7 +126,6 @@ impl SessionKey {
         private_key: EphemeralPrivateKey,
         peer_key: &EphemeralPublicKey,
     ) -> Result<SessionKey> {
-        // TODO use proper key derivation function
         agreement::agree_ephemeral(
             private_key.0,
             &peer_key.0,
@@ -134,8 +135,11 @@ impl SessionKey {
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let unbound = aead::UnboundKey::new(&aead::AES_128_GCM, &bytes[..16])
-            .context("Could not construct session key from keying material")?;
+        // HKDF_SHA256 salt len = 32
+        let salt = vec![0u8; hkdf::HKDF_SHA256.len()];
+        let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &salt).extract(bytes);
+        // AES_128_GCM key len = 16
+        let unbound = prk.expand(&[], &aead::AES_128_GCM)?.into();
         Ok(SessionKey(aead::LessSafeKey::new(unbound)))
     }
 
@@ -158,9 +162,24 @@ impl SessionKey {
 #[cfg(test)]
 mod tests {
     use super::RsaPrivateKey;
+    use ring::hkdf::KeyType;
 
     #[test]
     fn test_read_hostkey() {
         RsaPrivateKey::from_pem_file("testkey.pem").unwrap();
+    }
+
+    #[test]
+    fn test_lengths() {
+        assert_eq!(ring::signature::ED25519_PUBLIC_KEY_LEN, super::KEY_LEN);
+        assert_eq!(
+            ring::hkdf::HKDF_SHA256
+                .hmac_algorithm()
+                .digest_algorithm()
+                .output_len,
+            32
+        );
+        assert_eq!(ring::aead::AES_128_GCM.key_len(), 16);
+        assert_eq!(ring::aead::AES_128_GCM.nonce_len(), super::NONCE_LEN);
     }
 }
