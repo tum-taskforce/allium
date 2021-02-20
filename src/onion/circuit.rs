@@ -1,12 +1,12 @@
-use crate::onion::crypto::{self, EphemeralPublicKey, SessionKey};
+use crate::onion::crypto::{self, EphemeralPublicKey, RsaPrivateKey, SessionKey};
 use crate::onion::protocol::{
     CircuitOpaque, CircuitOpaqueBytes, SignKey, TryFromBytesExt, TunnelExtendedError,
     TunnelProtocolError, TunnelRequest, TunnelTruncatedError, VerifyKey,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::onion::tunnel::TunnelId;
-use crate::OnionTunnel;
-use crate::{Result, RsaPrivateKey};
+use crate::onion::OnionTunnel;
+use crate::Result;
 use anyhow::anyhow;
 use anyhow::Context;
 use bytes::Bytes;

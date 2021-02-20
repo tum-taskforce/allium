@@ -1,7 +1,8 @@
-use crate::onion::crypto::{self, EphemeralPublicKey, SessionKey};
+use crate::onion::circuit::CircuitId;
+use crate::onion::crypto::{self, EphemeralPublicKey, RsaPrivateKey, RsaPublicKey, SessionKey};
+use crate::onion::tunnel::TunnelId;
 use crate::utils::{self, FromBytes, ToBytes, TryFromBytes};
-use crate::{CircuitId, TunnelId};
-use crate::{Result, RsaPrivateKey, RsaPublicKey};
+use crate::Result;
 use anyhow::{anyhow, Context};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::fmt;

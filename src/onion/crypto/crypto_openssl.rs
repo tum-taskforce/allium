@@ -1,7 +1,7 @@
 use crate::Result;
 use anyhow::anyhow;
 use bytes::Bytes;
-use openssl::{derive, hash, pkey, rand, rsa, sha, sign, symm};
+use openssl::{derive, hash, pkey, rand, sha, sign, symm};
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::Read;

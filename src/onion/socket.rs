@@ -1,7 +1,9 @@
+use crate::onion::circuit::CircuitId;
 use crate::onion::crypto::SessionKey;
 use crate::onion::protocol::*;
+use crate::onion::tunnel::TunnelId;
 use crate::utils::{ToBytes, TryFromBytes};
-use crate::{CircuitId, Result, TunnelId};
+use crate::Result;
 use bytes::{Bytes, BytesMut};
 use std::fmt;
 use std::net::SocketAddr;
