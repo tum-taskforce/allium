@@ -5,7 +5,7 @@ use crate::onion::protocol::{
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
 use crate::onion::tunnel::TunnelId;
-use crate::onion::OnionTunnel;
+use crate::onion::Tunnel;
 use crate::Result;
 use anyhow::anyhow;
 use anyhow::Context;
@@ -81,7 +81,7 @@ impl Circuit {
 pub(crate) struct CircuitHandler {
     in_circuit: Circuit,
     session_key: [SessionKey; 1],
-    incoming: mpsc::Sender<OnionTunnel>,
+    incoming: mpsc::Sender<Tunnel>,
     state: State,
 }
 
@@ -104,7 +104,7 @@ impl CircuitHandler {
     pub(crate) async fn init(
         mut socket: OnionSocket<TcpStream>,
         host_key: &RsaPrivateKey,
-        incoming: mpsc::Sender<OnionTunnel>,
+        incoming: mpsc::Sender<Tunnel>,
     ) -> Result<Self> {
         trace!("Accepting handshake from {:?}", socket.peer_addr());
         let (circuit_id, peer_key) = socket
@@ -335,7 +335,7 @@ impl CircuitHandler {
             }
             (TunnelRequest::Begin(tunnel_id), State::Default) => {
                 // counted = false because these tunnels will be mapped to counted tunnels by the OnionListener
-                let (tunnel, tx, rx) = OnionTunnel::new(tunnel_id, false);
+                let (tunnel, tx, rx) = Tunnel::new(tunnel_id, false);
                 if self.incoming.try_send(tunnel).is_ok() {
                     State::Endpoint {
                         tunnel_id,

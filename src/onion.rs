@@ -1,8 +1,8 @@
-use crate::Result;
+use crate::{Peer, PeerProvider, Result};
 use anyhow::anyhow;
 use bytes::Bytes;
 use circuit::CircuitHandler;
-use crypto::{RsaPrivateKey, RsaPublicKey};
+use crypto::RsaPrivateKey;
 use log::{debug, info, trace, warn};
 use socket::OnionSocket;
 use std::collections::{hash_map, HashMap};
@@ -14,7 +14,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{self, Duration};
-use tokio_stream::{Stream, StreamExt};
 use tunnel::{Target, TunnelBuilder, TunnelHandler, TunnelId};
 
 pub(crate) mod circuit;
@@ -34,65 +33,14 @@ const INCOMING_BUFFER_SIZE: usize = 100;
 
 static TUNNEL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// A remote peer characterized by its address, the port on which it is listening for onion
-/// connections and its public key. The public key is needed to verify the authenticity of
-/// signed messages received from this peer.
-#[derive(Clone)]
-pub struct Peer {
-    addr: SocketAddr,
-    hostkey: RsaPublicKey,
-}
-
-impl Peer {
-    pub fn new(addr: SocketAddr, hostkey: RsaPublicKey) -> Self {
-        Peer { addr, hostkey }
-    }
-
-    pub fn address(&self) -> SocketAddr {
-        self.addr
-    }
-}
-
-impl fmt::Debug for Peer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Peer").field(&self.addr).finish()
-    }
-}
-
-#[derive(Clone)]
-pub struct PeerProvider {
-    inner: mpsc::Sender<oneshot::Sender<Peer>>,
-}
-
-impl PeerProvider {
-    pub fn from_stream<S>(mut stream: S) -> Self
-    where
-        S: Stream<Item = Peer> + Unpin + Send + Sync + 'static,
-    {
-        let (peer_tx, mut peer_rx) = mpsc::channel::<oneshot::Sender<Peer>>(100);
-        tokio::spawn(async move {
-            while let Some(req) = peer_rx.recv().await {
-                let _ = req.send(stream.next().await.unwrap());
-            }
-        });
-        PeerProvider { inner: peer_tx }
-    }
-
-    pub(crate) async fn random_peer(&mut self) -> Result<Peer> {
-        let (peer_tx, peer_rx) = oneshot::channel();
-        let _ = self.inner.send(peer_tx).await;
-        Ok(peer_rx.await?)
-    }
-}
-
-pub struct OnionTunnel {
+pub struct Tunnel {
     tunnel_id: TunnelId,
     data_tx: mpsc::UnboundedSender<Bytes>,
     data_rx: mpsc::Receiver<Bytes>,
     counted: bool,
 }
 
-impl OnionTunnel {
+impl Tunnel {
     pub(crate) fn new(
         tunnel_id: TunnelId,
         counted: bool,
@@ -132,8 +80,8 @@ impl OnionTunnel {
         self.tunnel_id
     }
 
-    pub fn writer(&self) -> OnionTunnelWriter {
-        OnionTunnelWriter {
+    pub fn writer(&self) -> TunnelWriter {
+        TunnelWriter {
             tunnel_id: self.tunnel_id,
             data_tx: self.data_tx.clone(),
         }
@@ -141,7 +89,7 @@ impl OnionTunnel {
 
     async fn forward_data(
         mut self,
-        mut tunnel_rx: mpsc::Receiver<OnionTunnel>,
+        mut tunnel_rx: mpsc::Receiver<Tunnel>,
         data_tx: mpsc::Sender<Bytes>,
         mut data_rx: mpsc::UnboundedReceiver<Bytes>,
     ) -> Option<()> {
@@ -155,7 +103,7 @@ impl OnionTunnel {
     }
 }
 
-impl fmt::Debug for OnionTunnel {
+impl fmt::Debug for Tunnel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OnionTunnel")
             .field("id", &self.tunnel_id)
@@ -163,7 +111,7 @@ impl fmt::Debug for OnionTunnel {
     }
 }
 
-impl Drop for OnionTunnel {
+impl Drop for Tunnel {
     fn drop(&mut self) {
         if self.counted {
             let c = TUNNEL_COUNT.fetch_sub(1, Ordering::Relaxed);
@@ -175,12 +123,12 @@ impl Drop for OnionTunnel {
 }
 
 #[derive(Clone)]
-pub struct OnionTunnelWriter {
+pub struct TunnelWriter {
     tunnel_id: TunnelId,
     data_tx: mpsc::UnboundedSender<Bytes>,
 }
 
-impl OnionTunnelWriter {
+impl TunnelWriter {
     pub fn write(&self, mut buf: Bytes) -> Result<()> {
         while !buf.is_empty() {
             let part = buf.split_to(cmp::min(protocol::MAX_DATA_SIZE, buf.len()));
@@ -196,7 +144,7 @@ impl OnionTunnelWriter {
     }
 }
 
-impl fmt::Debug for OnionTunnelWriter {
+impl fmt::Debug for TunnelWriter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OnionTunnelWriter")
             .field("id", &self.tunnel_id)
@@ -209,7 +157,7 @@ pub struct OnionContext {
     peer_provider: PeerProvider,
     n_hops: usize,
     events: broadcast::Sender<tunnel::Event>,
-    cover_tunnel: OnionTunnelWriter,
+    cover_tunnel: TunnelWriter,
 }
 
 impl OnionContext {
@@ -224,7 +172,7 @@ impl OnionContext {
             peer_provider,
             n_hops,
             events,
-            cover_tunnel: OnionTunnelWriter {
+            cover_tunnel: TunnelWriter {
                 tunnel_id: 0,
                 data_tx: cover_tx,
             },
@@ -247,11 +195,11 @@ impl OnionContext {
 
     /// Builds a new tunnel to `dest` over `n_hops` additional peers.
     /// Performs a handshake with each hop and then spawns a task for handling incoming messages
-    pub async fn build_tunnel(&self, dest: Peer) -> Result<OnionTunnel> {
+    pub async fn build_tunnel(&self, dest: Peer) -> Result<Tunnel> {
         self.build_tunnel_internal(Target::Peer(dest)).await
     }
 
-    async fn build_tunnel_internal(&self, dest: Target) -> Result<OnionTunnel> {
+    async fn build_tunnel_internal(&self, dest: Target) -> Result<Tunnel> {
         info!("Building tunnel to {:?}", dest);
         let tunnel_id = tunnel::random_id();
         let mut builder =
@@ -285,7 +233,7 @@ impl OnionContext {
 struct CoverHandler {
     cover_rx: mpsc::UnboundedReceiver<Bytes>,
     ctx: OnionContext,
-    cover_tunnel: Option<OnionTunnel>,
+    cover_tunnel: Option<Tunnel>,
 }
 
 impl CoverHandler {
@@ -330,12 +278,12 @@ impl CoverHandler {
     }
 }
 
-pub struct Incoming {
-    incoming: mpsc::Receiver<OnionTunnel>,
+pub struct OnionIncoming {
+    incoming: mpsc::Receiver<Tunnel>,
 }
 
-impl Incoming {
-    pub async fn next(&mut self) -> Option<OnionTunnel> {
+impl OnionIncoming {
+    pub async fn next(&mut self) -> Option<Tunnel> {
         self.incoming.recv().await
     }
 }
@@ -343,12 +291,12 @@ impl Incoming {
 #[derive(Clone)]
 struct OnionListener {
     hostkey: Arc<RsaPrivateKey>,
-    incoming: mpsc::Sender<OnionTunnel>,
-    tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::Sender<OnionTunnel>>>>,
+    incoming: mpsc::Sender<Tunnel>,
+    tunnels: Arc<Mutex<HashMap<TunnelId, mpsc::Sender<Tunnel>>>>,
 }
 
 impl OnionListener {
-    fn new(hostkey: RsaPrivateKey, incoming: mpsc::Sender<OnionTunnel>) -> Self {
+    fn new(hostkey: RsaPrivateKey, incoming: mpsc::Sender<Tunnel>) -> Self {
         OnionListener {
             hostkey: Arc::new(hostkey),
             incoming,
@@ -399,7 +347,7 @@ impl OnionListener {
         }
     }
 
-    async fn handle_incoming(&mut self, tunnel: OnionTunnel) {
+    async fn handle_incoming(&mut self, tunnel: Tunnel) {
         let tunnels = self.tunnels.clone();
         let mut tunnels = tunnels.lock().await;
 
@@ -419,12 +367,9 @@ impl OnionListener {
         }
     }
 
-    async fn handle_new_tunnel(
-        &mut self,
-        tunnel: OnionTunnel,
-    ) -> Result<mpsc::Sender<OnionTunnel>> {
+    async fn handle_new_tunnel(&mut self, tunnel: Tunnel) -> Result<mpsc::Sender<Tunnel>> {
         let (tunnel_tx, tunnel_rx) = mpsc::channel(1);
-        let (e_tunnel, e_data_tx, e_data_rx) = OnionTunnel::new(tunnel.id(), true);
+        let (e_tunnel, e_data_tx, e_data_rx) = Tunnel::new(tunnel.id(), true);
         self.incoming.send(e_tunnel).await?;
 
         tokio::spawn({
@@ -510,13 +455,13 @@ impl OnionBuilder {
         self
     }
 
-    pub fn set_round_duration(mut self, secs: u64) -> Self {
-        self.round_duration = Duration::from_secs(secs);
+    pub fn set_round_duration(mut self, dur: Duration) -> Self {
+        self.round_duration = dur;
         self
     }
 
     /// Returns the constructed instance.
-    pub fn start(self) -> (OnionContext, Incoming) {
+    pub fn start(self) -> (OnionContext, OnionIncoming) {
         let OnionBuilder {
             listen_addr,
             hostkey,
@@ -547,7 +492,7 @@ impl OnionBuilder {
             async move { round_handler.handle().await }
         });
 
-        let incoming = Incoming {
+        let incoming = OnionIncoming {
             incoming: incoming_rx,
         };
         (ctx, incoming)

@@ -20,12 +20,12 @@ const MIN_HOPS: usize = 2;
 
 #[derive(Clone)]
 struct DaemonTunnel {
-    writer: OnionTunnelWriter,
+    writer: TunnelWriter,
     events: mpsc::UnboundedSender<DaemonEvent>,
 }
 
 impl DaemonTunnel {
-    fn new(tunnel: &OnionTunnel, events: mpsc::UnboundedSender<DaemonEvent>) -> Self {
+    fn new(tunnel: &Tunnel, events: mpsc::UnboundedSender<DaemonEvent>) -> Self {
         DaemonTunnel {
             writer: tunnel.writer(),
             events,
@@ -202,13 +202,13 @@ impl Drop for DaemonHandler {
 }
 
 struct TunnelHandler {
-    tunnel: OnionTunnel,
+    tunnel: Tunnel,
     clients: HashMap<SocketAddr, mpsc::UnboundedSender<TunnelEvent>>,
     events: mpsc::UnboundedReceiver<DaemonEvent>,
 }
 
 impl TunnelHandler {
-    fn new(tunnel: OnionTunnel, events: mpsc::UnboundedReceiver<DaemonEvent>) -> Self {
+    fn new(tunnel: Tunnel, events: mpsc::UnboundedReceiver<DaemonEvent>) -> Self {
         TunnelHandler {
             tunnel,
             clients: Default::default(),
@@ -266,11 +266,11 @@ impl Drop for TunnelHandler {
 
 pub struct OnionModule {
     ctx: OnionContext,
-    onion_incoming: Incoming,
+    onion_incoming: OnionIncoming,
 }
 
 impl OnionModule {
-    pub fn new(ctx: OnionContext, incoming: Incoming) -> Self {
+    pub fn new(ctx: OnionContext, incoming: OnionIncoming) -> Self {
         OnionModule {
             ctx,
             onion_incoming: incoming,

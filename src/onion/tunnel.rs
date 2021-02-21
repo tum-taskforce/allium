@@ -1,12 +1,11 @@
+use crate::onion;
 use crate::onion::circuit::Circuit;
 use crate::onion::crypto::{self, EphemeralPrivateKey, SessionKey};
 use crate::onion::protocol::{
     CircuitOpaque, CircuitOpaqueBytes, TryFromBytesExt, TunnelRequest, VerifyKey,
 };
 use crate::onion::socket::{OnionSocket, OnionSocketError, SocketResult};
-use crate::OnionTunnel;
-use crate::Peer;
-use crate::{PeerProvider, Result};
+use crate::{Peer, PeerProvider, Result};
 use anyhow::{anyhow, Context};
 use bytes::Bytes;
 use log::{trace, warn};
@@ -348,7 +347,7 @@ pub(crate) struct TunnelHandler {
 
 pub(crate) enum State {
     Building {
-        ready: oneshot::Sender<Result<OnionTunnel>>,
+        ready: oneshot::Sender<Result<onion::Tunnel>>,
     },
     Ready {
         data_tx: mpsc::Sender<Bytes>,
@@ -363,7 +362,7 @@ impl TunnelHandler {
         first_tunnel: Tunnel,
         tunnel_builder: TunnelBuilder,
         events: broadcast::Receiver<Event>,
-        ready: oneshot::Sender<Result<OnionTunnel>>,
+        ready: oneshot::Sender<Result<onion::Tunnel>>,
     ) -> Self {
         TunnelHandler {
             tunnel: first_tunnel,
@@ -474,7 +473,7 @@ impl TunnelHandler {
         self.state = match (evt, state) {
             (Event::Switchover, State::Building { ready }) => {
                 self.tunnel.begin().await?;
-                let (tunnel, data_tx, data_rx) = OnionTunnel::new(self.tunnel.id, true);
+                let (tunnel, data_tx, data_rx) = onion::Tunnel::new(self.tunnel.id, true);
                 let _ = ready.send(Ok(tunnel)); // TODO handle closed
                 self.spawn_next_tunnel_task();
                 State::Ready { data_tx, data_rx }

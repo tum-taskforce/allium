@@ -1,4 +1,4 @@
-use allium::{Incoming, OnionBuilder, OnionContext, Peer, PeerProvider, RsaPrivateKey};
+use allium::{OnionBuilder, OnionContext, OnionIncoming, Peer, PeerProvider, RsaPrivateKey};
 use bytes::Bytes;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -17,7 +17,7 @@ const LONG_DATA: Bytes = Bytes::from_static(&[13; 4098]);
 struct TestPeer {
     peer: Peer,
     ctx: OnionContext,
-    incoming: Incoming,
+    incoming: OnionIncoming,
 }
 
 fn new_unique_peer() -> (Peer, RsaPrivateKey) {
@@ -42,7 +42,7 @@ async fn spawn_peer(peers: Vec<Peer>, cover: bool, hops: usize) -> TestPeer {
     let (ctx, incoming) = OnionBuilder::new(peer.address(), hostkey, peer_provider)
         .enable_cover_traffic(cover)
         .set_hops_per_tunnel(hops)
-        .set_round_duration(ROUND_DURATION.as_secs())
+        .set_round_duration(ROUND_DURATION)
         .start();
     TestPeer {
         peer,

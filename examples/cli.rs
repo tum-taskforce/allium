@@ -1,6 +1,6 @@
 use allium::{
-    OnionBuilder, OnionContext, OnionTunnel, OnionTunnelWriter, Peer, PeerProvider, RsaPrivateKey,
-    RsaPublicKey, TunnelId,
+    OnionBuilder, OnionContext, Peer, PeerProvider, RsaPrivateKey, RsaPublicKey, Tunnel, TunnelId,
+    TunnelWriter,
 };
 use std::collections::HashMap;
 use std::env;
@@ -29,7 +29,7 @@ async fn main() {
             .set_hops_per_tunnel(0)
             .start();
 
-    let mut tunnels: HashMap<TunnelId, OnionTunnelWriter> = HashMap::new();
+    let mut tunnels: HashMap<TunnelId, TunnelWriter> = HashMap::new();
 
     let mut stdin = BufReader::new(io::stdin()).lines();
     loop {
@@ -50,7 +50,7 @@ async fn main() {
 async fn parse_command(
     cmd: String,
     onion: &OnionContext,
-    tunnels: &mut HashMap<TunnelId, OnionTunnelWriter>,
+    tunnels: &mut HashMap<TunnelId, TunnelWriter>,
     hostkey: &RsaPublicKey,
     peers: &mut mpsc::UnboundedSender<Peer>,
 ) {
@@ -98,7 +98,7 @@ async fn parse_command(
     }
 }
 
-fn handle_tunnel_data(mut tunnel: OnionTunnel) {
+fn handle_tunnel_data(mut tunnel: Tunnel) {
     tokio::spawn(async move {
         while let Ok(data) = tunnel.read().await {
             println!("Received data from tunnel {}: {:?}", tunnel.id(), data);
