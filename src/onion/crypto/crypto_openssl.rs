@@ -19,11 +19,15 @@ pub(crate) const SIGNATURE_LEN: usize = 512;
 
 pub(crate) struct EphemeralPrivateKey(pkey::PKey<pkey::Private>);
 pub(crate) struct EphemeralPublicKey(Bytes);
+
+/// A RSA public key.
 #[derive(Clone)]
 pub struct RsaPublicKey(Bytes);
+
+/// A RSA private key.
 pub struct RsaPrivateKey(pkey::PKey<pkey::Private>);
+
 pub(crate) struct SessionKey([u8; AES_128_CTR_KEY_LEN]);
-// TODO consider storing generic B: AsRef<[u8]> instead of Bytes (-> avoid allocations)
 
 pub(crate) fn fill_random(buf: &mut [u8]) {
     rand::rand_bytes(buf).unwrap()
@@ -64,6 +68,7 @@ pub(crate) fn generate_ephemeral_keypair() -> (EphemeralPrivateKey, EphemeralPub
 
 impl RsaPrivateKey {
     /// Reads a RSA private key from the specified file.
+    ///
     /// The key is expected to be in the DER format and PEM encoded.
     pub fn from_pem_file<P: AsRef<Path>>(path: P) -> Result<RsaPrivateKey> {
         let mut file = File::open(path)?;
@@ -73,6 +78,7 @@ impl RsaPrivateKey {
         Ok(RsaPrivateKey(pkey))
     }
 
+    /// Computes the corresponding public key.
     pub fn public_key(&self) -> RsaPublicKey {
         RsaPublicKey(self.0.public_key_to_der().unwrap().into())
     }
@@ -85,11 +91,16 @@ impl RsaPrivateKey {
 }
 
 impl RsaPublicKey {
-    pub fn new(bytes: &[u8]) -> Self {
+    /// Creates a RSA public key from the given data.
+    ///
+    /// The data is expected to be a DER encoded key in the RSAPublicKey format.
+    pub fn from_raw_bytes(bytes: &[u8]) -> Self {
         Self(bytes.to_vec().into())
     }
 
-    /// Converts a RSA public key from the SubjectPublicKeyInfo format
+    /// Creates a RSA public key from the given data.
+    ///
+    /// The data is expected to be a DER encoded key in the SubjectPublicKeyInfo format.
     pub fn from_subject_info(bytes: &[u8]) -> Self {
         Self(bytes.to_vec().into())
     }

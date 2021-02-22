@@ -18,9 +18,14 @@ pub(crate) const KEY_LEN: usize = 32;
 
 pub(crate) struct EphemeralPrivateKey(agreement::EphemeralPrivateKey);
 pub(crate) struct EphemeralPublicKey(agreement::UnparsedPublicKey<Bytes>);
+
+/// A RSA public key.
 #[derive(Clone)]
 pub struct RsaPublicKey(signature::UnparsedPublicKey<Bytes>);
+
+/// A RSA private key.
 pub struct RsaPrivateKey(signature::RsaKeyPair);
+
 pub(crate) struct SessionKey(aead::LessSafeKey);
 // TODO consider storing generic B: AsRef<[u8]> instead of Bytes (-> avoid allocations)
 
@@ -68,6 +73,7 @@ pub(crate) fn generate_ephemeral_keypair() -> (EphemeralPrivateKey, EphemeralPub
 
 impl RsaPrivateKey {
     /// Reads a RSA private key from the specified file.
+    ///
     /// The key is expected to be in the DER format and PEM encoded.
     pub fn from_pem_file<P: AsRef<Path>>(path: P) -> Result<RsaPrivateKey> {
         let file = BufReader::new(File::open(path)?);
@@ -81,6 +87,7 @@ impl RsaPrivateKey {
         Ok(RsaPrivateKey(signature::RsaKeyPair::from_der(&bytes)?))
     }
 
+    /// Computes the corresponding public key.
     pub fn public_key(&self) -> RsaPublicKey {
         let public_key_bytes = self.0.public_key().as_ref().to_vec().into();
         let public_key = signature::UnparsedPublicKey::new(
@@ -102,7 +109,10 @@ impl RsaPrivateKey {
 }
 
 impl RsaPublicKey {
-    pub fn new(bytes: &[u8]) -> Self {
+    /// Creates a RSA public key from the given data.
+    ///
+    /// The data is expected to be a DER encoded key in the RSAPublicKey format.
+    pub fn from_raw_bytes(bytes: &[u8]) -> Self {
         let public_key = signature::UnparsedPublicKey::new(
             &signature::RSA_PKCS1_2048_8192_SHA256,
             bytes.to_vec().into(),
@@ -110,7 +120,9 @@ impl RsaPublicKey {
         RsaPublicKey(public_key)
     }
 
-    /// Converts a RSA public key from the SubjectPublicKeyInfo format
+    /// Creates a RSA public key from the given data.
+    ///
+    /// The data is expected to be a DER encoded key in the SubjectPublicKeyInfo format.
     pub fn from_subject_info(bytes: &[u8]) -> Self {
         Self::new(&bytes[24..])
     }

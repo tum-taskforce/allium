@@ -61,8 +61,9 @@ pub use crate::onion::*;
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
 /// A remote peer characterized by its address, the port on which it is listening for onion
-/// connections and its public key. The public key is needed to verify the authenticity of
-/// signed messages received from this peer.
+/// connections and its public key.
+///
+/// The public key is needed to verify the authenticity of signed messages received from this peer.
 #[derive(Clone)]
 pub struct Peer {
     addr: SocketAddr,
@@ -85,12 +86,16 @@ impl fmt::Debug for Peer {
     }
 }
 
+/// A stream of [`Peer`]s used for constructing tunnels.
+///
+/// It is up to the user to choose an appropriate peer sampling and caching strategy.
 #[derive(Clone)]
 pub struct PeerProvider {
     inner: mpsc::Sender<oneshot::Sender<Peer>>,
 }
 
 impl PeerProvider {
+    /// Turns a given stream of [`Peer`]s into a [`PeerProvider`].
     pub fn from_stream<S>(mut stream: S) -> Self
     where
         S: Stream<Item = Peer> + Unpin + Send + Sync + 'static,

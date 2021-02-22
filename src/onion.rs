@@ -33,6 +33,15 @@ const INCOMING_BUFFER_SIZE: usize = 100;
 
 static TUNNEL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// A tunnel endpoint. This type persists over tunnel reconstructions.
+///
+/// Use [`OnionContext::build_tunnel`] to build a new tunnel.
+///
+/// We differentiate persistent and ephemeral tunnels.
+/// A persistent tunnel is characterized only by its ID and its endpoints, while an ephemeral
+/// tunnel is specific to the intermediate hops.
+/// As a user, you will only deal with persistent tunnels, which forward data to and from
+/// periodically rebuilt ephemeral tunnels.
 pub struct Tunnel {
     tunnel_id: TunnelId,
     data_tx: mpsc::UnboundedSender<Bytes>,
@@ -59,6 +68,9 @@ impl Tunnel {
         (tunnel, data_tx2, data_rx2)
     }
 
+    /// Receive data from the remote peer.
+    ///
+    /// Returns an error if the connection was closed.
     pub async fn read(&mut self) -> Result<Bytes> {
         self.data_rx
             .recv()
@@ -66,6 +78,11 @@ impl Tunnel {
             .ok_or(anyhow!("Connection closed."))
     }
 
+    /// Send data to the remote peer.
+    ///
+    /// The data may be split across multiple messages if it is too large to fit into a single one.
+    ///
+    /// Returns an error if the connection was closed.
     pub fn write(&self, mut buf: Bytes) -> Result<()> {
         while !buf.is_empty() {
             let part = buf.split_to(cmp::min(protocol::MAX_DATA_SIZE, buf.len()));
@@ -76,10 +93,12 @@ impl Tunnel {
         Ok(())
     }
 
+    /// Returns the unique id of this tunnel.
     pub fn id(&self) -> TunnelId {
         self.tunnel_id
     }
 
+    /// Create an additional write handle to this tunnel.
     pub fn writer(&self) -> TunnelWriter {
         TunnelWriter {
             tunnel_id: self.tunnel_id,
@@ -122,6 +141,11 @@ impl Drop for Tunnel {
     }
 }
 
+/// A write handle to a [`Tunnel`].
+///
+/// Each tunnel may have arbitrarily many [`TunnelWriter`]s.
+/// This is useful because this type implements [`Clone`], [`Send`] and [`Sync`] and can thus
+/// safely be shared across threads.
 #[derive(Clone)]
 pub struct TunnelWriter {
     tunnel_id: TunnelId,
@@ -152,6 +176,10 @@ impl fmt::Debug for TunnelWriter {
     }
 }
 
+/// A handle to the underlying onion router allowing the construction of new tunnels.
+///
+/// Use [`OnionBuilder`] to configure and start a new onion router instance.
+/// This type implements [`Clone`], [`Send`] and [`Sync`], so it can be shared across threads.
 #[derive(Clone)]
 pub struct OnionContext {
     peer_provider: PeerProvider,
@@ -193,8 +221,7 @@ impl OnionContext {
         ctx
     }
 
-    /// Builds a new tunnel to `dest` over `n_hops` additional peers.
-    /// Performs a handshake with each hop and then spawns a task for handling incoming messages
+    /// Builds a new tunnel to `dest`.
     pub async fn build_tunnel(&self, dest: Peer) -> Result<Tunnel> {
         self.build_tunnel_internal(Target::Peer(dest)).await
     }
@@ -219,6 +246,7 @@ impl OnionContext {
         ready_rx.await?
     }
 
+    /// Send cover data with a fake payload of the given size.
     pub fn send_cover(&self, size: u16) -> Result<()> {
         let packet_count = (size as usize + protocol::MAX_DATA_SIZE - 1) / protocol::MAX_DATA_SIZE;
         for _ in 0..packet_count {
@@ -278,11 +306,13 @@ impl CoverHandler {
     }
 }
 
+/// A stream of incoming tunnel connections.
 pub struct OnionIncoming {
     incoming: mpsc::Receiver<Tunnel>,
 }
 
 impl OnionIncoming {
+    /// Returns a [`Tunnel`] handle once a new incoming connection is made.
     pub async fn next(&mut self) -> Option<Tunnel> {
         self.incoming.recv().await
     }
@@ -418,6 +448,7 @@ impl RoundHandler {
     }
 }
 
+/// Used for configuring and starting new onion router instances.
 pub struct OnionBuilder {
     listen_addr: SocketAddr,
     hostkey: RsaPrivateKey,
@@ -428,7 +459,8 @@ pub struct OnionBuilder {
 }
 
 impl OnionBuilder {
-    /// Construct a new onion instance.
+    /// Initialized the construction of a new onion router instance.
+    ///
     /// Returns a builder which allows further configuration.
     pub fn new(
         listen_addr: SocketAddr,
@@ -445,22 +477,35 @@ impl OnionBuilder {
         }
     }
 
+    /// Sets whether cover traffic should be enabled.
+    ///
+    /// If cover traffic is disabled all calls to [`OnionContext::send_cover`] will fail.
+    /// The default value is true.
     pub fn enable_cover_traffic(mut self, enable: bool) -> Self {
         self.enable_cover = enable;
         self
     }
 
+    /// Sets the number of additional hops per tunnel, not counting the two endpoints.
+    ///
+    /// The default value is 2.
     pub fn set_hops_per_tunnel(mut self, n_hops: usize) -> Self {
         self.n_hops = n_hops;
         self
     }
 
+    /// Sets the amount of time after which tunnels will be rebuilt.
+    ///
+    /// The default value is 30 seconds.
     pub fn set_round_duration(mut self, dur: Duration) -> Self {
         self.round_duration = dur;
         self
     }
 
-    /// Returns the constructed instance.
+    /// Starts the onion router.
+    ///
+    /// Returns a [`OnionContext`] handle used for building new tunnels and a stream of incoming
+    /// connections [`OnionIncoming`].
     pub fn start(self) -> (OnionContext, OnionIncoming) {
         let OnionBuilder {
             listen_addr,

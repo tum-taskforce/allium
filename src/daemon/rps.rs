@@ -89,7 +89,7 @@ impl SocketRpsModule {
                     .find(|(m, _)| *m == Module::Onion)
                     .ok_or_else(|| anyhow!("Peer does not expose onion port"))?;
                 let peer_addr = SocketAddr::new(peer_addr, *peer_port);
-                let peer_hostkey = RsaPublicKey::new(peer_hostkey.as_ref());
+                let peer_hostkey = RsaPublicKey::from_raw_bytes(peer_hostkey.as_ref());
                 Ok(Peer::new(peer_addr, peer_hostkey))
             }
         }

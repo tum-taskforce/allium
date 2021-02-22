@@ -19,6 +19,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 const MAX_PEER_FAILURES: usize = 10;
 
+/// The unique ID of a tunnel.
 pub type TunnelId = u32;
 
 #[derive(Error, Debug)]
