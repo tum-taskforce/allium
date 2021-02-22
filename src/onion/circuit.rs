@@ -15,7 +15,7 @@ use log::warn;
 use std::fmt;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex, MutexGuard};
+use tokio::sync::mpsc;
 use tokio::time;
 use tokio::time::Duration;
 
@@ -30,29 +30,24 @@ pub(crate) type CircuitId = u16;
 /// The struct stores its unique ID and a socket.
 pub(crate) struct Circuit {
     pub(crate) id: CircuitId,
-    pub(crate) socket: Mutex<OnionSocket<TcpStream>>,
+    pub(crate) socket: OnionSocket<TcpStream>,
 }
 
 impl Circuit {
     pub(crate) fn new(id: CircuitId, socket: OnionSocket<TcpStream>) -> Self {
-        Circuit {
-            id,
-            socket: Mutex::new(socket),
-        }
+        Circuit { id, socket }
     }
 
-    pub(crate) async fn socket(&self) -> MutexGuard<'_, OnionSocket<TcpStream>> {
-        self.socket.lock().await
+    pub(crate) async fn accept_opaque(
+        &mut self,
+    ) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
+        self.socket.accept_opaque().await
     }
 
-    pub(crate) async fn accept_opaque(&self) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
-        self.socket().await.accept_opaque().await
-    }
-
-    pub(crate) async fn teardown_with_timeout(&self) {
+    pub(crate) async fn teardown_with_timeout(&mut self) {
         match time::timeout(TEARDOWN_TIMEOUT, {
             // NOTE: Ignore any errors
-            self.socket().await.teardown(self.id)
+            self.socket.teardown(self.id)
         })
         .await
         {
@@ -216,10 +211,9 @@ impl CircuitHandler {
                     }
                     Err(TunnelProtocolError::Digest) => {
                         // message not directed to us, forward to relay_socket
-                        if let State::Router { out_circuit } = &self.state {
+                        if let State::Router { out_circuit } = &mut self.state {
                             out_circuit
-                                .socket()
-                                .await
+                                .socket
                                 .forward_opaque(out_circuit.id, msg.payload)
                                 .await?;
                             Ok(())
@@ -271,8 +265,7 @@ impl CircuitHandler {
                 match self.handle_tunnel_message_extend(dest, key).await {
                     Ok((out_circuit, peer_key)) => {
                         self.in_circuit
-                            .socket()
-                            .await
+                            .socket
                             .finalize_tunnel_handshake(
                                 self.in_circuit.id,
                                 peer_key,
@@ -283,8 +276,7 @@ impl CircuitHandler {
                     }
                     Err(e) => {
                         self.in_circuit
-                            .socket()
-                            .await
+                            .socket
                             .reject_tunnel_handshake(self.in_circuit.id, &self.session_key, e)
                             .await?;
                         return Ok(());
@@ -297,8 +289,7 @@ impl CircuitHandler {
                    since Alice in the tunnel waits for a EXTENDED packet
                 */
                 self.in_circuit
-                    .socket()
-                    .await
+                    .socket
                     .reject_tunnel_handshake(
                         self.in_circuit.id,
                         &self.session_key,
@@ -313,8 +304,7 @@ impl CircuitHandler {
                 self.teardown_out_circuit().await;
 
                 self.in_circuit
-                    .socket()
-                    .await
+                    .socket
                     .finalize_tunnel_truncate(self.in_circuit.id, &self.session_key)
                     .await?;
 
@@ -322,8 +312,7 @@ impl CircuitHandler {
             }
             (TunnelRequest::Truncate, state) => {
                 self.in_circuit
-                    .socket()
-                    .await
+                    .socket
                     .reject_tunnel_truncate(
                         self.in_circuit.id,
                         &self.session_key,
@@ -423,8 +412,7 @@ impl CircuitHandler {
                 // encrypt message and try to send it to socket
                 msg.encrypt(self.session_key.iter())?;
                 self.in_circuit
-                    .socket()
-                    .await
+                    .socket
                     .forward_opaque(self.in_circuit.id, msg.payload)
                     .await?;
                 Ok(())
@@ -459,16 +447,14 @@ impl CircuitHandler {
             Some(data) => {
                 let circuit_id = self.in_circuit.id;
                 self.in_circuit
-                    .socket()
-                    .await
+                    .socket
                     .send_data(circuit_id, tunnel_id, data, &self.session_key)
                     .await?;
             }
             None => {
                 let circuit_id = self.in_circuit.id;
                 self.in_circuit
-                    .socket()
-                    .await
+                    .socket
                     .end(circuit_id, tunnel_id, &self.session_key)
                     .await?;
                 self.state = State::Default;
@@ -501,7 +487,7 @@ impl CircuitHandler {
     }
 
     async fn teardown_out_circuit(&mut self) {
-        if let State::Router { out_circuit } = &self.state {
+        if let State::Router { out_circuit } = &mut self.state {
             out_circuit.teardown_with_timeout().await;
         }
     }

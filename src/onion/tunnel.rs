@@ -11,7 +11,6 @@ use bytes::Bytes;
 use log::{trace, warn};
 use std::fmt;
 use std::mem;
-use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -111,8 +110,7 @@ impl Tunnel {
 
         let peer_key = self
             .out_circuit
-            .socket()
-            .await
+            .socket
             .initiate_tunnel_handshake(self.out_circuit.id, peer.addr, key, &self.session_keys)
             .await?;
 
@@ -140,8 +138,7 @@ impl Tunnel {
         }
 
         self.out_circuit
-            .socket()
-            .await
+            .socket
             .truncate_tunnel(self.out_circuit.id, &self.session_keys[n..])
             .await?;
 
@@ -166,20 +163,18 @@ impl Tunnel {
     /// before tearing down the old tunnel. Be aware that the other endpoint peer should not be
     /// allowed to use the old tunnel indefinitely despite receiving a `TUNNEL END` packet. Any old
     /// tunnel that has been replaced should only have finite lifetime.
-    pub(crate) async fn begin(&self) -> TunnelResult<()> {
+    pub(crate) async fn begin(&mut self) -> TunnelResult<()> {
         self.out_circuit
-            .socket()
-            .await
+            .socket
             .begin(self.out_circuit.id, self.id, &self.session_keys)
             .await?;
         Ok(())
     }
 
     /// Ends a data connection with the last hop in the tunnel
-    pub(crate) async fn end(&self) -> TunnelResult<()> {
+    pub(crate) async fn end(&mut self) -> TunnelResult<()> {
         self.out_circuit
-            .socket()
-            .await
+            .socket
             .end(self.out_circuit.id, self.id, &self.session_keys)
             .await?;
         Ok(())
@@ -191,10 +186,9 @@ impl Tunnel {
     /// This can be used to prevent a tunnel from timing out or to send cover traffic to the final
     /// hop. This may also be used to check the integrity, since any failure would cause the hops
     /// to initiate a teardown on the tunnel.
-    pub(crate) async fn keep_alive(&self) -> TunnelResult<()> {
+    pub(crate) async fn keep_alive(&mut self) -> TunnelResult<()> {
         self.out_circuit
-            .socket()
-            .await
+            .socket
             .send_keep_alive(self.out_circuit.id, &self.session_keys)
             .await?;
         Ok(())
@@ -222,12 +216,12 @@ impl Tunnel {
         Ok(())
     }
 
-    async fn unbuild(&self) {
+    async fn unbuild(&mut self) {
         // TODO graceful deconstruction
         self.teardown().await;
     }
 
-    async fn teardown(&self) {
+    async fn teardown(&mut self) {
         self.out_circuit.teardown_with_timeout().await;
     }
 }
@@ -453,8 +447,7 @@ impl TunnelHandler {
                 let tunnel_id = self.tunnel.id;
                 self.tunnel
                     .out_circuit
-                    .socket()
-                    .await
+                    .socket
                     .send_data(circuit_id, tunnel_id, data, &self.tunnel.session_keys)
                     .await?;
             }
@@ -488,7 +481,7 @@ impl TunnelHandler {
                     .ok_or_else(|| anyhow!("Switchover failed: no next tunnel"))?;
 
                 mem::swap(&mut self.tunnel, &mut new_tunnel);
-                let old_tunnel = new_tunnel;
+                let mut old_tunnel = new_tunnel;
                 self.tunnel.begin().await?;
                 old_tunnel.end().await?;
 
@@ -501,7 +494,7 @@ impl TunnelHandler {
             (Event::Switchover, State::Destroying) => {
                 self.tunnel.end().await?;
                 self.tunnel.unbuild().await;
-                if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
+                if let Some(mut next_tunnel) = self.next_tunnel.lock().await.take() {
                     next_tunnel.unbuild().await;
                 }
                 State::Destroyed
@@ -510,7 +503,7 @@ impl TunnelHandler {
             (Event::KeepAlive, State::Destroyed) => State::Destroyed, // ignore this event
             (Event::KeepAlive, state) => {
                 self.tunnel.keep_alive().await?;
-                if let Some(next_tunnel) = self.next_tunnel.lock().await.deref() {
+                if let Some(next_tunnel) = self.next_tunnel.lock().await.as_mut() {
                     next_tunnel.keep_alive().await?;
                 }
                 state
