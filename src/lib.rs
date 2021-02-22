@@ -43,7 +43,9 @@
 //! ## Daemon
 //!
 //! In addition to being used as a Rust library, Allium can also be run as a stand-alone daemon,
-//! which can be controlled over a unix socket.
+//! which can be controlled over a socket.
+//! Refer to the [README](https://github.com/tum-taskforce/allium/blob/master/README.md) for more
+//! information on how to use Allium as a daemon.
 //!
 
 use std::fmt;

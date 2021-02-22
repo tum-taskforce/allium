@@ -1,6 +1,6 @@
 [package]
 name = "allium"
-version = "0.1.1"
+version = "0.1.2"
 authors = [
     "Dominik Stolz <d.stolz@tum.de>",
     "Oliver Jacobsen <oliver.jacobsen@tum.de>"
