@@ -3,46 +3,54 @@
 
 ![logo](logo.svg)
 
-Allium
-======
+Allium 🧅
+=========
 
 > Allium is a genus of monocotyledonous flowering plants that includes hundreds of species, including the cultivated onion, garlic, scallion, shallot, leek, and chives.
 > — [Wikipedia](https://en.wikipedia.org/wiki/Allium)
 
-Allium is a onion routing library written in Rust.
-It allows the communication over tunnels constructed with layered encryption across peers chosen from a provided pool.
-Apart from being used as a Rust library, Allium can also be run as a stand-alone daemon controlled over a unix socket. 
+Allium is a implementation of [onion routing](https://en.wikipedia.org/wiki/Onion_routing) written in Rust.
+It enables anonymous communication over encrypted tunnels.
+In addition to being used as a Rust library, Allium can also be run as a stand-alone daemon, which can be controlled over a TCP socket.
 
-## Building and Running
-Rust and Cargo (version 1.45.0 or newer) are required for building.
-If not installed already, install both with [rustup](https://rustup.rs/).
+## Features
 
-After cloning the repository, build and run the project with:
+- Asynchronous design based on the Tokio runtime
+- Periodic, seamless tunnel reconstruction
+- Fixed-size packets
+- Cover traffic
+
+## Getting started
+
+The [documentation](https://docs.rs/allium/#getting-started) contains a short section on how to get started with the Allium library.
+
+## Daemon
+
+The daemon can be installed with:
+
 ```
-$ cargo run --release -- [ARGS]
-```
-Alternatively the steps of building and running can be done separately with:
-```
-$ cargo build --release
-$ target/release/allium-daemon [ARGS]
+$ cargo install --bin allium-daemon allium
 ```
 
-Substitute `[ARGS]` with the following command line parameters:
-* `[config file path]`: (optional) Specify the path to the configuration file. Defaults to `config.ini`.
+After installation, the daemon can be run like this:
 
-## Configuration
+```
+$ allium-daemon [config file path]
+```
 
+The Allium daemon requires a configuration file, which defaults to `config.ini` in the current working directory.
+A different path can be specified via an optional command line parameter.
 The configuration file must be in `*.ini` or `*.toml` format.
 Example `ini`-configuration:
 ```ini
 [onion]
-; The address and port on which the onion module is listening for API connections
+; The address and port on which the daemon listening for API connections
 api_address = 127.0.0.1:4200
-; The port on which connections from other onion peers are accepted
+; The port on which connections from other peers in the onion network are accepted
 p2p_port = 4201
-; The address on which connections from other onion peers are accepted
+; The address on which connections from other peers in the onion network are accepted
 p2p_hostname = 127.0.0.1
-; The path to a PEM-encoded RSA keypair used for proving this module's identity to peers
+; The path to a PEM-encoded RSA keypair used for signing messages
 hostkey = testkey.pem
 ; The number of hops (excluding the destination) in each tunnel (should be at least 2)
 hops = 2
@@ -52,20 +60,8 @@ cover_traffic = true
 round_duration = 120 
 
 [rps]
-; The address and port the RPS module is listening on
+; The address and port the random-peer-sampling module is listening on
 api_address = 127.0.0.1:4100
-```
-
-## Hostkey
-A suitable RSA keypair can be generated with OpenSSL:
-```
-$ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out testkey.pkcs8.pem
-$ openssl rsa -in testkey.pkcs8.pem -out testkey.pem
-```
-
-The public key supplied in a `BUILD` message must be in the DER-encoded `SubjectPublicKeyInfo` format which can be obtained like this:
-```
-$ openssl rsa -in testkey.pem -outform DER -pubout -out testkey_pub.der
 ```
 
 ## CLI Example
@@ -82,12 +78,6 @@ $ RUST_LOG=trace cargo run --example cli
 Tests can be run with
 ```
 cargo test
-```
-
-## Installing
-Install the binary to `~/.cargo/bin/` by running the following command inside the cloned directory.
-```
-cargo install --path .
 ```
 
 ## Known Issues
