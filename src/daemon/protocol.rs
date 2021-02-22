@@ -4,7 +4,6 @@ use crate::utils::{self, FromBytes, ToBytes};
 use allium::Result;
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use serde::export::Formatter;
 use std::fmt;
 use std::net::SocketAddr;
 
@@ -43,7 +42,7 @@ pub enum OnionRequest {
 }
 
 impl fmt::Debug for OnionRequest {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OnionRequest::Build(dst_addr, _) => {
                 f.debug_struct("Build").field("dst_addr", dst_addr).finish()
