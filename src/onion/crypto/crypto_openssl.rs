@@ -122,8 +122,8 @@ impl SessionKey {
         private_key: EphemeralPrivateKey,
         peer_key: &EphemeralPublicKey,
     ) -> Result<SessionKey> {
-        let mut deriver = derive::Deriver::new(&private_key.0)?;
         let pkey = pkey::PKey::public_key_from_der(peer_key.0.as_ref())?;
+        let mut deriver = derive::Deriver::new(&private_key.0)?;
         deriver.set_peer(&pkey)?;
 
         let mut key = [0u8; AES_128_CTR_KEY_LEN];
