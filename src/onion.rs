@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use circuit::CircuitHandler;
 use crypto::RsaPrivateKey;
-use log::{debug, info, trace, warn};
+use log::{debug, info, warn};
 use socket::OnionSocket;
 use std::collections::{hash_map, HashMap};
 use std::net::SocketAddr;

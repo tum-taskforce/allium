@@ -245,8 +245,7 @@ impl CircuitHandler {
             Err(OnionSocketError::TeardownMessage) => Err(anyhow!("In Stream torn down")),
             Err(e) => {
                 // Panicking stub
-                warn!("An unexpected error occurred during handling of the in_socket");
-                panic!(e)
+                panic!("An unexpected error occurred during handling of the in_socket: {:?}", e);
             }
         }
     }
@@ -432,9 +431,7 @@ impl CircuitHandler {
                 Err(anyhow!("Out Stream torn down"))
             }
             Err(e) => {
-                // Panicking stub
-                warn!("An unexpected error occurred during handling of the in_socket");
-                panic!(e)
+                panic!("An unexpected error occurred during handling of the in_socket: {:?}", e);
             }
         }
     }

@@ -1,12 +1,10 @@
 use crate::Result;
 use anyhow::anyhow;
-use ini::{Ini, Properties};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -59,7 +57,11 @@ impl Config {
         Ok(toml::from_str(string)?)
     }
 
+    #[cfg(feature = "rust-ini")]
     pub fn from_ini(string: &str) -> Result<Self> {
+        use ini::{Ini, Properties};
+        use std::str::FromStr;
+
         fn required<F: FromStr>(sec: &Properties, key: &str) -> Result<F> {
             sec.get(key)
                 .ok_or(anyhow!("Missing required property {}", key))?
@@ -102,6 +104,11 @@ impl Config {
                 })
             })?;
         Ok(Config { onion, rps })
+    }
+
+    #[cfg(not(feature = "rust-ini"))]
+    pub fn from_ini(_string: &str) -> Result<Self> {
+        Err(anyhow!("INI support is disabled"))
     }
 
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {

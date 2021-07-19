@@ -9,7 +9,7 @@ Allium 🧅
 > Allium is a genus of monocotyledonous flowering plants that includes hundreds of species, including the cultivated onion, garlic, scallion, shallot, leek, and chives.
 > — [Wikipedia](https://en.wikipedia.org/wiki/Allium)
 
-Allium is a implementation of [onion routing](https://en.wikipedia.org/wiki/Onion_routing) written in Rust.
+Allium is an implementation of [onion routing](https://en.wikipedia.org/wiki/Onion_routing) written in Rust.
 It enables anonymous communication over encrypted tunnels.
 In addition to being used as a Rust library, Allium can also be run as a stand-alone daemon, which can be controlled over a TCP socket.
 
@@ -29,7 +29,7 @@ The [documentation](https://docs.rs/allium/#getting-started) contains a short se
 The daemon can be installed with:
 
 ```
-$ cargo install --bin allium-daemon allium
+$ cargo install allium-daemon
 ```
 
 After installation, the daemon can be run like this:
@@ -81,7 +81,7 @@ cargo test
 ```
 
 ## Known Issues
-* During switchover we kill the old tunnel without draining any possibly leftover Data messages. This may cause packet loss.
+* During switchover, we kill the old tunnel without draining any possibly leftover Data messages. This may cause packet loss.
 * Circuit IDs (and to some degree tunnel IDs) are generated randomly. Although unlikely, there might be duplicates.
 * We don't sanitize the output from the RPS, so tunnels with loops or random cover tunnels with ourselves as destination might be possible, depending on the implementation of the RPS.
 
