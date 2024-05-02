@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::{error::Elapsed, timeout, Duration};
+use tokio::time::{self, error::Elapsed, Duration};
 
 /// timeout applied during a read on the socket
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -77,24 +77,49 @@ impl<E: fmt::Debug> From<TunnelProtocolError<E>> for OnionSocketError {
 /// The socket layer serves as glue between the onion protocol and higher layers.
 pub(crate) struct OnionSocket<S> {
     stream: S,
-    buf: BytesMut,
+    write_buf: BytesMut,
+    read_buf: BytesMut,
 }
 
 impl<S> OnionSocket<S> {
     pub(crate) fn new(stream: S) -> Self {
         OnionSocket {
             stream,
-            buf: BytesMut::with_capacity(MESSAGE_SIZE),
+            write_buf: BytesMut::with_capacity(MESSAGE_SIZE),
+            read_buf: BytesMut::with_capacity(MESSAGE_SIZE),
         }
     }
 }
 
 impl<S: AsyncRead + Unpin> OnionSocket<S> {
-    async fn read_buf_from_stream(&mut self) -> SocketResult<usize> {
-        Ok(timeout(READ_TIMEOUT, self.stream.read_exact(&mut self.buf)).await??)
+    async fn read_buf_from_stream(&mut self, timeout: bool) -> SocketResult<BytesMut> {
+        // The future returned by this function may be cancelled before a full message has been
+        // read. In this case the already read bytes remain in self.read_buf. Only once a full
+        // message has been read, self.read_buf is parsed and replaced by a new buffer. The re-
+        // placement is necessary since the buffer is modified during parsing.
+
+        loop {
+            if self.read_buf.len() == MESSAGE_SIZE {
+                let msg_buf =
+                    std::mem::replace(&mut self.read_buf, BytesMut::with_capacity(MESSAGE_SIZE));
+                return Ok(msg_buf);
+            }
+
+            let bytes_read = if timeout {
+                time::timeout(READ_TIMEOUT, self.stream.read_buf(&mut self.read_buf)).await??
+            } else {
+                self.stream.read_buf(&mut self.read_buf).await?
+            };
+
+            if 0 == bytes_read {
+                return Err(OnionSocketError::StreamTerminated(io::Error::from(
+                    io::ErrorKind::UnexpectedEof,
+                )));
+            }
+        }
     }
 
-    /// Listends for incoming `CIRCUIT CREATE` messages and returns the circuit id and key in this
+    /// Listens for incoming `CIRCUIT CREATE` messages and returns the circuit id and key in this
     /// message.
     ///
     /// # Errors:
@@ -103,9 +128,8 @@ impl<S: AsyncRead + Unpin> OnionSocket<S> {
     /// - `TeardownMessage` - A `TEARDOWN` message has been received instead of `CIRCUIT CREATE`
     /// - `BrokenMessage` - The received answer message could not be parsed
     pub(crate) async fn accept_handshake(&mut self) -> SocketResult<(CircuitId, Key)> {
-        self.buf.resize(MESSAGE_SIZE, 0);
-        self.read_buf_from_stream().await?;
-        let msg = CircuitCreate::try_read_from(&mut self.buf)?;
+        let mut buf = self.read_buf_from_stream(true).await?;
+        let msg = CircuitCreate::try_read_from(&mut buf)?;
         Ok((msg.circuit_id, msg.key))
     }
 
@@ -116,6 +140,8 @@ impl<S: AsyncRead + Unpin> OnionSocket<S> {
     /// Returns a `CIRCUIT OPAQUE` message if the received message could successfully be parsed. If
     /// not, an error will be returned.
     ///
+    /// This method is cancellation-safe.
+    ///
     /// # Errors:
     /// - `StreamTerminated` - The stream is broken
     /// - `TeardownMessage` - A `TEARDOWN` message has been received instead of `CIRCUIT OPAQUE`
@@ -123,18 +149,19 @@ impl<S: AsyncRead + Unpin> OnionSocket<S> {
     pub(crate) async fn accept_opaque(
         &mut self,
     ) -> SocketResult<CircuitOpaque<CircuitOpaqueBytes>> {
-        self.buf.resize(MESSAGE_SIZE, 0);
-        // NOTE: no timeout applied here, parent is supposed to handle that
-        self.stream.read_exact(&mut self.buf).await?;
-        //.context("Error while reading CircuitOpaque")?;
-        let msg = CircuitOpaque::try_read_from(&mut self.buf)?;
-        Ok(msg)
+        let mut buf = self.read_buf_from_stream(false).await?;
+        let msg = CircuitOpaque::try_read_from(&mut buf)?;
+        return Ok(msg);
     }
 }
 
 impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     async fn write_buf_to_stream(&mut self) -> SocketResult<()> {
-        Ok(timeout(WRITE_TIMEOUT, self.stream.write_all(self.buf.as_ref())).await??)
+        Ok(time::timeout(
+            WRITE_TIMEOUT,
+            self.stream.write_all(self.write_buf.as_ref()),
+        )
+        .await??)
     }
 
     async fn encrypt_and_send_opaque<K: ToBytes>(
@@ -151,8 +178,8 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
             },
         };
 
-        req.write_to(&mut self.buf);
-        assert_eq!(self.buf.len(), MESSAGE_SIZE);
+        req.write_to(&mut self.write_buf);
+        assert_eq!(self.write_buf.len(), MESSAGE_SIZE);
         // TODO omit timeout here?
         self.write_buf_to_stream().await
     }
@@ -168,9 +195,9 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         key: SignKey<'_>,
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let res = CircuitCreated { circuit_id, key };
-        res.write_padded_to(&mut self.buf, MESSAGE_SIZE);
+        res.write_padded_to(&mut self.write_buf, MESSAGE_SIZE);
         self.write_buf_to_stream().await?;
         Ok(())
     }
@@ -186,7 +213,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         key: VerifyKey,
         session_keys: &[SessionKey],
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let tunnel_res = TunnelResponseExtended { peer_key: key };
         self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_res)
             .await
@@ -205,7 +232,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         session_keys: &[SessionKey],
         error: TunnelExtendedError,
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         self.encrypt_and_send_opaque(circuit_id, session_keys, error)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
@@ -221,7 +248,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         session_keys: &[SessionKey],
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let tunnel_res = TunnelResponseTruncated;
         self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_res)
             .await
@@ -240,7 +267,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         session_keys: &[SessionKey],
         error: TunnelTruncatedError,
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         self.encrypt_and_send_opaque(circuit_id, session_keys, error)
             .await
         //.context("Error while writing CircuitOpaque<TunnelResponse::Extended>")?;
@@ -256,13 +283,13 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         payload: CircuitOpaqueBytes,
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let msg = CircuitOpaque {
             circuit_id,
             payload,
         };
 
-        msg.write_padded_to(&mut self.buf, MESSAGE_SIZE);
+        msg.write_padded_to(&mut self.write_buf, MESSAGE_SIZE);
         // FIXME Do we want to apply the timeout here? Generally: no, but what do we do instead?
         self.write_buf_to_stream().await?;
         //.context("Error while writing CircuitOpaque")?;
@@ -275,9 +302,9 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
     /// - `StreamTerminated` - The stream is broken
     /// - `StreamTimeout` -  The stream operations timed out
     pub(crate) async fn teardown(&mut self, circuit_id: CircuitId) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let res = CircuitTeardown { circuit_id };
-        res.write_padded_to(&mut self.buf, MESSAGE_SIZE);
+        res.write_padded_to(&mut self.write_buf, MESSAGE_SIZE);
         // NOTE: A timeout needs to be applied here
         self.write_buf_to_stream().await?;
         Ok(())
@@ -298,7 +325,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         tunnel_id: TunnelId,
         session_keys: &[SessionKey],
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let tunnel_res = TunnelRequest::Begin(tunnel_id);
         self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_res)
             .await
@@ -311,7 +338,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         data: Bytes,
         session_keys: &[SessionKey],
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let tunnel_req = TunnelRequest::Data(tunnel_id, data);
         self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_req)
             .await
@@ -330,7 +357,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         tunnel_id: TunnelId,
         session_keys: &[SessionKey],
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let tunnel_res = TunnelRequest::End(tunnel_id);
         self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_res)
             .await
@@ -341,7 +368,7 @@ impl<S: AsyncWrite + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         session_keys: &[SessionKey],
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let tunnel_req = TunnelRequest::KeepAlive;
         self.encrypt_and_send_opaque(circuit_id, session_keys, tunnel_req)
             .await
@@ -365,14 +392,14 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         key: Key,
     ) -> SocketResult<VerifyKey> {
-        self.buf.clear();
+        self.write_buf.clear();
         let req = CircuitCreate { circuit_id, key };
 
-        req.write_padded_to(&mut self.buf, MESSAGE_SIZE);
+        req.write_padded_to(&mut self.write_buf, MESSAGE_SIZE);
         self.write_buf_to_stream().await?;
 
-        self.read_buf_from_stream().await?;
-        let res = CircuitCreated::try_read_from(&mut self.buf)?;
+        let mut read_buf = self.read_buf_from_stream(true).await?;
+        let res = CircuitCreated::try_read_from(&mut read_buf)?;
         if res.circuit_id == circuit_id {
             Ok(res.key)
         } else {
@@ -401,7 +428,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         key: Key,
         session_keys: &[SessionKey],
     ) -> SocketResult<VerifyKey> {
-        self.buf.clear();
+        self.write_buf.clear();
         let tunnel_req = TunnelRequest::Extend(peer_addr, key);
         let req = CircuitOpaque {
             circuit_id,
@@ -411,13 +438,13 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             },
         };
 
-        req.write_to(&mut self.buf);
-        assert_eq!(self.buf.len(), MESSAGE_SIZE);
+        req.write_to(&mut self.write_buf);
+        assert_eq!(self.write_buf.len(), MESSAGE_SIZE);
         // TODO Fix timeout
         self.write_buf_to_stream().await?;
 
-        self.read_buf_from_stream().await?;
-        let mut res = CircuitOpaque::try_read_from(&mut self.buf)?;
+        let mut read_buf = self.read_buf_from_stream(true).await?;
+        let mut res = CircuitOpaque::try_read_from(&mut read_buf)?;
 
         if res.circuit_id != circuit_id {
             return Err(OnionSocketError::BrokenMessage);
@@ -451,7 +478,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
         circuit_id: CircuitId,
         session_keys: &[SessionKey],
     ) -> SocketResult<()> {
-        self.buf.clear();
+        self.write_buf.clear();
         let tunnel_req = TunnelRequest::Truncate;
         let req = CircuitOpaque {
             circuit_id,
@@ -461,13 +488,13 @@ impl<S: AsyncWrite + AsyncRead + Unpin> OnionSocket<S> {
             },
         };
 
-        req.write_to(&mut self.buf);
-        assert_eq!(self.buf.len(), MESSAGE_SIZE);
+        req.write_to(&mut self.write_buf);
+        assert_eq!(self.write_buf.len(), MESSAGE_SIZE);
         // TODO Fix timeout
         self.write_buf_to_stream().await?;
 
-        self.read_buf_from_stream().await?;
-        let mut res = CircuitOpaque::try_read_from(&mut self.buf)?;
+        let mut read_buf = self.read_buf_from_stream(true).await?;
+        let mut res = CircuitOpaque::try_read_from(&mut read_buf)?;
 
         if res.circuit_id != circuit_id {
             return Err(OnionSocketError::BrokenMessage);
@@ -495,7 +522,6 @@ impl<S: fmt::Debug> fmt::Debug for OnionSocket<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OnionSocket")
             .field("stream", &self.stream)
-            .field("buf_len", &self.buf.len())
             .finish()
     }
 }

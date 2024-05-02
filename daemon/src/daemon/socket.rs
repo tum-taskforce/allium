@@ -1,6 +1,7 @@
 use crate::utils::{ToBytes, TryFromBytes};
 use crate::Result;
 use bytes::BytesMut;
+use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub struct DaemonSocket<S> {
@@ -19,15 +20,32 @@ impl<S> DaemonSocket<S> {
 
 impl<S: AsyncRead + Unpin> DaemonSocket<S> {
     pub async fn read_next<M: TryFromBytes<anyhow::Error>>(&mut self) -> Result<M> {
-        let mut size_buf = [0u8; 2];
-        self.stream.read_exact(&mut size_buf).await?;
-        let size = u16::from_be_bytes(size_buf) as usize;
+        let size = loop {
+            if self.buf.len() >= 2 {
+                break u16::from_be_bytes(self.buf[..2].try_into().unwrap()) as usize;
+            }
 
-        self.buf.resize(size, 0);
-        self.buf[0] = size_buf[0];
-        self.buf[1] = size_buf[1];
-        self.stream.read_exact(&mut self.buf[2..]).await?;
-        Ok(M::try_read_from(&mut self.buf)?)
+            let bytes_read = self.stream.read_buf(&mut self.buf).await?;
+            if 0 == bytes_read {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+        };
+
+        // This method reclaims no longer referenced space in front of the buffer.
+        // To avoid the buffer growing indefinitely, we must ensure that byte slices contained
+        // in messages returned from this function are not kept around longer than needed.
+        self.buf.reserve(size);
+
+        loop {
+            if self.buf.len() >= 2 + size {
+                return Ok(M::try_read_from(&mut self.buf)?);
+            }
+
+            let bytes_read = self.stream.read_buf(&mut self.buf).await?;
+            if 0 == bytes_read {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+        }
     }
 }
 
