@@ -24,20 +24,20 @@ members = ["daemon"]
 crypto_ring = ["ring", "base64", "once_cell"]
 
 [dependencies]
-tokio = { version = "1.13", features = ["io-util", "net", "sync", "time", "rt", "macros"] }
+tokio = { version = "1.37", features = ["io-util", "net", "sync", "time", "rt", "macros"] }
 tokio-stream = "0.1"
 ring = { version = "0.16.15", features = ["std"], optional = true }
 openssl = { version = "0.10" }
 anyhow = "1.0"
 thiserror = "1.0"
-base64 = { version = "0.13", optional = true }
-once_cell = { version = "1.5.2", optional = true }
-bytes = "1.1"
+base64 = { version = "0.22", optional = true }
+once_cell = { version = "1.19.0", optional = true }
+bytes = "1.6"
 log = "0.4"
 
 [dev-dependencies]
-tokio = { version = "1.13", features = ["full"] }
-pretty_env_logger = "0.4"
+tokio = { version = "1.37", features = ["full"] }
+pretty_env_logger = "0.5"
 
 [patch.crates-io]
 ring = { git = "https://github.com/voidc/ring", branch = "open-no-tag" }
